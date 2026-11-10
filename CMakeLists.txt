@@ -189,11 +189,12 @@ install(
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch models DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/perception_viewer.py scripts/action_runner.py scripts/wrist_perception.py
-                 scripts/wrist_cup_init.py
+                 scripts/wrist_cup_init.py scripts/wrist_table_init.py
         DESTINATION lib/${PROJECT_NAME}
 )
 
-install(FILES scripts/wrist_cup_geometry.py DESTINATION lib/${PROJECT_NAME})
+install(FILES scripts/wrist_cup_geometry.py scripts/table_geometry.py
+        DESTINATION lib/${PROJECT_NAME})
 install(
   DIRECTORY scripts/demo_perception
   DESTINATION lib/${PROJECT_NAME}
