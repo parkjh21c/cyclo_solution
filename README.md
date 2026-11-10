@@ -24,6 +24,20 @@ ros2 run demo_1f action_runner.py
 
 시작만으로는 움직이지 않습니다. 브링업·카메라는 기존 노드를 사용합니다.
 
+`docker/container.sh`로 만든 데모 컨테이너는 소스가 이미지에 복사되어 있고(`config`만 마운트),
+이미지가 `--symlink-install` 없이 빌드되어 있어 `build_workspace.sh`가 `ffw_vision_msgs`에서 실패합니다
+(`existing path cannot be removed`). 호스트에서 바꾼 파일을 `docker cp`로 넣고 같은 방식으로 빌드합니다.
+
+```bash
+# 데모 컨테이너 안: 바뀐 패키지만 (예: demo_1f)
+cd /root/ros2_ws && source /root/ros2_ws/install/setup.bash
+colcon build --base-paths /root/ros2_ws/src/demo_1f /root/ros2_ws/src/demo_1f/modules/dynamixel_pick/ffw_* \
+  --packages-select demo_1f --cmake-args -DBUILD_TESTING=OFF
+```
+
+설정 YAML만 바뀐 경우에는 설치본(`/root/ros2_ws/install/<패키지>/share/<패키지>/config/`)에 복사하고
+launch를 다시 시작하면 됩니다.
+
 # SG2 demo_1f
 
 ROS 2 Jazzy 데모. 핸드오버, 셀 놓기, 컵 파지 전 접근을 각각 실행합니다.
@@ -176,6 +190,35 @@ ros2 launch demo_1f perception.launch.py config:=/demo_config/perception.yaml
 같은 내용은 `/wrist_cup_init/status`, `/wrist_cup_init/image` 토픽으로도 발행합니다.
 탁자 높이가 바뀌면 `table_z:=` launch 인자로 지정합니다.
 
+### 초기 자세 책상 충돌 박스
+
+`perception_test.launch.py`(전체 데모 포함)가 `wrist_table_init.py`도 함께 시작합니다.
+양팔이 초기 자세(관절 0.03rad 이내)에 도착하면 양손 손목 depth로 책상 앞 가장자리를 재고,
+MoveIt PlanningScene에 고정 박스 `demo_table`을 한 번 등록합니다. 이후에는 다시 재지 않습니다.
+핸드오버, 컵 접근·보정, 셀 집기의 계획과 경로 검사가 모두 이 박스를 충돌물로 사용합니다.
+
+1. 양손 depth 각 5프레임을 촬영 시점 TF로 `base_link`에 변환합니다.
+2. z 0.69~0.78m에서 점이 가장 많은 높이를 카메라별 책상 높이로 잡습니다.
+3. y를 2cm 칸으로 나누고, 칸마다 책상 높이의 점이 몰리기 시작하는 x를 5mm 조각 단위로 구합니다.
+   그 바로 앞에 책상보다 3cm 이상 낮은 점(책상 앞면·바닥)이 보이는 칸만 가장자리로 인정합니다.
+4. 칸들에 직선을 맞춰 가장자리 x와 yaw를 구합니다. 직선보다 먼 쪽의 칸(시야 잘림·가림)은 허용하고,
+   로봇 쪽 칸은 10%까지만 허용합니다. 직선 위 칸 8개 이상, 폭 0.3m 이상이어야 합니다.
+5. 가장자리에서 5mm 로봇 쪽으로 당긴 0.8 × 1.2 × 0.04m 박스를 yaw만큼 돌려 등록합니다.
+
+| 항목 | 값 |
+|---|---|
+| 박스 윗면 | `table_z`(줄자 0.720m) − `top_margin`(0.008m) = 0.712m. 높이는 재지 않습니다 |
+| 측정값 | 앞 가장자리 x, yaw (로봇 위치가 달라져도 맞춤) |
+| 2026-11-10 측정 | x 0.257~0.258m, yaw +0.7~0.8°, 손목 책상 높이 왼손 +6mm · 오른손 +12mm |
+
+- 결과는 `/wrist_table_init/status`(latched)와 로그에 `TABLE_FIXED: ...` 또는 `TABLE_FAILED: 이유`로 남습니다.
+- 실패하면 박스를 등록하지 않고 초기 자세에 있는 동안 다시 시도합니다. 데모는 박스 없이 진행됩니다.
+- 로봇을 옮겼으면 `ros2 service call /wrist_table_init/remeasure std_srvs/srv/Trigger`로 다시 잽니다.
+- move_group을 다시 시작하면 박스가 사라지며, 데모를 다시 켜면 초기 자세에서 다시 등록됩니다.
+  데모 시작 직후의 첫 초기 자세 이동에는 박스가 없습니다.
+- 측정 점 저장(디버깅): `-p dump_path:=/tmp/table.npz`.
+- 컵 쪽 `demo_pick_table`(컵 바닥 기준)과 셀 집기의 `basket_table`(바구니 바닥 기준)은 그대로 함께 쓰입니다.
+
 ### 메뉴 실행기
 
 서버는 별도 터미널에서 `ros2 launch demo_1f full_demo.launch.py use_sim_time:=false`로 실행합니다.
@@ -269,7 +312,8 @@ roll·pitch 제한은 도착 목표에만 적용합니다. 시작 자세가 범�
 책상이 로봇 기준 수평이라는 가정이며, 검출된 책상 평면을 기준으로 삼는 것은 아닙니다.
 
 MoveIt은 URDF와 등록된 충돌물을 검사합니다. 잡힌 셀의 형상을 새로 추정·부착하지 않으며,
-기존 부착물과 외부 장애물은 유지합니다. 책상·다른 장애물은 필요 시 PlanningScene에 등록해야 합니다.
+기존 부착물과 외부 장애물은 유지합니다. 책상은 `wrist_table_init.py`가 초기 자세에서 `demo_table`로
+등록합니다([초기 자세 책상 충돌 박스](#초기-자세-책상-충돌-박스)). 다른 장애물은 필요 시 PlanningScene에 등록해야 합니다.
 RobotContext의 `HeadCupTracker`가 액션 실행 여부와 관계없이 헤드 BODY 관측을 계속 저장합니다.
 촬영 시점 TF로 planning frame(`base_link`)에 변환된 유효 관측 3개의 평균 위치와 불확실성을
 확정합니다. 관측 사이 간격은 1초 미만, 위치 변화는 2cm 미만이어야 합니다. 갑작스러운
@@ -317,6 +361,9 @@ scripts/
   action_runner.py           사람이 입력하는 액션 실행기
   wrist_perception.py        손목 depth 구독·TF·RIM 관측 발행
   wrist_cup_geometry.py      ROS와 독립적인 후보/입구 계산
+  wrist_cup_init.py          초기 자세 왼손 depth 컵 위치
+  wrist_table_init.py        초기 자세 양손 depth 책상 가장자리 → demo_table 충돌 박스
+  table_geometry.py          ROS와 독립적인 책상 높이·가장자리 계산
   perception_viewer.py       뷰어 ROS 노드와 영상 상태
   demo_perception/           숫자 depth 처리, HTTP API, 웹 화면
 config/                      동작·인식 설정
@@ -398,6 +445,9 @@ bash scripts/lint.sh
 
 # 실제 로봇과 통신하지 않는 --network none 테스트 컨테이너
 bash test/run_isolated.sh /home/gyu/ws/ai_worker
+
+# ROS 없이 실행되는 책상 가장자리 계산 테스트 (호스트에서도 가능)
+python3 test/test_table_geometry.py
 ```
 
 테스트는 핸드오버 양방향, 시작 시 무동작, 취소·피드백 검증, BODY+지연 TF 접근,
@@ -481,7 +531,7 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
   `6`은 그리퍼나 초기 자세 이동을 실행하지 않습니다. `d` 전체 데모는 놓기 후
   `WITHDRAW_CUP` → `RETURN_INITIAL` 순서로 손 빼기와 양팔·리프트·헤드 복귀를 실행합니다.
   한 손이 실패·취소되면 나머지 손이나 초기 자세 복귀를 시작하지 않습니다.
-  컵 쪽 책상 전체 충돌 모델은 이 변경에서 추가하지 않았습니다.
+  책상 전체 충돌 모델은 `wrist_table_init.py`의 `demo_table`이 담당합니다.
   보정 액션 완료는 하강·그리퍼 열기 완료이며 실제 셀의 컵 안 착지는 확인하지 않습니다.
 
 웹의 **왼손 입구 중심 추정**에서 사용한 점(파랑), 추정 원/중심(자홍), 상태를 확인합니다.
@@ -578,7 +628,9 @@ CPU 사용량이 늘 수 있습니다. 1로 설정하면 단일 탐색으로 돌
 `dynamixel_pick.launch.py`는 `dynamixel_basket_hybrid.yaml`을 사용합니다.
 분할 모델(`dynamixel_seg_n640.pt`)과 회전 박스 모델(`dynamixel_obb_n640.pt`)을 함께 사용해
 OBB 중심과 분할 경계의 방향을 조합하고, 측정 높이에 맞는 셀 면 크기를 파지 계획에 전달합니다.
-OBB 중심용 `camera_x_bias`는 업데이트된 보정값 `+0.008 m`입니다.
+보정값은 `ffw_grasp/config/robot_calibration.yaml`에 있습니다. 2026-11-10 기준
+`camera_z_bias` 0.012 m(손가락이 바구니 바닥에 닿던 0.016에서 변경, 오른손 손목 책상 높이 0.732 vs 줄자 0.720),
+`camera_x_bias` 0.0 m(이전 +0.008), `arm_z_bias` 0.005 m입니다.
 
 일반 파지 후보를 먼저 검사하고, 실패하면 좁은 그리퍼 벌림·기울임 후보를 검사합니다.
 충돌 없는 경로가 없는 셀은 이번 요청에서 제외하고 다른 셀을 시도합니다.
