@@ -13,6 +13,7 @@ struct CupState {
 
 struct HeadCupTrackConfig {
   double inner_radius{.045}, wall_thickness{.005}, max_position_error{.15};
+  std::string source{"head"}; // BODY source saved for FIND_CUP.
 };
 
 // Receives BODY samples already transformed into the stationary planning frame.

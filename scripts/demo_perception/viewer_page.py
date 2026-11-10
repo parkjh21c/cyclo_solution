@@ -9,7 +9,11 @@ img{max-width:100%;border:1px solid #526071}pre{white-space:pre-wrap}
 article{min-width:0}article img{width:100%;object-fit:contain}h2{font-size:19px}small{color:#a9bacb}</style>
 <h1>컵 인식 테스트</h1><p class="note">영상·인식 결과만 표시합니다. 로봇 동작 명령은 없습니다.</p>
 <pre id="status">연결 중…</pre>
-<div class="grid"><article><h2>헤드 컵 인식 RGB</h2><img id="image" alt="RGB 입력을 기다립니다"></article>
+<div class="grid"><article><h2>초기 자세 왼손 컵 위치 (FIND_CUP 입력)</h2><small id="init_info">대기 중</small>
+<img id="init" alt="초기 자세 컵 위치 대기"><p class="note">왼팔이 초기 자세일 때만 계산 · 초록/빨강 윤곽: 탁자 위 컵 높이 영역 ·
+파랑 점: 입구 띠 · 자홍 원/십자: 입구 중심. VALID_INIT 값을 <code>cup_source: wrist_left_init</code>일 때 컵 접근에 사용합니다.</p></article>
+<article><h2>헤드 컵 인식 RGB</h2><img id="image" alt="RGB 입력을 기다립니다">
+<p class="note"><code>cup_source: head</code>일 때만 컵 접근에 사용합니다.</p></article>
 <article><h2>헤드 depth</h2><small id="depth_head_info">대기 중</small><img id="depth_head" alt="헤드 depth 입력 대기"></article>
 <article><h2>왼손 depth</h2><small id="depth_left_info">대기 중</small><img id="depth_left" alt="왼손 depth 입력 대기"></article>
 <article><h2>왼손 depth — 거리 필터</h2>
@@ -50,6 +54,9 @@ async function update(){try{
      d.has_image?(d.encoding+' · 수신 '+age+(d.age>2?' ⚠ 오래됨':'')):'수신 대기 · '+d.topic;
    if(d.has_image) document.getElementById('depth_'+name).src='/depth/'+name+'.jpg?t='+Date.now();
  }
+ const ini=s.init;
+ document.getElementById('init_info').textContent=ini.detail+(ini.age!==null && ini.age>2?' ⚠ 오래됨':'');
+ if(ini.has_image) document.getElementById('init').src='/depth/left_init.jpg?t='+Date.now();
  const rim=s.rim;
  document.getElementById('rim_info').textContent=rim.detail+(rim.age!==null && rim.age>2?' ⚠ 오래됨':'');
  if(rim.has_image) document.getElementById('rim').src='/depth/left_rim.jpg?t='+Date.now();

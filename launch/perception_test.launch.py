@@ -81,6 +81,19 @@ def nodes(context):
         ),
         Node(
             package="demo_1f",
+            executable="wrist_cup_init.py",
+            name="wrist_cup_init",
+            output="screen",
+            parameters=[
+                {
+                    "use_sim_time": parameters["use_sim_time"],
+                    "inner_radius": float(arg("inner_radius")),
+                    "table_z": float(arg("table_z")),
+                }
+            ],
+        ),
+        Node(
+            package="demo_1f",
             executable="perception_node",
             name=f"perception_test_{source}",
             output="screen",
@@ -121,6 +134,7 @@ def generate_launch_description():
         "info_topic": "",
         "roi": "[0,0,0,0]",
         "inner_radius": "0.045",
+        "table_z": "0.725",
         "left_exclude_rect": "[0.0, 0.32, 0.23, 0.72]",
         "host": "127.0.0.1",
         "port": "",

@@ -8,7 +8,12 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from wrist_cup_geometry import fit_upright_rim, fit_rim_candidates, rotation_matrix
+from wrist_cup_geometry import (
+    fit_rim_candidates,
+    fit_upright_rim,
+    rotation_matrix,
+    table_cup_rim,
+)
 
 
 class RimTest(unittest.TestCase):
@@ -120,6 +125,53 @@ class RimTest(unittest.TestCase):
         points = self.points()
         points[:, 2] += (points[:, 0] - 0.6) * 2
         self.assertIsNone(fit_upright_rim(points)[0])
+
+
+class TableCupTest(unittest.TestCase):
+    """Synthetic straight-down wrist view: table 0.725 m, rim annulus 0.890 m."""
+
+    K = (240.0, 240.0, 240.0, 135.0)
+    ROTATION = np.diag([1.0, -1.0, -1.0])
+    ORIGIN = np.array([0.5, 0.2, 1.2])
+
+    def render(self, cups):
+        v, u = np.mgrid[0:270, 0:480].astype(float)
+        fx, fy, cx, cy = self.K
+        depth = np.full(u.shape, self.ORIGIN[2] - 0.725)
+        for x, y in cups:
+            rim = self.ORIGIN[2] - 0.89
+            r_rim = np.hypot(self.ORIGIN[0] + (u - cx) * rim / fx - x,
+                             self.ORIGIN[1] - (v - cy) * rim / fy - y)
+            floor = self.ORIGIN[2] - 0.735
+            r_floor = np.hypot(self.ORIGIN[0] + (u - cx) * floor / fx - x,
+                               self.ORIGIN[1] - (v - cy) * floor / fy - y)
+            depth[r_floor < 0.04] = floor
+            depth[(r_rim >= 0.04) & (r_rim <= 0.05)] = rim
+        return depth
+
+    def fit(self, cups, workspace=(0.25, 0.9, -0.1, 0.6)):
+        depth = self.render(cups)
+        return table_cup_rim(depth, depth > 0, self.K, self.ROTATION, self.ORIGIN,
+                             0.725, 0.165, workspace)
+
+    def test_rim_center_and_height(self):
+        fit, reason, _ = self.fit([(0.52, 0.21)])
+        self.assertIsNotNone(fit, reason)
+        np.testing.assert_allclose(fit["center"], [0.52, 0.21, 0.89], atol=0.003)
+        self.assertGreaterEqual(fit["coverage_deg"], 350)
+
+    def test_two_cups_are_ambiguous(self):
+        fit, reason, _ = self.fit([(0.45, 0.15), (0.6, 0.3)])
+        self.assertIsNone(fit)
+        self.assertTrue(reason.startswith("AMBIGUOUS"), reason)
+
+    def test_cup_outside_workspace_is_ignored(self):
+        fit, reason, _ = self.fit([(0.52, 0.21)], workspace=(0.25, 0.9, 0.3, 0.6))
+        self.assertIsNone(fit)
+        self.assertTrue(reason.startswith("NO_CANDIDATE"), reason)
+
+    def test_empty_table(self):
+        self.assertIsNone(self.fit([])[0])
 
 
 if __name__ == "__main__":

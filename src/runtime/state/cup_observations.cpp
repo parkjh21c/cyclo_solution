@@ -8,7 +8,7 @@ void RobotContext::queue_cup(msg::CupObservation::ConstSharedPtr input) {
   const double age = (node_.now() - stamp).seconds();
   if (input->cup_id.empty() ||
       (input->source != "head" && input->source != "wrist_left" &&
-          input->source != "wrist_right") ||
+          input->source != "wrist_right" && input->source != "wrist_left_init") ||
       input->header.frame_id.empty() || stamp.nanoseconds() <= 0 || age < -.1 ||
       age > config_.state_max_age) {
     observe_cup(*input); // Preserve the validation diagnostics, without queuing bad timestamps.
@@ -134,7 +134,8 @@ std::optional<CupState> RobotContext::tracked_head_cup(
 
 bool RobotContext::observe_cup(const msg::CupObservation & input, TimePoint received) {
   if (input.cup_id.empty() ||
-      (input.source != "head" && input.source != "wrist_left" && input.source != "wrist_right")) {
+      (input.source != "head" && input.source != "wrist_left" && input.source != "wrist_right" &&
+          input.source != "wrist_left_init")) {
     return false;
   }
   auto stamp = rclcpp::Time(input.header.stamp);
@@ -165,7 +166,8 @@ bool RobotContext::observe_cup(const msg::CupObservation & input, TimePoint rece
       return true;
     }
   }
-  if ((input.source == "head" && input.observation_type != msg::CupObservation::BODY) ||
+  if (((input.source == "head" || input.source == "wrist_left_init") &&
+          input.observation_type != msg::CupObservation::BODY) ||
       ((input.source == "wrist_left" || input.source == "wrist_right") &&
           input.observation_type != 2)) {
     RCLCPP_WARN_THROTTLE(node_.get_logger(),

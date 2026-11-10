@@ -37,7 +37,10 @@ int main(int argc, char ** argv) {
     }
     const auto approach_config = demo_1f::load_approach_config(*node);
     demo_1f::RobotContext robot_context(*node, config,
-        {approach_config.inner_radius, approach_config.wall_thickness, approach_config.max_position_error});
+        {approach_config.inner_radius,
+            approach_config.wall_thickness,
+            approach_config.max_position_error,
+            approach_config.cup_source});
     demo_1f::TrajectoryExecutor trajectory_executor(*node, config, robot_context);
     demo_1f::HandoverMotion handover_motion(config, robot_context, trajectory_executor);
     demo_1f::InitialPoseMotion initial_motion(config, robot_context, trajectory_executor);

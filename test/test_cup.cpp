@@ -55,6 +55,45 @@ TEST(ApproachGeometry, RejectsInvalidConfiguration) {
   }
 }
 
+TEST(ApproachGeometry, AcceptsOnlyKnownCupSources) {
+  ApproachConfig config;
+  for (const std::string source : {"head", "wrist_left_init"}) {
+    config.cup_source = source;
+    EXPECT_TRUE(config.validate("left").empty()) << source;
+  }
+  config.cup_source = "wrist_left";
+  EXPECT_FALSE(config.validate("left").empty());
+}
+
+TEST(HeadCupTracking, SavesOnlyConfiguredSource) {
+  HeadCupTracker tracker({.08, .005, .15, "wrist_left_init"});
+  CupState sample;
+  auto & o = sample.observation;
+  o.observation_type = msg::CupObservation::BODY;
+  o.header.frame_id = "base_link";
+  o.cup_id = "cup";
+  o.valid = true;
+  o.body_position.x = .5;
+  o.inner_radius = .08;
+  o.position_error = .09;
+  o.confidence = 1;
+  const auto start = Clock::now();
+  int frame = 0;
+  auto observe = [&](const std::string & source) {
+    for (int i = 0; i < 3; ++i, ++frame) {
+      o.source = source;
+      o.header.stamp = rclcpp::Time(1'000'000'000LL + frame * 200'000'000LL);
+      sample.received = start + std::chrono::milliseconds(200 * frame);
+      tracker.observe(sample);
+    }
+  };
+  observe("head");
+  EXPECT_FALSE(tracker.last_known("cup"));
+  observe("wrist_left_init");
+  ASSERT_TRUE(tracker.last_known("cup"));
+  EXPECT_NEAR(tracker.last_known("cup")->observation.body_position.x, .5, 1e-12);
+}
+
 TEST(ApproachGeometry, LowersTargetWithoutMovingCupCollisionGeometry) {
   ApproachConfig config;
   config.offset_z = -.05;

@@ -13,6 +13,7 @@ struct ApproachConfig {
   bool tcp_yaw_inward_only{true};
   std::vector<double> offset_xy{0, 0};
   double offset_z{0}; // TCP target offset in planning frame; does not change cup geometry.
+  std::string cup_source{"head"}; // head (YOLO BODY) or wrist_left_init (initial-pose rim).
   double refine_pitch_step_deg{5.0}, refine_max_correction{.12};
   double refine_view_wait{1.0}; // Fresh images without stability progress before changing view.
   double refine_speed{.06}, refine_clearance{.05}, refine_wait{3.0};

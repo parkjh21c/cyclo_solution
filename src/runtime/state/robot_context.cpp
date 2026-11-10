@@ -20,8 +20,10 @@ RobotContext::RobotContext(rclcpp::Node & node, const Config & config, HeadCupTr
       });
   wrist_subscription_ = node.create_subscription<msg::CupObservation>(
       "/perception/wrist_cup", rclcpp::QoS(5), [this](msg::CupObservation::ConstSharedPtr message) {
-        if ((message->source == "wrist_left" || message->source == "wrist_right") &&
-            message->observation_type == 2) {
+        if (((message->source == "wrist_left" || message->source == "wrist_right") &&
+                message->observation_type == 2) ||
+            (message->source == "wrist_left_init" &&
+                message->observation_type == msg::CupObservation::BODY)) {
           queue_cup(message);
         }
       });

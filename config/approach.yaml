@@ -1,6 +1,8 @@
 handover_demo:
   ros__parameters:
     approach:
+      # Saved BODY for FIND_CUP: head (YOLO) or wrist_left_init (left wrist rim at initial pose).
+      cup_source: wrist_left_init
       # BODY Z is assumed at cup middle for this test; it is not a measured opening.
       # Cup model top = BODY Z + height/2. TCP target = BODY Z + height + offset_z.
       cup_height: 0.165

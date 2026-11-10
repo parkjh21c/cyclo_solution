@@ -30,7 +30,8 @@ ROS 2 Jazzy 데모. 핸드오버, 셀 놓기, 컵 파지 전 접근을 각각 �
 
 - `/handover`: 왼손→오른손 또는 오른손→왼손의 고정 핸드오버.
 - 헤드 RGB-D 카메라: YOLOv8n-seg 컵 몸체 검출 + depth로 표면 XYZ 계산.
-- `/approach_cup`: 헤드캠으로 검출한 컵 근처까지 TCP 이동.
+- 왼손 손목 depth: 초기 자세에서 컵 입구 위치를 저장. 현재 컵 접근의 기본 입력.
+- `/approach_cup`: 저장된 컵 위치(`cup_source`: 손목 또는 헤드캠) 근처까지 TCP 이동.
 - `/refine_cup`: 손목캠 입구 관측 → 보정·하강 이동 → 그리퍼 열기.
 - `/withdraw_cup`: 각 손의 현재 TCP에서 10cm 상승 → TCP 정면 반대로 8cm 후퇴; 그리퍼 유지.
 - `/pick_cup`: 빈 그리퍼를 열고 컵 몸통 파지 전 대기 위치까지 이동 후 정지.
@@ -152,6 +153,29 @@ ros2 launch demo_1f perception.launch.py config:=/demo_config/perception.yaml
 
 인식 노드를 중복 실행하지 마세요. 뷰어는 이미지·상태만 표시하며 로봇 명령을 보내지 않습니다.
 
+### 초기 자세 왼손 손목캠 컵 위치
+
+`perception_test.launch.py`(전체 데모 포함)가 `wrist_cup_init.py`를 함께 시작합니다.
+왼팔이 초기 자세(관절 0.03rad 이내)일 때만 왼손 depth로 컵 위치를 계산합니다.
+탁자 높이를 알고 컵이 서 있다는 가정입니다. 검은 몸통의 depth 누락에 영향받지 않도록 입구만 사용합니다.
+
+1. depth를 촬영 시점 TF로 `base_link`에 변환합니다.
+2. 탁자(`table_z` 0.725m) 위 2cm~컵 높이+5.5cm, 작업 영역 `[x0,x1,y0,y1]` 안의 점을 연결 영역으로 나눕니다.
+3. 크기·높이가 컵에 맞는 영역이 정확히 하나일 때 상단 1.5cm 띠에 원을 맞춥니다.
+4. 3개 프레임의 중심이 8mm 이내이면 `/perception/wrist_cup`에 `source=wrist_left_init`, BODY로 발행합니다.
+
+| 항목 | 값 |
+|---|---|
+| BODY XY / Z | 입구 중심 / 입구 Z − 컵 높이/2 (기존 접근 계산과 동일한 중간 높이) |
+| `position_error` | 0.06m (충돌 원기둥 반지름 0.11m) |
+| 시야 | 탁자 기준 대략 x 0.35~0.75m, y 0~0.45m (그리퍼 가림 제외) |
+
+`config/approach.yaml`의 `cup_source: wrist_left_init`이면 FIND_CUP이 이 저장값을 사용하고,
+`head`이면 기존 헤드 YOLO 값을 사용합니다. 왼팔이 핸드오버로 움직이면 관측을 멈추고 마지막 값을 `max_age` 동안 유지합니다.
+웹 뷰어(8765)의 **초기 자세 왼손 컵 위치** 패널에서 영역(윤곽)·입구 점(파랑)·원/중심(자홍)과 상태를 확인합니다.
+같은 내용은 `/wrist_cup_init/status`, `/wrist_cup_init/image` 토픽으로도 발행합니다.
+탁자 높이가 바뀌면 `table_z:=` launch 인자로 지정합니다.
+
 ### 메뉴 실행기
 
 서버는 별도 터미널에서 `ros2 launch demo_1f full_demo.launch.py use_sim_time:=false`로 실행합니다.
@@ -218,6 +242,7 @@ ros2 action send_goal /approach_cup demo_1f/action/ApproachCup \
 
 | 항목 | 동작 |
 |---|---|
+| 컵 위치 | `cup_source`: `wrist_left_init`(초기 자세 손목 입구) 또는 `head`(헤드 YOLO) |
 | 목표 XYZ | BODY X/Y + `offset_xy`, BODY Z + `cup_height` + `offset_z` (현재 0.165 − 0.05 = +0.115m) |
 | 컵 높이 | 0.165m; 목표 Z에 다른 여유·불확실성 높이를 추가하지 않음 |
 | 컵 충돌 모델 | BODY Z를 중간 높이로 가정, 모델 입구는 Z+8.25cm |

@@ -71,6 +71,11 @@ class Viewer(Node):
         self.rim = {"jpeg": None, "received": None, "detail": "손목 입구 추정 노드 대기"}
         self.create_subscription(Image, "/wrist_cup/image", self.rim_image, qos_profile_sensor_data)
         self.create_subscription(String, "/wrist_cup/status", self.rim_status, 1)
+        self.init = {"jpeg": None, "received": None, "detail": "초기 자세 컵 위치 노드 대기"}
+        self.create_subscription(
+            Image, "/wrist_cup_init/image", self.init_image, qos_profile_sensor_data
+        )
+        self.create_subscription(String, "/wrist_cup_init/status", self.init_status, 1)
         self.filtered_publisher = self.create_publisher(
             Image, "~/left/depth_filtered", qos_profile_sensor_data
         )
@@ -107,6 +112,17 @@ class Viewer(Node):
     def rim_status(self, message):
         with self.lock:
             self.rim["detail"] = message.data
+
+    def init_image(self, message):
+        frame = self.bridge.imgmsg_to_cv2(message, "bgr8")
+        ok, jpeg = cv2.imencode(".jpg", frame)
+        if ok:
+            with self.lock:
+                self.init.update(jpeg=jpeg.tobytes(), received=time.monotonic())
+
+    def init_status(self, message):
+        with self.lock:
+            self.init["detail"] = message.data
 
     def camera_info(self, message):
         with self.lock:
@@ -326,6 +342,11 @@ class Viewer(Node):
                     "has_image": self.rim["jpeg"] is not None,
                     "detail": self.rim["detail"],
                     "age": None if self.rim["received"] is None else now - self.rim["received"],
+                },
+                "init": {
+                    "has_image": self.init["jpeg"] is not None,
+                    "detail": self.init["detail"],
+                    "age": None if self.init["received"] is None else now - self.init["received"],
                 },
                 "candidate": {
                     **{k: v for k, v in self.candidate.items() if k not in ("jpeg", "received")},

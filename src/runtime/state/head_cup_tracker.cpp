@@ -12,7 +12,7 @@ double distance(const geometry_msgs::msg::Point & a, const geometry_msgs::msg::P
 
 void HeadCupTracker::observe(const CupState & sample) {
   const auto & input = sample.observation;
-  if (input.source != "head" || input.cup_id.empty()) return;
+  if (input.source != config_.source || input.cup_id.empty()) return;
   const int64_t stamp = rclcpp::Time(input.header.stamp).nanoseconds();
   auto & track = tracks_[input.cup_id];
   if (stamp <= track.last_stamp) return;

@@ -34,6 +34,9 @@ std::string ApproachConfig::validate(const std::string & arm) const {
       return "Approach dimensions, timing and limits must be positive and finite";
     }
   }
+  if (cup_source != "head" && cup_source != "wrist_left_init") {
+    return "Cup source must be head or wrist_left_init";
+  }
   if (cup_height > .5 || inner_radius > .3 || max_position_error > .2 || travel_scale > 1 ||
       offset_xy.size() != 2 ||
       !std::all_of(offset_xy.begin(),
@@ -112,6 +115,7 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("refine_view_wait", c.refine_view_wait);
   number("refine_search_timeout", c.refine_search_timeout);
   c.offset_xy = node.declare_parameter("approach.offset_xy", c.offset_xy, descriptor);
+  c.cup_source = node.declare_parameter("approach.cup_source", c.cup_source, descriptor);
   return c;
 }
 

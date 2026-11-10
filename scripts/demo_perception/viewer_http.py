@@ -21,6 +21,13 @@ def make_handler(viewer):
                     self.send_error(503, "Waiting for rim image")
                     return
                 mime = "image/jpeg"
+            elif path == "/depth/left_init.jpg":
+                with viewer.lock:
+                    content = viewer.init["jpeg"]
+                if content is None:
+                    self.send_error(503, "Waiting for initial-pose cup image")
+                    return
+                mime = "image/jpeg"
             elif path == "/depth/left_candidate.jpg":
                 with viewer.lock:
                     content = viewer.candidate["jpeg"]

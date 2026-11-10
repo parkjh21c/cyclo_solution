@@ -274,3 +274,61 @@ def fit_rim_candidates(meters, candidates, intrinsics, rotation, translation,
     detail = "; ".join(f"candidate {i + 1}: {reason.removeprefix('RIM_UNCERTAIN: ')}"
                        for i, (_, _, reason) in enumerate(evaluated))
     return None, None, "RIM_UNCERTAIN: " + (detail or "no candidates"), evaluated
+
+
+def table_cup_rim(meters, keep, intrinsics, rotation, translation, table_z, cup_height,
+                  workspace, inner_radius=0.045, wall=0.005, band=0.015, max_residual=0.02):
+    """Rim-band circle of one upright cup above a known-height table, in base_link."""
+    fx, fy, cx, cy = intrinsics
+    rows, cols = np.nonzero(keep)
+    z = meters[rows, cols]
+    camera = np.column_stack(((cols - cx) * z / fx, (rows - cy) * z / fy, z))
+    world = np.full(meters.shape + (3,), np.nan)
+    world[rows, cols] = camera @ rotation.T + translation
+    x0, x1, y0, y1 = workspace
+    with np.errstate(invalid="ignore"):
+        height = world[..., 2] - table_z
+        above = keep & (height > 0.02) & (height < cup_height + 0.055)
+        above &= (world[..., 0] > x0) & (world[..., 0] < x1)
+        above &= (world[..., 1] > y0) & (world[..., 1] < y1)
+    clean = cv2.morphologyEx(above.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(clean, 8)
+    diameter = 2 * (inner_radius + wall)
+    regions = []
+    for label in range(1, count):
+        if stats[label, cv2.CC_STAT_AREA] < 200:
+            continue
+        mask = labels == label
+        points = world[mask]
+        span = np.percentile(points[:, :2], 95, axis=0) - np.percentile(points[:, :2], 5, axis=0)
+        top = np.percentile(points[:, 2], 98) - table_z
+        if 0.5 * diameter <= span.max() <= 1.6 * diameter and top >= 0.8 * cup_height:
+            regions.append({"mask": mask, "points": points})
+    if not regions:
+        return None, "NO_CANDIDATE: no cup-height region above the table", regions
+    if len(regions) > 1:
+        return None, f"AMBIGUOUS: {len(regions)} cup-height regions", regions
+    points = regions[0]["points"]
+    rim = points[points[:, 2] > table_z + cup_height - band]
+    if len(rim) < 30:
+        return None, f"RIM_UNCERTAIN: {len(rim)} rim-band points", regions
+    # Algebraic circle fit on the horizontal rim band.
+    xy = rim[:, :2]
+    design = np.c_[2 * xy, np.ones(len(xy))]
+    solution, *_ = np.linalg.lstsq(design, (xy**2).sum(1), rcond=None)
+    center = solution[:2]
+    radius = float(np.sqrt(solution[2] + center @ center))
+    residual = float(np.sqrt(np.mean((np.linalg.norm(xy - center, axis=1) - radius) ** 2)))
+    angles = np.arctan2(xy[:, 1] - center[1], xy[:, 0] - center[0])
+    coverage = 10.0 * np.count_nonzero(np.histogram(angles, bins=36, range=(-np.pi, np.pi))[0])
+    if not 0.6 * inner_radius <= radius <= inner_radius + 2 * wall + 0.01 or residual > max_residual:
+        return None, f"RIM_UNCERTAIN: radius={radius:.3f}m residual={residual:.4f}m", regions
+    if coverage < 120:
+        return None, f"RIM_UNCERTAIN: arc={coverage:.0f}deg", regions
+    return {
+        "center": np.r_[center, np.median(rim[:, 2])],
+        "radius": radius,
+        "residual": residual,
+        "coverage_deg": coverage,
+        "points": rim,
+    }, "RIM_FIT", regions
