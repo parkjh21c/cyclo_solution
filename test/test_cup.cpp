@@ -1146,7 +1146,7 @@ TEST_F(ApproachFixture, InitialSamplesAreDistinctAndAveragedWithConservativeGeom
   EXPECT_TRUE(executor.steps.empty()); // Still awaiting scene acknowledgement.
 }
 
-TEST_F(ApproachFixture, InvalidInitialSampleResetsCollectionAndTimeoutSendsNothing) {
+TEST_F(ApproachFixture, InvalidSampleBetweenValidFramesDoesNotResetCollection) {
   ASSERT_TRUE(start());
   observe("head");
   motion->tick();
@@ -1156,6 +1156,18 @@ TEST_F(ApproachFixture, InvalidInitialSampleResetsCollectionAndTimeoutSendsNothi
     observe("head");
     motion->tick();
   }
+  EXPECT_EQ(scene.scenes.size(), 1u);
+  EXPECT_TRUE(executor.steps.empty()); // Scene acknowledgement still precedes motion.
+}
+
+TEST_F(ApproachFixture, ShiftedSampleResetsCollectionAndTimeoutSendsNothing) {
+  ASSERT_TRUE(start());
+  for (int i = 0; i < 2; ++i) {
+    observe("head");
+    motion->tick();
+  }
+  observe("head", .05);
+  motion->tick();
   EXPECT_TRUE(scene.scenes.empty());
   config.observation_timeout = .001;
   motion->tick();

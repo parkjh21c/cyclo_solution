@@ -16,7 +16,8 @@ struct HeadCupTrackConfig {
 };
 
 // Receives BODY samples already transformed into the stationary planning frame.
-// Failed observations clear only the candidate window, never the last confirmed location.
+// Failed observations are skipped; they change neither the candidate window nor the last
+// confirmed location. Valid samples must stay under 1 s apart and within 2 cm.
 class HeadCupTracker {
 public:
   explicit HeadCupTracker(HeadCupTrackConfig config = {}) : config_(config) {}

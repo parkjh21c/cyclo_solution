@@ -16,7 +16,7 @@ handover_demo:
       tcp_yaw_inward_only: true # Left -90..0 deg; right 0..90 deg, goal only.
       travel_scale: 0.3
       max_position_error: 0.15
-      max_age: 30.0 # Keep the last confirmed head BODY location through temporary occlusion.
+      max_age: 120.0 # Keep the last confirmed head BODY location through temporary occlusion.
       observation_timeout: 4.0 # Wait for the background tracker only when no usable saved cup exists.
       # Wrist refinement action, separate from coarse approach.
       refine_pitch_step_deg: 5.0

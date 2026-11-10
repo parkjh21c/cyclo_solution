@@ -25,10 +25,8 @@ void HeadCupTracker::observe(const CupState & sample) {
       input.position_error >= config_.inner_radius + config_.wall_thickness &&
       input.position_error <= config_.max_position_error && std::isfinite(input.inner_radius) &&
       std::abs(input.inner_radius - config_.inner_radius) <= .003;
-  if (!eligible) {
-    track.samples.clear();
-    return;
-  }
+  // Skip rejected frames; the 1 s gap and 2 cm checks below still bound the window.
+  if (!eligible) return;
   auto & samples = track.samples;
   if (!samples.empty()) {
     const auto & previous = samples.back();
