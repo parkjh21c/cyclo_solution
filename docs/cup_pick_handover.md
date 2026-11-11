@@ -1,7 +1,7 @@
-# 컵 잡기, 왼손 → 오른손 컵 핸드오버, 붓기
+# 컵 잡기, 컵 핸드오버(양방향), 붓기
 
 2026-11-10~11 작업 기록. 로봇에서 `1` → `6` → `7`, 그리고 셀 집기부터 `2` → `3` → `4` → `5` → `6` → `7` → `8`
-순서로 동작을 확인했습니다. 이후 반대 방향 핸드오버·내려놓기가 이어질 예정입니다(아래 "다음 단계").
+→ `9` 순서로 동작을 확인했습니다. 이후 내려놓기가 이어질 예정입니다(아래 "다음 단계").
 
 ## 전체 흐름
 
@@ -9,6 +9,7 @@
 6  /pick_cup        왼손이 컵을 옆에서 잡아 8 cm 들어 올림 (MoveIt 컵 모델을 왼손에 부착)
 7  /handover_cup    왼손 → 오른손 컵 넘김, 끝나면 오른손이 컵을 든 상태로 정지
 8  /pour_cup        오른손이 바구니 위에서 오른쪽 → 왼쪽으로 130° 기울였다가 넘김 자세로 복귀
+9  /handover_cup_back  오른손 → 왼손 컵 넘김, 왼손이 컵을 든 채 정지, 오른손은 초기 자세
 ```
 
 셀 핸드오버(`3`, `d`의 HANDOVER)는 마지막에 `giver_home`으로 오른팔을 초기 자세로 되돌립니다. 이후 바구니에 남은
@@ -31,6 +32,21 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
 `cup_ready_via`가 필요한 이유: 바구니가 장면에 있으면 초기 자세 → `cup_ready`의 관절 직선 경로에서 오른손
 손가락이 `basket_wall_y+`에 닿습니다(t 0.23). `ptp_path_check.py --via-search`로 j1을 먼저 옮기는 경유
 자세를 찾았습니다(j5, j6, j7만 먼저 옮겨도 통과했지만 팔이 벽 근처를 낮게 지나갑니다).
+
+## 오른손 → 왼손 컵 넘김 (`/handover_cup_back`)
+
+`CupHandoverMotion`을 주는 손 `right`로 하나 더 만들어 `cup_right_to_left` 세 시퀀스를 실행합니다. 정방향 넘김의
+자세·경로를 거꾸로 씁니다(새 IK 없음).
+
+| 시퀀스 | 단계 | 정방향 대응 |
+|---|---|---|
+| `cup_right_to_left` | `receiver_open`(왼손 열기 확인) | 시퀀스가 비면 안 되므로 둔 단계 |
+| (`CUP_CONTACT_SCENE`) | 왼손 손가락·손바닥과 컵의 접촉 허용 | 같음 |
+| `cup_right_to_left_grasp` | `cup_insert`(왼손 LIN, 0.38 −0.054 0.947) → `receiver_close`(0.8) | `cup_retreat`의 반대 |
+| (`CUP_DETACH`, `CUP_ATTACH`) | 컵 모델을 오른손에서 왼손으로 | 같음 |
+| `cup_right_to_left_release` | `giver_release` → `cup_retreat`(오른손 LIN 20 cm 뒤) → `giver_via` → `giver_home` | `cup_insert`, `cup_ready_via`의 반대 |
+
+로봇에서 `6` → `7` → `8` → `9`가 첫 시도에 통과했습니다(빈 컵).
 
 ## 붓기 (`/pour_cup`, `CupPourMotion`)
 
@@ -156,5 +172,5 @@ docker cp config/handover.yaml docker-demo_1f-1:/root/ros2_ws/install/demo_1f/sh
 
 ## 다음 단계
 
-오른손 → 왼손 반대 방향 넘김, 원래 책상 위치에 내려놓기, 전체 데모 연결(`PICK_CUP` 다음에 이어 붙임).
+원래 책상 위치에 내려놓기, 전체 데모 연결(`PICK_CUP` 다음에 이어 붙임).
 그 뒤 위 문제들을 다듬습니다.

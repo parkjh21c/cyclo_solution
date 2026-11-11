@@ -1819,6 +1819,54 @@ TEST_F(CupHandoverFixture, CancelDuringSceneSwapStillAttachesBeforeStopping) {
   EXPECT_EQ(executor.steps.size(), 3u); // The giver never opened.
 }
 
+TEST_F(CupHandoverFixture, RightGiverHandsTheCupBackToTheLeft) {
+  MotionSequence open, grasp, release;
+  open.steps = {taught("receiver_open", "gripper", "left", {0.})};
+  open.steps[0].duration = 1;
+  grasp.steps = {taught("cup_insert", "linear", "left", {.38, -.05, .95, 0, 0, 0, 1}),
+      taught("receiver_close", "gripper", "left", {.8})};
+  grasp.steps[1].duration = 1;
+  grasp.steps[1].gripper_wait_only = true;
+  release.steps = {taught("giver_release", "gripper", "right", {0.}),
+      taught("cup_retreat", "linear", "right", {.38, -.16, 1., 0, 0, 0, 1}),
+      taught("giver_home", "joint", "right", {.2})};
+  release.steps[0].duration = 1;
+  robot.motion_sequences["cup_right_to_left"] = open;
+  robot.motion_sequences["cup_right_to_left_grasp"] = grasp;
+  robot.motion_sequences["cup_right_to_left_release"] = release;
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  EXPECT_FALSE(back.start("left", "cup", reason, true)); // The right hand holds the cup.
+  ASSERT_TRUE(back.start("right", "cup", reason, true)) << reason;
+  size_t seen = 0;
+  for (int i = 0; i < 80 && back.running(); ++i) {
+    feedback();
+    complete();
+    back.tick();
+    while (seen < scene.scenes.size()) {
+      steps_at_scene.push_back(executor.steps.size());
+      ++seen;
+    }
+  }
+  ASSERT_TRUE(back.result().sequence_completed) << back.result().detail;
+  const std::vector<std::string> expected = {
+      "receiver_open", "cup_insert", "receiver_close", "giver_release", "cup_retreat", "giver_home"};
+  ASSERT_EQ(executor.steps.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(executor.steps[i].name, expected[i]);
+  }
+  ASSERT_EQ(scene.scenes.size(), 3u);
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{1, 3, 3}));
+  const auto & contact = scene.scenes[0].allowed_collision_matrix;
+  for (size_t i = 1; i < contact.entry_names.size(); ++i) {
+    EXPECT_EQ(contact.entry_names[i].rfind("gripper_l_rh_p12_rn_", 0), 0u);
+  }
+  EXPECT_EQ(scene.scenes[1].robot_state.attached_collision_objects[0].link_name,
+      robot.arms.at("right").tcp);
+  EXPECT_EQ(scene.scenes[2].robot_state.attached_collision_objects[0].link_name,
+      robot.arms.at("left").tcp);
+}
+
 class CupPourFixture : public ApproachFixture {
 protected:
   void SetUp() override {

@@ -28,6 +28,7 @@ MENU = """
   6  왼손 컵 잡기 (옆에서 삽입 → 닫기 → 들어 올린 채 정지)
   7  컵 핸드오버 왼손 → 오른손 (6번 직후, 오른손이 컵을 든 채 정지)
   8  오른손 컵 붓기 (7번 직후, 바구니 위에서 오른쪽→왼쪽으로 기울였다가 원위치)
+  9  컵 핸드오버 오른손 → 왼손 (8번 직후, 왼손이 컵을 든 채 정지, 오른손은 시작 자세)
 
   r  실패 단계 재개
   c  현재 작업 취소
@@ -44,7 +45,7 @@ def selection(command, cup_id):
     if command == "3":
         return "handover", Handover.Goal(direction="right_to_left")
     cup_commands = {"4": ("approach", "left"), "5": ("refine", "left"), "6": ("pick", "left"), "7": ("handover_cup", "left"),
-                    "8": ("pour_cup", "right")}
+                    "8": ("pour_cup", "right"), "9": ("handover_cup_back", "right")}
     if command in cup_commands:
         action, arm = cup_commands[command]
         return action, ApproachCup.Goal(arm=arm, cup_id=cup_id, execute=True)
@@ -62,6 +63,7 @@ class Runner(Node):
             "pick": ActionClient(self, ApproachCup, "/pick_cup"),
             "handover_cup": ActionClient(self, ApproachCup, "/handover_cup"),
             "pour_cup": ActionClient(self, ApproachCup, "/pour_cup"),
+            "handover_cup_back": ActionClient(self, ApproachCup, "/handover_cup_back"),
             "approach": ActionClient(self, ApproachCup, "/approach_cup"),
         }
         self.subscription = self.create_subscription(
@@ -157,7 +159,7 @@ class Runner(Node):
             )
         self.goal_handle = None
         self.cancel_sent = False
-        print("다음 명령을 입력하세요. (1~7 / d / r / c / p / q)")
+        print("다음 명령을 입력하세요. (1~9 / d / r / c / p / q)")
 
     def cancel(self):
         if not self.busy():

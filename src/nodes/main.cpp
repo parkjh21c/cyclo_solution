@@ -59,6 +59,8 @@ int main(int argc, char ** argv) {
         config, approach_config, pick_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::CupHandoverMotion cup_handover_motion(
         config, approach_config, robot_context, trajectory_executor, approach_scene, "left");
+    demo_1f::CupHandoverMotion cup_handover_back_motion(
+        config, approach_config, robot_context, trajectory_executor, approach_scene, "right");
     demo_1f::CupPourMotion cup_pour_motion(
         config, approach_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::TaskManager task_manager(*node,
@@ -69,7 +71,8 @@ int main(int argc, char ** argv) {
             {"/withdraw_cup", withdraw_motion},
             {"/pick_cup", pick_motion},
             {"/handover_cup", cup_handover_motion},
-            {"/pour_cup", cup_pour_motion}}, &initial_motion);
+            {"/pour_cup", cup_pour_motion},
+            {"/handover_cup_back", cup_handover_back_motion}}, &initial_motion);
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     RCLCPP_INFO(
