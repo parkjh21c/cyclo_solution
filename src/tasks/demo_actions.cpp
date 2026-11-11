@@ -2,7 +2,9 @@
 #include "demo_1f/tasks/demo_recovery.hpp"
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <stdexcept>
+#include <utility>
 
 namespace demo_1f {
 namespace {
@@ -64,7 +66,9 @@ void TaskManager::setup_demo_server() {
                 !pick_client_->action_server_is_ready()) ||
             (!initial_only && request->command != "pick" &&
                 (!demo_cup_module("/approach_cup") || !demo_cup_module("/refine_cup") ||
-                    !demo_cup_module("/pick_cup") ||
+                    !demo_cup_module("/pick_cup") || !demo_cup_module("/handover_cup") ||
+                    !demo_cup_module("/pour_cup") || !demo_cup_module("/handover_cup_back") ||
+                    !demo_cup_module("/place_cup") ||
                     (demo_withdraw_cup_ && !demo_cup_module("/withdraw_cup"))))) {
           RCLCPP_WARN(node_.get_logger(),
               "Rejected demo: %s", reason.empty() ?
@@ -178,11 +182,15 @@ void TaskManager::start_demo_stage() {
     }
     return;
   }
-  active_cup_motion_ = demo_cup_module(
-      demo_stage_ == "APPROACH_CUP" ? "/approach_cup" :
-      demo_stage_ == "REFINE_CUP" ? "/refine_cup" :
-      demo_stage_ == "PICK_CUP" ? "/pick_cup" : "/withdraw_cup");
-  const auto arm = demo_stage_ == "WITHDRAW_CUP" ? "both" : "left";
+  // Cup stage -> action and the hand that holds or takes the cup.
+  static const std::map<std::string, std::pair<std::string, std::string>> cup_stages = {
+      {"APPROACH_CUP", {"/approach_cup", "left"}}, {"REFINE_CUP", {"/refine_cup", "left"}},
+      {"WITHDRAW_CUP", {"/withdraw_cup", "both"}}, {"PICK_CUP", {"/pick_cup", "left"}},
+      {"HANDOVER_CUP", {"/handover_cup", "left"}}, {"POUR_CUP", {"/pour_cup", "right"}},
+      {"HANDOVER_CUP_BACK", {"/handover_cup_back", "right"}}, {"PLACE_CUP", {"/place_cup", "left"}}};
+  const auto stage = cup_stages.find(demo_stage_);
+  active_cup_motion_ = stage == cup_stages.end() ? nullptr : demo_cup_module(stage->second.first);
+  const auto arm = stage == cup_stages.end() ? std::string() : stage->second.second;
   if (!active_cup_motion_ || !active_cup_motion_->start(arm, demo_cup_id_, reason, true)) {
     finish_demo(false, "NOT_READY", reason.empty() ? "Cup module missing" : reason, true);
   }
@@ -314,10 +322,15 @@ void TaskManager::tick_demo() {
         else if (demo_stage_ == "REFINE_CUP")
           demo_stage_ = demo_withdraw_cup_ ? "WITHDRAW_CUP" : "PICK_CUP"; // Cup position is already saved.
         else if (demo_stage_ == "WITHDRAW_CUP") demo_stage_ = "PICK_CUP";
+        else if (demo_stage_ == "PICK_CUP") demo_stage_ = "HANDOVER_CUP";
+        else if (demo_stage_ == "HANDOVER_CUP") demo_stage_ = "POUR_CUP";
+        else if (demo_stage_ == "POUR_CUP") demo_stage_ = "HANDOVER_CUP_BACK";
+        else if (demo_stage_ == "HANDOVER_CUP_BACK") demo_stage_ = "PLACE_CUP";
+        else if (demo_stage_ == "PLACE_CUP") demo_stage_ = "RETURN_INITIAL";
         else {
-          finish_demo(true, "", "Pick, handover, cup release and cup pick completed; "
-                               "left hand holds the cup; transfer, landing and grasp are not "
-                               "sensor-verified");
+          finish_demo(true, "", "Pick, handover, cup release, cup pick, pour, cup handover back "
+                               "and place completed; both arms at the initial pose; transfers, "
+                               "pour and placement are not sensor-verified");
           return;
         }
         context_.set_phase(demo_stage_, demo_completed_stage_);

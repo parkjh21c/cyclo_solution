@@ -1,9 +1,14 @@
-## 전체 데모: 다이나믹셀 픽 → 핸드오버 → 컵에 놓기 → 컵 잡기
+## 전체 데모: 다이나믹셀 픽 → 핸드오버 → 컵에 놓기 → 컵 잡기 → 붓기 → 컵 제자리
 
 TaskManager가 전체 순서와 제한된 자동 재시도·취소·재개를 관리합니다.
-전체 실행 순서는 초기 자세 → 셀 픽 → 오른손에서 왼손으로 핸드오버 → 컵 접근 → 보정·놓기 → 왼손 컵 잡기입니다.
+전체 실행 순서는 초기 자세 → 셀 픽 → 오른손에서 왼손으로 핸드오버(끝에 오른팔 초기 자세) → 컵 접근 →
+보정·놓기 → 왼손 컵 잡기(`PICK_CUP`) → 컵 왼손→오른손(`HANDOVER_CUP`) → 바구니에 붓기(`POUR_CUP`) →
+컵 오른손→왼손(`HANDOVER_CUP_BACK`) → 컵을 집은 자리에 내려놓기(`PLACE_CUP`) → 양팔 초기 자세(`RETURN_INITIAL`)입니다.
 놓기 직후 초기 자세로 돌아가지 않고, 시작 때 저장한 손목 컵 위치로 바로 컵을 잡습니다.
-데모는 왼손이 컵을 든 채로 끝납니다. 다음 `d`/`1`의 초기 자세 단계는 그리퍼를 열기 전에
+컵 단계(`HANDOVER_CUP` 이후)는 자동 재시도하지 않습니다. 실패하면 그 자리에서 멈추고 재개(`r`)도 막힙니다.
+이어서 하려면 메뉴 `7`/`8`/`9`/`0`으로 남은 동작을 실행합니다. 붓기 목표는 바구니 위치에 맞춘 고정값입니다
+([docs/cup_pick_handover.md](docs/cup_pick_handover.md)).
+중간에 멈춘 뒤 `d`/`1`의 초기 자세 단계는 그리퍼를 열기 전에
 MoveIt에서 손에 붙은 컵 모델(`demo_place_cup`)을 떼고 삭제합니다(`RELEASE_CUP_MODEL`).
 책상 위에 장애물로 등록된 컵은 그대로 둡니다. 재시작 없이 다시 실행할 수 있습니다.
 놓기 뒤 손 빼기(`WITHDRAW_CUP`)는 기본으로 끕니다. `config/demo.yaml`의 `demo.withdraw_cup: true`로 켭니다.
@@ -605,7 +610,7 @@ python3 scripts/generate_cup_handover_targets.py CUP_X CUP_Y RIM_Z --output /tmp
 
 ## Cup pickup approach
 
-Cup pickup runs from runner menu `6` and as the last `/run_demo` stage (`PICK_CUP`, right after release).
+Cup pickup runs from runner menu `6` and as the `/run_demo` stage `PICK_CUP` (right after release; the cup routine follows).
 
 `/pick_cup` uses `demo_1f/action/ApproachCup` (`arm: left`,
 `cup_id: cup`, `execute: true`). Both arms are supported through the action API.
