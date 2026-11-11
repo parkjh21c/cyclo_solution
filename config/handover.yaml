@@ -136,6 +136,26 @@ handover_demo:
         - receiver_close
         - giver_release
         - retreat_together
+        - giver_home
+        # Right arm back to the initial pose (basket check later; cup handover targets assume it).
+        # OMPL like menu 1: the Pilz PTP line passes through basket_table.
+        giver_home:
+          type: joint
+          arm: giver
+          pipeline: ompl
+          planner: RRTConnectkConfigDefault
+          velocity_scale: 0.35
+          acceleration_scale: 0.35
+          tolerance: 0.01
+          timeout: 45.0
+          target:
+          - 1.05
+          - 0.0
+          - 0.0
+          - -2.27
+          - 0.0
+          - 0.35
+          - 0.0
         face_each_other:
           type: dual_joint
           blend_with_next: true
@@ -228,6 +248,7 @@ handover_demo:
       cup_left_to_right:
         steps:
         - cup_carry
+        - cup_ready_via
         - cup_ready
         cup_carry:
           type: joint
@@ -245,6 +266,23 @@ handover_demo:
           - 0.16935813
           - 0.132273
           - -1.16007363
+        # Initial pose with j1 at cup_ready: lifts the hand before it swings forward.
+        # The direct PTP line hits basket_wall_y+ (scripts/ptp_path_check.py --via-search).
+        cup_ready_via:
+          type: joint
+          arm: receiver
+          velocity_scale: 0.3
+          acceleration_scale: 0.3
+          tolerance: 0.05
+          timeout: 60.0
+          target:
+          - -0.15991552
+          - 0.0
+          - 0.0
+          - -2.27
+          - 0.0
+          - 0.35
+          - 0.0
         cup_ready:
           type: joint
           arm: receiver
@@ -318,6 +356,115 @@ handover_demo:
           - -0.430459
           - -0.560986
           - 0.560986
+      # Right-hand pour over the basket, right to left; see scripts/generate_cup_pour_targets.py.
+      # Solved at basket 0.412 -0.247 (yaw 90); hand turned -90 deg; tilt 130 deg;
+      # lip 5 cm right of the basket center (--shifts=-0.05).
+      cup_pour_right:
+        steps:
+        - pour_above
+        - pour_lower
+        - pour_tilt
+        - pour_hold
+        - pour_untilt
+        - pour_raise
+        - pour_return
+        pour_above:
+          type: joint
+          arm: right
+          velocity_scale: 0.2
+          acceleration_scale: 0.2
+          tolerance: 0.017453292519943295
+          planning_tolerance: 0.0005
+          timeout: 60.0
+          target:
+          - 0.5193633
+          - -0.14528022
+          - -0.10589089
+          - -1.8367891
+          - -0.1837066
+          - -0.23987178
+          - 0.06473312
+        pour_lower:
+          type: linear
+          arm: right
+          frame: base_link
+          velocity_scale: 0.08
+          acceleration_scale: 0.02
+          timeout: 60.0
+          target:
+          - 0.451994
+          - -0.303704
+          - 0.917349
+          - -1.0e-06
+          - -0.707109
+          - -9.0e-06
+          - 0.707105
+        pour_tilt:
+          type: linear
+          arm: right
+          frame: base_link
+          velocity_scale: 0.08
+          acceleration_scale: 0.02
+          timeout: 60.0
+          target:
+          - 0.451994
+          - -0.303704
+          - 0.917349
+          - -0.640855
+          - -0.298845
+          - 0.640854
+          - 0.298835
+        pour_hold:
+          type: wait
+          arm: right
+          duration: 2.0
+          timeout: 7.0
+        pour_untilt:
+          type: linear
+          arm: right
+          frame: base_link
+          velocity_scale: 0.08
+          acceleration_scale: 0.02
+          timeout: 60.0
+          target:
+          - 0.451994
+          - -0.303704
+          - 0.917349
+          - -1.0e-06
+          - -0.707109
+          - -9.0e-06
+          - 0.707105
+        pour_raise:
+          type: linear
+          arm: right
+          frame: base_link
+          velocity_scale: 0.08
+          acceleration_scale: 0.02
+          timeout: 60.0
+          target:
+          - 0.451994
+          - -0.303704
+          - 0.954766
+          - -1.0e-06
+          - -0.707109
+          - -9.0e-06
+          - 0.707105
+        pour_return:
+          type: joint
+          arm: right
+          velocity_scale: 0.2
+          acceleration_scale: 0.2
+          tolerance: 0.017453292519943295
+          planning_tolerance: 0.0005
+          timeout: 60.0
+          target:
+          - -0.1964574
+          - -0.4729095
+          - 0.54046457
+          - -1.49995757
+          - -0.50894606
+          - -0.12443221
+          - 1.12852214
     arms:
       left:
         tcp: gripper_l_tcp

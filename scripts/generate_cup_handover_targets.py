@@ -219,8 +219,12 @@ def main():
                "acceleration_scale": 0.015, "timeout": 30.0}
         insert = {**lin, "arm": "receiver", "target": pose_of(right_hold)}
         # Receiver contact is allowed only between the transfer and the grasp sequences.
+        # Right starts at the initial pose; j1 first lifts the hand over the basket wall.
+        right_via = [right_joints[0], 0.0, 0.0, -2.27, 0.0, 0.35, 0.0]
         sequential_steps = {
-            "steps": ["cup_carry", "cup_ready"],
+            "steps": ["cup_carry", "cup_ready_via", "cup_ready"],
+            "cup_ready_via": {"type": "joint", "arm": "receiver", **slow, "tolerance": 0.05,
+                              "timeout": 60.0, "target": right_via},
             "cup_carry": {"type": "joint", "arm": "giver", **slow, **precise,
                           "target": left_joints},
             "cup_ready": {"type": "joint", "arm": "receiver", **slow, **precise,

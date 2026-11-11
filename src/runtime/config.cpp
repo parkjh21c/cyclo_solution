@@ -301,7 +301,8 @@ Config load_config(rclcpp::Node & node) {
   }
   // cup_<giver>_to_<receiver> runs up to the receiver closing; *_release follows the scene swap.
   for (const std::string direction : {"left_to_right", "right_to_left", "initial_pose",
-           "cup_left_to_right", "cup_left_to_right_grasp", "cup_left_to_right_release"}) {
+           "cup_left_to_right", "cup_left_to_right_grasp", "cup_left_to_right_release",
+           "cup_pour_right"}) {
     MotionSequence sequence;
     sequence.direction = direction;
     const bool from_left = direction.find("left_to_right") != std::string::npos;

@@ -1,20 +1,25 @@
-# 컵 잡기와 왼손 → 오른손 컵 핸드오버
+# 컵 잡기, 왼손 → 오른손 컵 핸드오버, 붓기
 
-2026-11-10~11 작업 기록. 로봇에서 `1` → `6` → `7` 순서로 동작을 확인했습니다. 이후 붓기·반대 방향
-핸드오버·내려놓기가 이어질 예정입니다(아래 "다음 단계").
+2026-11-10~11 작업 기록. 로봇에서 `1` → `6` → `7`, 그리고 셀 집기부터 `2` → `3` → `4` → `5` → `6` → `7` → `8`
+순서로 동작을 확인했습니다. 이후 반대 방향 핸드오버·내려놓기가 이어질 예정입니다(아래 "다음 단계").
 
 ## 전체 흐름
 
 ```
 6  /pick_cup        왼손이 컵을 옆에서 잡아 8 cm 들어 올림 (MoveIt 컵 모델을 왼손에 부착)
 7  /handover_cup    왼손 → 오른손 컵 넘김, 끝나면 오른손이 컵을 든 상태로 정지
+8  /pour_cup        오른손이 바구니 위에서 오른쪽 → 왼쪽으로 130° 기울였다가 넘김 자세로 복귀
 ```
+
+셀 핸드오버(`3`, `d`의 HANDOVER)는 마지막에 `giver_home`으로 오른팔을 초기 자세로 되돌립니다. 이후 바구니에 남은
+셀을 확인하려면 초기 자세가 필요하고, 컵 넘김 목표도 오른팔이 초기 자세에 있다고 가정하고 풀었기 때문입니다.
+Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과 같은 OMPL을 씁니다.
 
 `/handover_cup`은 `handover.yaml`의 시퀀스 세 개를 `CupHandoverMotion`이 이어서 실행합니다.
 
 | 시퀀스 | 단계 | 플래너 |
 |---|---|---|
-| `cup_left_to_right` | `cup_carry`(왼손, 컵을 든 채 넘김 자세) → `cup_ready`(오른손, 잡는 위치 20 cm 뒤) | Pilz PTP(관절), 한 팔씩 |
+| `cup_left_to_right` | `cup_carry`(왼손, 컵을 든 채 넘김 자세) → `cup_ready_via`(오른손, 초기 자세에서 j1만 먼저) → `cup_ready`(오른손, 잡는 위치 20 cm 뒤) | Pilz PTP(관절), 한 팔씩 |
 | (`CUP_CONTACT_SCENE`) | 오른손 손가락·손바닥과 컵의 접촉 허용 | 장면 변경 |
 | `cup_left_to_right_grasp` | `cup_insert`(오른손 직선 접근) → `receiver_close` | Pilz LIN, 그리퍼 |
 | (`CUP_DETACH`, `CUP_ATTACH`) | MoveIt 컵을 왼손에서 떼어 오른손에 붙임 | 장면 변경 |
@@ -22,6 +27,32 @@
 
 접촉 허용을 삽입 직전에만 적용하는 이유: 허용을 시퀀스 시작 전에 걸었을 때 오른팔이 이동 중에 컵에
 부딪혀도 계획이 통과했습니다.
+
+`cup_ready_via`가 필요한 이유: 바구니가 장면에 있으면 초기 자세 → `cup_ready`의 관절 직선 경로에서 오른손
+손가락이 `basket_wall_y+`에 닿습니다(t 0.23). `ptp_path_check.py --via-search`로 j1을 먼저 옮기는 경유
+자세를 찾았습니다(j5, j6, j7만 먼저 옮겨도 통과했지만 팔이 벽 근처를 낮게 지나갑니다).
+
+## 붓기 (`/pour_cup`, `CupPourMotion`)
+
+`handover.yaml`의 `cup_pour_right` 시퀀스 하나를 실행합니다. 장면은 바꾸지 않습니다(컵은 오른손에 붙은 채).
+취소하면 그 자리에 멈추고 되돌리지 않습니다.
+
+| 단계 | 내용 | 플래너 |
+|---|---|---|
+| `pour_above` | 손을 컵 축 기준 −90° 돌려(앞쪽) 바구니 위로, 컵 바닥은 벽 위 3 cm | Pilz PTP(관절) |
+| `pour_lower` | 붓는 높이로 내림 | Pilz LIN |
+| `pour_tilt` | TCP 고정, +y(오른쪽 → 왼쪽)로 130° 회전 | Pilz LIN |
+| `pour_hold` | 2초 대기 | wait |
+| `pour_untilt`, `pour_raise` | 되돌리고 올림 | Pilz LIN |
+| `pour_return` | 넘김 자세(시작 관절값)로 복귀 | Pilz PTP(관절) |
+
+- 목표는 `scripts/generate_cup_pour_targets.py`로 만들었습니다. 오른손이 컵을 든 상태(`7` 이후)와 장면의
+  바구니를 읽고, 130°에서 컵 입구가 벽 위 5 cm, 바구니 중심에서 오른쪽 5 cm(`--shifts=-0.05`)에 오도록 TCP를
+  정합니다. 컵과 바구니·테이블·로봇의 충돌을 모두 보고, 관절 한계 0.05 rad 안의 해는 버립니다.
+- 손 방향을 그대로(+y) 두면 바구니 위로 IK가 없습니다. −90°의 첫 해는 관절 2가 한계(0)에 붙어서 한계 여유
+  점검을 넣었습니다. −75° 이하로 돌리면 기울일 때 컵 몸통이 오른쪽 벽(`basket_wall_x-`)에 닿습니다.
+- 로봇 결과: 60°에서는 내용물이 떨어지지 않았고, 130°(오른쪽 5 cm)에서 내용물이 모두 바구니에 떨어졌습니다.
+  컵이 흔들리거나 미끄러지지 않았습니다(빈 컵 → 가벼운 내용물).
 
 ## 사용한 값
 
@@ -60,6 +91,9 @@
 | `scripts/generate_cup_handover_targets.py` | 넘김 목표 관절값·자세를 IK로 풀어 YAML 출력. `--simultaneous`는 양팔 동시(시험 실패, 아래) |
 | `scripts/cup_layout_check.py` | 넘김 지점 후보의 도달·충돌 점검, 위 도구들의 공용 라이브러리 |
 | `scripts/right_ready_check.py` | `cup_carry` 직후 자세에서 오른손 대기 거리 후보별 경로 충돌 점검 |
+| `scripts/generate_cup_pour_targets.py` | 붓기 목표 생성. 손 방향·붓는 방향·위치 후보별 표와 `cup_pour_right` YAML 출력 |
+| `scripts/ptp_path_check.py` | YAML의 관절 단계를 지금 상태에서 PTP로 갈 때 시작·경로 충돌 점검, `--via-search`로 경유 자세 탐색 |
+| `scripts/basket_info.py` | 장면의 바구니·테이블 위치와 크기 출력 |
 
 모두 `full_demo`가 켜져 있어야 합니다(`/compute_ik`, `/check_state_validity`, `/get_planning_scene`).
 컨테이너 `/tmp`에 복사해서 실행하고, 같은 폴더의 `cup_layout_check.py`를 함께 복사해야 합니다.
@@ -72,6 +106,9 @@
   다른 위치에서 검증하지 않았습니다.
 - 오른손 대기 자세의 관절 7이 한계(1.5804)에 가깝습니다(1.519). 거리 25 cm는 한계에 걸렸고 30 cm 이상은 IK가 없습니다.
 - 리프트·초기 자세·넘김 지점을 바꾸면 목표를 다시 만들어야 합니다.
+
+- 붓기 목표는 바구니가 (0.412, −0.247), yaw 90°일 때 푼 고정값입니다. 측정마다 바구니가 2 cm 정도 달라졌고,
+  −90°에서 오른쪽 이동량 3~7 cm가 모두 통과해서 y로 ±2 cm 여유가 있습니다. 크게 옮기면 다시 만들어야 합니다.
 
 **충돌 모델**
 - 컵 충돌 모델이 실제 컵보다 굵습니다(반지름 0.05 대 약 0.043). 손바닥이 모델에 닿는 깊이가 약 2.7 cm라서
@@ -102,6 +139,8 @@
   (`Smoothed path is in collision; A / B`). 계획 단계의 MoveIt 실패(`-2`, `-31`, `99999`)는 원인이 코드만으로
   구분되지 않아서, 필요하면 위 도구로 재현해야 합니다.
 - 저장된 손목 컵 위치는 왼팔이 초기 자세를 떠난 뒤 120 s가 지나면 만료됩니다(`CUP_NOT_FOUND`).
+- `d`에서 셀 핸드오버 `open_approach`가 `Robot moved during planning: gripper_r_joint1`로 한 번 실패했습니다
+  (집은 직후 그리퍼가 아직 움직이는 중으로 보임). 바로 `3`을 실행하면 통과했습니다. 원인은 아직 보지 않았습니다.
 
 ## 시험 절차
 
@@ -110,10 +149,12 @@
 docker cp config/handover.yaml docker-demo_1f-1:/root/ros2_ws/src/demo_1f/config/handover.yaml
 docker cp config/handover.yaml docker-demo_1f-1:/root/ros2_ws/install/demo_1f/share/demo_1f/config/handover.yaml
 ```
-`full_demo` → 메뉴 `1`(초기 자세) → `6`(컵 잡기) → `7`(넘김). 단독 미리보기:
+`full_demo` → 메뉴 `1`(초기 자세) → `6`(컵 잡기) → `7`(넘김) → `8`(붓기, 바구니가 장면에 있어야 함:
+`2` 또는 `d`). 단독 미리보기:
 `ros2 action send_goal /handover_cup demo_1f/action/ApproachCup '{arm: left, cup_id: cup, execute: false}'`
+`ros2 action send_goal /pour_cup demo_1f/action/ApproachCup '{arm: right, cup_id: cup, execute: false}'`
 
 ## 다음 단계
 
-붓기(오른손, 바구니 위에서 오른쪽 → 왼쪽), 오른손 → 왼손 반대 방향 넘김, 원래 책상 위치에 내려놓기, 전체 데모 연결
-(`PICK_CUP` 다음에 이어 붙임). 그 뒤 위 문제들을 다듬습니다.
+오른손 → 왼손 반대 방향 넘김, 원래 책상 위치에 내려놓기, 전체 데모 연결(`PICK_CUP` 다음에 이어 붙임).
+그 뒤 위 문제들을 다듬습니다.

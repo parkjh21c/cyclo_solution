@@ -1,5 +1,6 @@
 #include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/motions/pick/pick_cup_motion.hpp"
+#include "demo_1f/motions/pour/cup_pour_motion.hpp"
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
 #include "demo_1f/motions/place/refine_cup_motion.hpp"
@@ -58,6 +59,8 @@ int main(int argc, char ** argv) {
         config, approach_config, pick_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::CupHandoverMotion cup_handover_motion(
         config, approach_config, robot_context, trajectory_executor, approach_scene, "left");
+    demo_1f::CupPourMotion cup_pour_motion(
+        config, approach_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::TaskManager task_manager(*node,
         robot_context,
         handover_motion,
@@ -65,7 +68,8 @@ int main(int argc, char ** argv) {
             {"/refine_cup", refine_motion},
             {"/withdraw_cup", withdraw_motion},
             {"/pick_cup", pick_motion},
-            {"/handover_cup", cup_handover_motion}}, &initial_motion);
+            {"/handover_cup", cup_handover_motion},
+            {"/pour_cup", cup_pour_motion}}, &initial_motion);
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     RCLCPP_INFO(

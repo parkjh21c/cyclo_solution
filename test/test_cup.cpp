@@ -3,6 +3,7 @@
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
 #include "demo_1f/motions/place/refine_cup_motion.hpp"
 #include "demo_1f/motions/place/withdraw_cup_motion.hpp"
+#include "demo_1f/motions/pour/cup_pour_motion.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include "demo_1f/runtime/geometry/tcp_roll.hpp"
 #include "demo_1f/tasks/task_manager.hpp"
@@ -1816,6 +1817,82 @@ TEST_F(CupHandoverFixture, CancelDuringSceneSwapStillAttachesBeforeStopping) {
   EXPECT_EQ(scene.scenes[2].robot_state.attached_collision_objects[0].link_name,
       robot.arms.at("right").tcp);
   EXPECT_EQ(executor.steps.size(), 3u); // The giver never opened.
+}
+
+class CupPourFixture : public ApproachFixture {
+protected:
+  void SetUp() override {
+    ApproachFixture::SetUp();
+    const std::vector<double> level = {.47, -.26, .92, 0, -.7071068, 0, .7071068};
+    const std::vector<double> tilted = {.47, -.26, .92, -.3535534, -.6123724, .3535534, .6123724};
+    MotionSequence pour;
+    pour.steps = {taught("pour_above", "joint", "right", {.1}),
+        taught("pour_tilt", "linear", "right", tilted), taught("pour_hold", "wait", "right", {}),
+        taught("pour_untilt", "linear", "right", level),
+        taught("pour_return", "joint", "right", {.2})};
+    pour.steps[2].duration = 1;
+    robot.motion_sequences["cup_pour_right"] = pour;
+  }
+
+  void run(CupPourMotion & pour, size_t failing_after = 99) {
+    for (int i = 0; i < 60 && pour.running(); ++i) {
+      feedback();
+      if (executor.steps.size() >= failing_after &&
+          executor.current.state == ExecutionState::Running) {
+        executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no path"};
+      } else {
+        complete();
+      }
+      pour.tick();
+    }
+  }
+};
+
+TEST_F(CupPourFixture, RunsTaughtStepsWithoutSceneChanges) {
+  CupPourMotion pour(robot, config, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
+  run(pour);
+  ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  EXPECT_EQ(context->snapshot().phase, "CUP_POUR_COMPLETE");
+  const std::vector<std::string> expected = {
+      "pour_above", "pour_tilt", "pour_hold", "pour_untilt", "pour_return"};
+  ASSERT_EQ(executor.steps.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(executor.steps[i].name, expected[i]);
+  }
+  EXPECT_TRUE(scene.scenes.empty()); // The cup stays attached to the right hand.
+}
+
+TEST_F(CupPourFixture, PreviewNeverMovesAndReportsTiltPose) {
+  CupPourMotion pour(robot, config, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason, false)) << reason;
+  pour.tick();
+  EXPECT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  EXPECT_TRUE(executor.steps.empty());
+  EXPECT_NEAR(pour.approach_target().pose.orientation.x, -.3535534, 1e-9);
+}
+
+TEST_F(CupPourFixture, TiltFailureStopsBeforeHoldAndReturn) {
+  CupPourMotion pour(robot, config, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
+  run(pour, 2);
+  EXPECT_EQ(pour.result().state, "FAILED");
+  EXPECT_EQ(pour.result().code, "PLANNING_FAILED");
+  ASSERT_EQ(executor.steps.size(), 2u);
+  EXPECT_EQ(executor.steps.back().name, "pour_tilt");
+}
+
+TEST_F(CupPourFixture, RejectsArmWithoutSequence) {
+  CupPourMotion pour(robot, config, *context, executor, scene);
+  std::string reason;
+  EXPECT_FALSE(pour.start("left", "cup", reason, true));
+  EXPECT_NE(reason.find("cup_pour_left"), std::string::npos);
+  robot.motion_sequences.erase("cup_pour_right");
+  EXPECT_FALSE(pour.start("right", "cup", reason, true));
+  EXPECT_TRUE(executor.steps.empty());
 }
 
 TEST_F(ApproachFixture, PickCancelledDuringObservationDoesNotOpenGripper) {

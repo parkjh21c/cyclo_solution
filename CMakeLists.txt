@@ -78,6 +78,7 @@ add_library(
   demo_motions SHARED
   src/motions/handover/handover_motion.cpp
   src/motions/handover/cup_handover_motion.cpp
+  src/motions/pour/cup_pour_motion.cpp
   src/motions/initial/initial_pose_motion.cpp
   src/motions/common/sequence_motion.cpp
   src/motions/common/cup_motion.cpp

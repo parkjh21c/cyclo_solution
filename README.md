@@ -71,6 +71,7 @@ ROS 2 Jazzy 데모. 핸드오버, 셀 놓기, 컵 파지 전 접근을 각각 �
 - `/withdraw_cup`: 각 손의 현재 TCP에서 10cm 상승 → TCP 정면 반대로 8cm 후퇴; 그리퍼 유지.
 - `/pick_cup`: 그리퍼 열기 → 파지 전 위치 → 수평 직선 삽입 → 닫기 → 컵 attach → 들어 올린 채 정지.
 - `/handover_cup`: 왼손이 든 컵을 오른손으로 넘김. 오른손이 컵을 든 채 정지 (메뉴 `7`).
+- `/pour_cup`: 오른손이 든 컵을 바구니 위에서 오른쪽 → 왼쪽으로 130° 기울여 붓고 넘김 자세로 복귀 (메뉴 `8`).
 
 로봇·카메라 bringup과 Zenoh router는 기존 컨테이너에서 실행합니다.
 이 컨테이너는 들어가도 자동으로 로봇을 움직이지 않습니다.
@@ -575,7 +576,7 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
 `/handover_cup`(`arm: left` = 컵을 든 손)은 기존 DYNAMIXEL 핸드오버처럼 YAML 시퀀스를 실행합니다.
 `handover.yaml`의 `motion_sequences`에 세 시퀀스가 필요합니다.
 
-- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_carry`(왼손 `joint` Pilz PTP) → `cup_ready`(오른손 `joint` PTP, 잡는 위치 20cm 뒤)로 한 팔씩 움직입니다. 대기 거리는
+- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_carry`(왼손 `joint` Pilz PTP) → `cup_ready_via`(오른손, 초기 자세에서 j1만 먼저; 바로 가면 바구니 벽에 닿음) → `cup_ready`(오른손 `joint` PTP, 잡는 위치 20cm 뒤)로 한 팔씩 움직입니다. 대기 거리는
   `scripts/right_ready_check.py`로 고릅니다(0.12는 경로가 컵·왼손과 충돌, 0.30 이상은 IK 없음, 0.20·0.25 통과).
   양팔 동시 Pilz PTP(`dual_joint` + `pipeline`/`planner`)는 2026-11-11 시험에서 `MoveIt error 99999`로 계획에
   실패해서 쓰지 않습니다. 기본 OMPL `dual_joint`는
