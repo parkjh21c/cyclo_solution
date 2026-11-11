@@ -12,6 +12,7 @@ inline bool demo_can_retry(const std::string & stage, const std::string & code) 
     return code == "WRIST_NOT_READY" || code == "WRIST_INPUT_MISSING" ||
            code == "RIM_NOT_CONFIRMED";
   }
+  if (stage == "PICK_CUP") return code == "CUP_NOT_FOUND"; // Fails before any motion.
   return false;
 }
 } // namespace demo_1f

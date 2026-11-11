@@ -21,6 +21,7 @@ handover_demo:
       max_age: 120.0 # Keep the last confirmed head BODY location through temporary occlusion.
       observation_timeout: 4.0 # Wait for the background tracker only when no usable saved cup exists.
       # Wrist refinement action, separate from coarse approach.
+      refine_observe: false # false: open at the approach pose; the saved wrist rim is accurate enough.
       refine_pitch_step_deg: 5.0
       refine_pitch_ceiling_deg: 75.0
       refine_search_timeout: 15.0

@@ -49,6 +49,7 @@ private:
   bool pick_pending_{false}, pick_cancel_sent_{false}, demo_stage_active_{false};
   bool demo_retry_wait_{false}, demo_resumable_{false}, demo_pick_only_{false};
   bool demo_initial_only_{false};
+  bool demo_withdraw_cup_{false}; // Old WITHDRAW_CUP stage between release and return.
   bool demo_faulted_{false}, demo_cancel_requested_{false};
   std::string demo_stage_, demo_completed_stage_;
   std::string demo_cup_id_, demo_detail_, pick_phase_;

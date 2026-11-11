@@ -22,6 +22,7 @@ struct ApproachConfig {
   double refine_lower_distance{.03};
   double refine_gripper_open{0.0};
   double refine_pitch_ceiling_deg{75.0};
+  bool refine_observe{true}; // false: open at the approach pose without wrist rim observation.
   std::string validate(const std::string & arm) const;
 };
 

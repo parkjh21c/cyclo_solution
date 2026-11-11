@@ -4,6 +4,7 @@ handover_demo:
       max_retries: 2       # Additional attempts for fresh perception / pre-motion pick planning.
       retry_delay: 1.0     # Seconds before re-acquiring observations.
       pick_timeout: 180.0 # Perception, IK search, close and lift; initialization is a separate stage.
+      withdraw_cup: false # true: lift both hands out of the cup after release, before PICK_CUP.
     motion_sequences:
       # From ai_worker origin/feature-demo:
       # ffw_bringup/config/ffw_sg2_rev1_follower/ffw_sg2_follower_custom_positions.yaml

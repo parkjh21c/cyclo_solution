@@ -18,14 +18,15 @@ from rclpy.signals import SignalHandlerOptions
 
 MENU = """
   d  전체 데모: 시작 자세 → 오른손 셀 픽 → 오른손→왼손 핸드오버
-               → 왼손 컵 접근 → 보정·놓기 → 양손 손 빼기 → 시작 자세
+               → 왼손 컵 접근 → 보정·놓기 → 왼손 컵 잡기
 
   1  시작 자세 (양손 열기, 양팔·리프트·헤드 이동)
   2  현재 자세에서 오른손 셀 픽
   3  오른손 → 왼손 핸드오버
   4  왼손 컵 접근 (저장된 컵 위치 사용: approach.yaml cup_source)
   5  왼손 손목 보정·셀 놓기
-  6  양손 손 빼기 (왼손 → 오른손 순차 상승·후퇴)
+  6  왼손 컵 잡기 (옆에서 삽입 → 닫기 → 들어 올린 채 정지)
+  7  컵 핸드오버 왼손 → 오른손 (6번 직후, 오른손이 컵을 든 채 정지)
 
   r  실패 단계 재개
   c  현재 작업 취소
@@ -41,7 +42,7 @@ def selection(command, cup_id):
         return "demo", RunDemo.Goal(command=demo_commands[command], cup_id=cup_id)
     if command == "3":
         return "handover", Handover.Goal(direction="right_to_left")
-    cup_commands = {"4": ("approach", "left"), "5": ("refine", "left"), "6": ("withdraw", "both")}
+    cup_commands = {"4": ("approach", "left"), "5": ("refine", "left"), "6": ("pick", "left"), "7": ("handover_cup", "left")}
     if command in cup_commands:
         action, arm = cup_commands[command]
         return action, ApproachCup.Goal(arm=arm, cup_id=cup_id, execute=True)
@@ -56,7 +57,8 @@ class Runner(Node):
             "demo": ActionClient(self, RunDemo, "/run_demo"),
             "handover": ActionClient(self, Handover, "/handover"),
             "refine": ActionClient(self, ApproachCup, "/refine_cup"),
-            "withdraw": ActionClient(self, ApproachCup, "/withdraw_cup"),
+            "pick": ActionClient(self, ApproachCup, "/pick_cup"),
+            "handover_cup": ActionClient(self, ApproachCup, "/handover_cup"),
             "approach": ActionClient(self, ApproachCup, "/approach_cup"),
         }
         self.subscription = self.create_subscription(
@@ -152,7 +154,7 @@ class Runner(Node):
             )
         self.goal_handle = None
         self.cancel_sent = False
-        print("다음 명령을 입력하세요. (1~6 / d / r / c / p / q)")
+        print("다음 명령을 입력하세요. (1~7 / d / r / c / p / q)")
 
     def cancel(self):
         if not self.busy():

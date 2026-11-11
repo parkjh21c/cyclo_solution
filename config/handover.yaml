@@ -224,6 +224,100 @@ handover_demo:
           - -1.9681034
           - 1.43097349
           - 0.27834375
+      # Cup handover (left holds, right receives); see scripts/generate_cup_handover_targets.py.
+      cup_left_to_right:
+        steps:
+        - cup_carry
+        - cup_ready
+        cup_carry:
+          type: joint
+          arm: giver
+          velocity_scale: 0.3
+          acceleration_scale: 0.3
+          tolerance: 0.017453292519943295
+          planning_tolerance: 0.0005
+          timeout: 60.0
+          target:
+          - -0.15714083
+          - 0.37945894
+          - -0.44538296
+          - -1.61585321
+          - 0.16935813
+          - 0.132273
+          - -1.16007363
+        cup_ready:
+          type: joint
+          arm: receiver
+          velocity_scale: 0.3
+          acceleration_scale: 0.3
+          tolerance: 0.017453292519943295
+          planning_tolerance: 0.0005
+          timeout: 60.0
+          target:
+          - -0.15991552
+          - -0.6942645
+          - 0.33626403
+          - -1.26587322
+          - -0.74302606
+          - -0.28713782
+          - 1.51884724
+      cup_left_to_right_grasp:
+        steps:
+        - cup_insert
+        - receiver_close
+        cup_insert:
+          type: linear
+          frame: base_link
+          arm: receiver
+          velocity_scale: 0.08
+          acceleration_scale: 0.02
+          timeout: 30.0
+          target:
+          - 0.38
+          - 0.04
+          - 1.0
+          - 0.5
+          - -0.5
+          - 0.5
+          - 0.5
+        receiver_close:
+          type: gripper
+          arm: receiver
+          gripper_wait_only: true
+          target:
+          - 0.8
+          duration: 1.0
+          velocity_scale: 1.0
+          acceleration_scale: 1.0
+          timeout: 12.0
+      cup_left_to_right_release:
+        steps:
+        - giver_release
+        - cup_retreat
+        giver_release:
+          type: gripper
+          arm: giver
+          target:
+          - 0.0
+          duration: 0.6
+          velocity_scale: 1.0
+          acceleration_scale: 1.0
+          timeout: 12.0
+        cup_retreat:
+          type: linear
+          frame: base_link
+          velocity_scale: 0.06
+          acceleration_scale: 0.015
+          timeout: 30.0
+          arm: giver
+          target:
+          - 0.38
+          - 0.066022
+          - 0.947235
+          - -0.430459
+          - -0.430459
+          - -0.560986
+          - 0.560986
     arms:
       left:
         tcp: gripper_l_tcp

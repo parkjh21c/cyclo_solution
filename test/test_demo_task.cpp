@@ -21,11 +21,10 @@ public:
   ExecutionResult state;
   std::string rejected_step;
   bool stall = false;
-  size_t rejected_call = 0, stalled_call = 0;
   bool ready(const MotionSequence &, std::string &) const override { return true; }
   bool start(const Step & step) override {
     executed.push_back(step.name);
-    if (step.name == rejected_step || executed.size() == rejected_call) {
+    if (step.name == rejected_step) {
       state = {ExecutionState::Failed, "EXECUTION_FAILED", "test execution failure"};
       return false;
     }
@@ -33,7 +32,7 @@ public:
     return true;
   }
   void tick() override {
-    if (!stall && executed.size() != stalled_call && state.state == ExecutionState::Running)
+    if (!stall && state.state == ExecutionState::Running)
       state.state = ExecutionState::Succeeded;
   }
   void cancel(const std::string & code, const std::string & detail) override {
@@ -44,8 +43,13 @@ public:
 class Scene : public ApproachScenePort {
 public:
   bool ready() const override { return true; }
-  bool apply(const moveit_msgs::msg::PlanningScene &) override { return true; }
-  ExecutionResult poll() override { return {ExecutionState::Succeeded, {}, {}}; }
+  bool apply(const moveit_msgs::msg::PlanningScene & scene) override {
+    applied.push_back(scene);
+    return true;
+  }
+  ExecutionResult poll() override { return outcome; }
+  std::vector<moveit_msgs::msg::PlanningScene> applied;
+  ExecutionResult outcome{ExecutionState::Succeeded, {}, {}};
 };
 class Cup : public CupMotion {
 public:
@@ -54,6 +58,7 @@ public:
   int failures = 0;
   std::string failure = "CUP_NOT_FOUND";
   std::string requested_arm;
+  bool stall = false;
   bool start(const std::string & arm, const std::string & cup_id,
       std::string & reason, bool execute = true) override {
     requested_arm = arm;
@@ -61,7 +66,7 @@ public:
   }
   void tick() override {
     if (result_.state == "CANCELLING") { result_.state = "CANCELLED"; return; }
-    if (!running()) return;
+    if (!running() || stall) return;
     if (runs <= failures) { fail(failure, "test failure"); return; }
     result_.state = "SUCCEEDED";
     result_.sequence_completed = true;
@@ -82,17 +87,19 @@ protected:
   std::unique_ptr<RobotContext> context;
   std::unique_ptr<HandoverMotion> handover;
   std::unique_ptr<InitialPoseMotion> initial;
-  std::unique_ptr<Cup> approach, refine, withdraw;
+  std::unique_ptr<Cup> approach, refine, withdraw, pick_cup;
   std::unique_ptr<TaskManager> manager;
   rclcpp_action::Server<Pick>::SharedPtr backend;
   rclcpp_action::Client<Demo>::SharedPtr client;
   std::shared_ptr<rclcpp_action::ServerGoalHandle<Pick>> pending_pick;
   int picks = 0, pick_failures = 0;
   bool stall_pick = false, moved_failure = false, uncertain_stop = false;
+  bool withdraw_enabled = false;
 
   void SetUp() override {
     node = std::make_shared<rclcpp::Node>("demo_task_test",
-        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("demo.retry_delay", .01)}));
+        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("demo.retry_delay", .01),
+            rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled)}));
     config.require_tcp_tf = false;
     config.state_max_age = 5;
     for (const std::string name : {"left", "right"}) {
@@ -121,13 +128,14 @@ protected:
     config.motion_sequences[init.direction] = init;
     context = std::make_unique<RobotContext>(*node, config);
     handover = std::make_unique<HandoverMotion>(config, *context, executor);
-    initial = std::make_unique<InitialPoseMotion>(config, *context, executor);
+    initial = std::make_unique<InitialPoseMotion>(config, *context, executor, &scene);
     approach = std::make_unique<Cup>(config, cup_config, *context, executor, scene);
     refine = std::make_unique<Cup>(config, cup_config, *context, executor, scene);
     withdraw = std::make_unique<Cup>(config, cup_config, *context, executor, scene);
+    pick_cup = std::make_unique<Cup>(config, cup_config, *context, executor, scene);
     manager = std::make_unique<TaskManager>(*node, *context, *handover,
         std::vector<CupMotionRegistration>{{"/approach_cup", *approach}, {"/refine_cup", *refine},
-            {"/withdraw_cup", *withdraw}}, initial.get());
+            {"/withdraw_cup", *withdraw}, {"/pick_cup", *pick_cup}}, initial.get());
     backend = rclcpp_action::create_server<Pick>(node, "/dynamixel_pick/execute",
         [](const auto &, auto) { return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE; },
         [](auto) { return rclcpp_action::CancelResponse::ACCEPT; },
@@ -182,7 +190,16 @@ protected:
   void TearDown() override {
     loop.remove_node(node);
     client.reset(); backend.reset(); manager.reset();
-    withdraw.reset(); refine.reset(); approach.reset(); initial.reset(); handover.reset(); context.reset(); node.reset();
+    pick_cup.reset(); withdraw.reset(); refine.reset(); approach.reset(); initial.reset(); handover.reset(); context.reset(); node.reset();
+  }
+};
+
+// Same fixture with the old WITHDRAW_CUP stage enabled.
+class DemoWithdrawTest : public DemoTest {
+protected:
+  void SetUp() override {
+    withdraw_enabled = true;
+    DemoTest::SetUp();
   }
 };
 
@@ -208,6 +225,31 @@ TEST_F(DemoTest, InitialOnlyNeedsNoPickBackendAndStopsBeforePick) {
   EXPECT_FALSE(send("resume"));
 }
 
+TEST_F(DemoTest, InitialPoseReleasesHeldCupModelBeforeOpeningGrippers) {
+  auto goal = send("initial"); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  ASSERT_EQ(scene.applied.size(), 1u);
+  const auto & release = scene.applied[0];
+  ASSERT_EQ(release.robot_state.attached_collision_objects.size(), 1u);
+  const auto & held = release.robot_state.attached_collision_objects[0].object;
+  EXPECT_EQ(held.id, "demo_place_cup");
+  EXPECT_EQ(held.operation, held.REMOVE);
+  ASSERT_EQ(release.world.collision_objects.size(), 1u);
+  EXPECT_EQ(release.world.collision_objects[0].id, "demo_place_cup");
+  EXPECT_EQ(release.world.collision_objects[0].operation, held.REMOVE);
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test"}));
+}
+
+TEST_F(DemoTest, InitialPoseDoesNotMoveWhenCupModelReleaseFails) {
+  scene.outcome = {ExecutionState::Failed, "SCENE_REJECTED", "test rejection"};
+  auto goal = send("initial"); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SCENE_REJECTED");
+  EXPECT_TRUE(executor.executed.empty());
+}
+
 TEST_F(DemoTest, InitialOnlyCanBeCancelledWithoutStartingPick) {
   executor.stall = true;
   auto goal = send("initial"); ASSERT_TRUE(goal);
@@ -226,13 +268,44 @@ TEST_F(DemoTest, SequencesAllMotionsAndRetriesOnlyFailedStage) {
   auto result = client->async_get_result(goal); wait(result);
   EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::SUCCEEDED);
   EXPECT_EQ(picks, 2);
-  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test", "handover_test", "initial_test"}));
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test", "handover_test"}));
   EXPECT_EQ(approach->runs, 2);
   EXPECT_EQ(refine->runs, 1);
-  EXPECT_EQ(withdraw->runs, 1);
+  EXPECT_EQ(withdraw->runs, 0); // Disabled by default.
+  EXPECT_EQ(pick_cup->runs, 1);
   EXPECT_EQ(result.get().result->holding_state, "UNVERIFIED");
+  EXPECT_EQ(pick_cup->requested_arm, "left");
+  EXPECT_EQ(result.get().result->last_completed_stage, "PICK_CUP");
+}
+TEST_F(DemoWithdrawTest, EnabledWithdrawalRunsBetweenReleaseAndReturn) {
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(withdraw->runs, 1);
   EXPECT_EQ(withdraw->requested_arm, "both");
-  EXPECT_EQ(result.get().result->last_completed_stage, "RETURN_INITIAL");
+  EXPECT_EQ(pick_cup->runs, 1);
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test", "handover_test"}));
+  EXPECT_EQ(result.get().result->last_completed_stage, "PICK_CUP");
+}
+TEST_F(DemoTest, CupPickRetriesOnlyMissingCup) {
+  pick_cup->failures = 1;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(pick_cup->runs, 2);
+  EXPECT_EQ(executor.executed.size(), 2u);
+}
+TEST_F(DemoTest, CupPickExecutionFailureStopsWithoutResume) {
+  pick_cup->failures = 1;
+  pick_cup->failure = "EXECUTION_FAILED";
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_FALSE(result.get().result->can_resume);
+  EXPECT_EQ(result.get().result->last_completed_stage, "REFINE_CUP");
+  EXPECT_EQ(pick_cup->runs, 1);
+  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(refine->runs, 1);
 }
 TEST_F(DemoTest, ExhaustedObservationRetriesResumeWithoutRepicking) {
   approach->failures = 3;
@@ -244,7 +317,7 @@ TEST_F(DemoTest, ExhaustedObservationRetriesResumeWithoutRepicking) {
   auto finished = client->async_get_result(resumed); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
   EXPECT_EQ(picks, 1);
-  EXPECT_EQ(executor.executed.size(), 3u);
+  EXPECT_EQ(executor.executed.size(), 2u);
 }
 TEST_F(DemoTest, PickOnlyCanContinueWithHandover) {
   const auto initial_sequence = config.motion_sequences.at("initial_pose");
@@ -258,7 +331,7 @@ TEST_F(DemoTest, PickOnlyCanContinueWithHandover) {
   auto finished = client->async_get_result(resumed); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
   EXPECT_EQ(picks, 1);
-  EXPECT_EQ(executor.executed, (std::vector<std::string>{"handover_test", "initial_test"}));
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"handover_test"}));
 }
 
 TEST_F(DemoTest, FailedRefinementNeverStartsReturnToInitial) {
@@ -272,7 +345,7 @@ TEST_F(DemoTest, FailedRefinementNeverStartsReturnToInitial) {
   EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test", "handover_test"}));
 }
 
-TEST_F(DemoTest, WithdrawalFailureNeverStartsReturnOrRepeatsRelease) {
+TEST_F(DemoWithdrawTest, WithdrawalFailureNeverStartsReturnOrRepeatsRelease) {
   withdraw->failures = 1;
   withdraw->failure = "EXECUTION_FAILED";
   auto goal = send(); ASSERT_TRUE(goal);
@@ -304,28 +377,17 @@ TEST_F(DemoTest, StandaloneWithdrawalDoesNotStartReleaseOrInitialPose) {
   EXPECT_TRUE(executor.executed.empty());
 }
 
-TEST_F(DemoTest, ReturnFailureDoesNotRepeatPickOrRelease) {
-  executor.rejected_call = 3;
+TEST_F(DemoTest, CupPickCanBeCancelledWithoutRepeatingRelease) {
+  pick_cup->stall = true;
   auto goal = send(); ASSERT_TRUE(goal);
-  auto result = client->async_get_result(goal); wait(result);
-  EXPECT_FALSE(result.get().result->success);
-  EXPECT_EQ(result.get().result->last_completed_stage, "WITHDRAW_CUP");
-  EXPECT_FALSE(result.get().result->can_resume);
-  EXPECT_EQ(picks, 1);
-  EXPECT_EQ(refine->runs, 1);
-  EXPECT_EQ(executor.executed.size(), 3u);
-}
-
-TEST_F(DemoTest, ReturnToInitialCanBeCancelledWithoutRepeatingRelease) {
-  executor.stalled_call = 3;
-  auto goal = send(); ASSERT_TRUE(goal);
-  for (int i = 0; i < 250 && executor.executed.size() < 3; ++i) pump();
-  ASSERT_EQ(executor.executed.size(), 3u);
+  for (int i = 0; i < 250 && pick_cup->runs == 0; ++i) pump();
+  ASSERT_EQ(pick_cup->runs, 1);
   auto cancel = client->async_cancel_goal(goal); wait(cancel);
   auto result = client->async_get_result(goal); wait(result);
   EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
   EXPECT_EQ(picks, 1);
   EXPECT_EQ(refine->runs, 1);
+  EXPECT_EQ(executor.executed.size(), 2u);
   EXPECT_TRUE(manager->can_shutdown());
 }
 TEST_F(DemoTest, ExecutionFailureDoesNotReplayPickOrRelease) {
@@ -390,6 +452,9 @@ TEST(DemoRecovery, DoesNotRetryReleaseOrArbitraryExecutionFailures) {
   EXPECT_FALSE(demo_can_retry("HANDOVER", "EXECUTION_FAILED"));
   EXPECT_FALSE(demo_can_retry("REFINE_CUP", "EXECUTION_FAILED"));
   EXPECT_TRUE(demo_can_retry("REFINE_CUP", "WRIST_NOT_READY"));
+  EXPECT_TRUE(demo_can_retry("PICK_CUP", "CUP_NOT_FOUND"));
+  EXPECT_FALSE(demo_can_retry("PICK_CUP", "SCENE_UNAVAILABLE"));
+  EXPECT_FALSE(demo_can_retry("PICK_CUP", "EXECUTION_FAILED"));
 }
 } // namespace
 } // namespace demo_1f

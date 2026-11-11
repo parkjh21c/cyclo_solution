@@ -3,6 +3,7 @@
 
 namespace demo_1f {
 // Wrist RIM observation -> lowered center -> release. Preview never moves.
+// refine_observe=false releases at the approach pose without observation.
 class RefineCupMotion final : public CupMotion {
 public:
   using CupMotion::CupMotion;
@@ -20,6 +21,8 @@ private:
   void reset() override;
   void tilt_to_observe();
   void find_wrist_target();
+  void release_in_place();
+  bool open_gripper();
   std::optional<TimePoint> view_started_;
   std::optional<TimePoint> gripper_settle_started_;
   bool dispatch_refinement(const geometry_msgs::msg::Pose & pose);

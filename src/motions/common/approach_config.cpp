@@ -114,6 +114,8 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("refine_wait", c.refine_wait);
   number("refine_view_wait", c.refine_view_wait);
   number("refine_search_timeout", c.refine_search_timeout);
+  c.refine_observe =
+      node.declare_parameter("approach.refine_observe", c.refine_observe, descriptor);
   c.offset_xy = node.declare_parameter("approach.offset_xy", c.offset_xy, descriptor);
   c.cup_source = node.declare_parameter("approach.cup_source", c.cup_source, descriptor);
   return c;

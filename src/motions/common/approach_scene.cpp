@@ -22,14 +22,17 @@ moveit_msgs::msg::PlanningScene make_approach_scene(const Config & robot,
   cup.primitive_poses.push_back(body);
   scene.world.collision_objects.push_back(cup);
   // Restore normal cup/finger collision checks after an unfinished pick setup.
-  scene.allowed_collision_matrix.entry_names = {cup.id,
-      "gripper_l_rh_p12_rn_r2",
-      "gripper_l_rh_p12_rn_l2",
-      "gripper_r_rh_p12_rn_r2",
-      "gripper_r_rh_p12_rn_l2"};
-  scene.allowed_collision_matrix.entry_values.resize(5);
+  scene.allowed_collision_matrix.entry_names = {cup.id};
+  for (const std::string side : {"l", "r"}) {
+    for (const std::string finger : {"r1", "r2", "l1", "l2"}) {
+      scene.allowed_collision_matrix.entry_names.push_back(
+          "gripper_" + side + "_rh_p12_rn_" + finger);
+    }
+  }
+  const size_t entries = scene.allowed_collision_matrix.entry_names.size();
+  scene.allowed_collision_matrix.entry_values.resize(entries);
   for (auto & row : scene.allowed_collision_matrix.entry_values) {
-    row.enabled.resize(5, false);
+    row.enabled.resize(entries, false);
   }
   // Remove only the old demo plane; retain all externally registered obstacles/attachments.
   moveit_msgs::msg::CollisionObject old_table;
@@ -37,6 +40,102 @@ moveit_msgs::msg::PlanningScene make_approach_scene(const Config & robot,
   old_table.header.frame_id = robot.planning_frame;
   old_table.operation = old_table.REMOVE;
   scene.world.collision_objects.push_back(old_table);
+  return scene;
+}
+
+moveit_msgs::msg::PlanningScene make_cup_release_scene(const Config & robot) {
+  moveit_msgs::msg::PlanningScene scene;
+  scene.is_diff = true;
+  scene.robot_state.is_diff = true;
+  // The hand is about to open: detach the held cup and delete it; its new place is unknown.
+  moveit_msgs::msg::AttachedCollisionObject held;
+  held.object.id = "demo_place_cup";
+  held.object.operation = held.object.REMOVE;
+  scene.robot_state.attached_collision_objects.push_back(held);
+  moveit_msgs::msg::CollisionObject cup;
+  cup.id = held.object.id;
+  cup.header.frame_id = robot.planning_frame;
+  cup.operation = cup.REMOVE;
+  scene.world.collision_objects.push_back(cup);
+  return scene;
+}
+
+namespace {
+std::vector<std::string> hand_links(const std::string & arm, bool with_base) {
+  const std::string prefix = arm == "left" ? "gripper_l_" : "gripper_r_";
+  std::vector<std::string> links = {prefix + "rh_p12_rn_r1",
+      prefix + "rh_p12_rn_r2",
+      prefix + "rh_p12_rn_l1",
+      prefix + "rh_p12_rn_l2"};
+  if (with_base) {
+    links.push_back(prefix + "rh_p12_rn_base");
+  }
+  return links;
+}
+} // namespace
+
+moveit_msgs::msg::PlanningScene make_cup_contact_scene(
+    const Config & robot, const std::string & receiver) {
+  (void)robot;
+  moveit_msgs::msg::PlanningScene scene;
+  scene.is_diff = true;
+  scene.robot_state.is_diff = true;
+  auto & acm = scene.allowed_collision_matrix;
+  acm.entry_names = {"demo_place_cup"};
+  // The cup model is wider than the real cup, so a deep grasp touches it with the palm too.
+  for (const auto & link : hand_links(receiver, true)) {
+    acm.entry_names.push_back(link);
+  }
+  acm.entry_values.resize(acm.entry_names.size());
+  for (size_t i = 0; i < acm.entry_names.size(); ++i) {
+    auto & row = acm.entry_values[i].enabled;
+    row.resize(acm.entry_names.size());
+    for (size_t j = 0; j < row.size(); ++j) {
+      row[j] = (i == 0) != (j == 0); // Cup-hand pairs only.
+    }
+  }
+  return scene;
+}
+
+moveit_msgs::msg::PlanningScene make_cup_detach_scene(
+    const Config & robot, const std::string & giver) {
+  moveit_msgs::msg::PlanningScene scene;
+  scene.is_diff = true;
+  scene.robot_state.is_diff = true;
+  moveit_msgs::msg::AttachedCollisionObject held;
+  held.link_name = robot.arms.at(giver).tcp;
+  held.object.id = "demo_place_cup";
+  held.object.operation = held.object.REMOVE; // Detach only; the cup returns to the world.
+  scene.robot_state.attached_collision_objects.push_back(held);
+  return scene;
+}
+
+moveit_msgs::msg::PlanningScene make_cup_attach_scene(
+    const Config & robot, const std::string & receiver, const std::string & giver) {
+  moveit_msgs::msg::PlanningScene scene;
+  scene.is_diff = true;
+  scene.robot_state.is_diff = true;
+  moveit_msgs::msg::AttachedCollisionObject held;
+  held.link_name = robot.arms.at(receiver).tcp;
+  held.object.id = "demo_place_cup";
+  held.object.header.frame_id = robot.planning_frame;
+  held.object.operation = held.object.ADD; // No geometry: MoveIt moves the world cup to the hand.
+  held.touch_links = hand_links(receiver, true);
+  scene.robot_state.attached_collision_objects.push_back(held);
+  // Giver fingers and palm still touch the cup until the giver opens.
+  auto & acm = scene.allowed_collision_matrix;
+  acm.entry_names = {held.object.id};
+  for (const auto & link : hand_links(giver, true)) {
+    acm.entry_names.push_back(link);
+  }
+  acm.entry_values.resize(acm.entry_names.size());
+  for (size_t i = 0; i < acm.entry_names.size(); ++i) {
+    auto & row = acm.entry_values[i].enabled;
+    row.resize(acm.entry_names.size());
+    for (size_t j = 0; j < row.size(); ++j) {
+      row[j] = (i == 0) != (j == 0); // Cup-giver pairs only.
+    }
+  }
   return scene;
 }
 
@@ -106,15 +205,29 @@ ExecutionResult ApproachScene::poll() {
         merged.getMessage(pending_scene_.allowed_collision_matrix);
       }
       auto & objects = pending_scene_.world.collision_objects;
+      const auto held = [&](const std::string & id) {
+        return std::any_of(existing.robot_state.attached_collision_objects.begin(),
+            existing.robot_state.attached_collision_objects.end(),
+            [&](const auto & old) { return old.object.id == id; });
+      };
+      const auto detaching = [&](const std::string & id) {
+        return std::any_of(pending_scene_.robot_state.attached_collision_objects.begin(),
+            pending_scene_.robot_state.attached_collision_objects.end(),
+            [&](const auto & object) {
+              return object.object.operation == object.object.REMOVE && object.object.id == id;
+            });
+      };
       objects.erase(std::remove_if(objects.begin(),
                         objects.end(),
                         [&](const auto & object) {
-                          return object.operation == object.REMOVE &&
-                                 std::none_of(existing.world.collision_objects.begin(),
-                                     existing.world.collision_objects.end(),
-                                     [&](const auto & old) {
-                                       return old.id == object.id;
-                                     });
+                          if (object.operation != object.REMOVE) return false;
+                          // Detach + delete: only a held object is deleted; MoveIt detaches first.
+                          if (detaching(object.id)) return !held(object.id);
+                          return std::none_of(existing.world.collision_objects.begin(),
+                              existing.world.collision_objects.end(),
+                              [&](const auto & old) {
+                                return old.id == object.id;
+                              });
                         }),
           objects.end());
       auto & attached = pending_scene_.robot_state.attached_collision_objects;

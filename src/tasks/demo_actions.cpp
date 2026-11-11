@@ -27,6 +27,7 @@ void TaskManager::setup_demo_server() {
   demo_max_retries_ = node_.declare_parameter<int>("demo.max_retries", 2);
   demo_retry_delay_ = node_.declare_parameter<double>("demo.retry_delay", 1.0);
   demo_pick_timeout_ = node_.declare_parameter<double>("demo.pick_timeout", 180.0);
+  demo_withdraw_cup_ = node_.declare_parameter<bool>("demo.withdraw_cup", false);
   if (demo_max_retries_ < 0 || demo_retry_delay_ < 0 || demo_pick_timeout_ <= 0) {
     throw std::invalid_argument("Invalid demo retry/timeout parameters");
   }
@@ -63,7 +64,8 @@ void TaskManager::setup_demo_server() {
                 !pick_client_->action_server_is_ready()) ||
             (!initial_only && request->command != "pick" &&
                 (!demo_cup_module("/approach_cup") || !demo_cup_module("/refine_cup") ||
-                    !demo_cup_module("/withdraw_cup")))) {
+                    !demo_cup_module("/pick_cup") ||
+                    (demo_withdraw_cup_ && !demo_cup_module("/withdraw_cup"))))) {
           RCLCPP_WARN(node_.get_logger(),
               "Rejected demo: %s", reason.empty() ?
               "busy, backend unavailable, invalid command, or no safe resume checkpoint" : reason.c_str());
@@ -178,7 +180,8 @@ void TaskManager::start_demo_stage() {
   }
   active_cup_motion_ = demo_cup_module(
       demo_stage_ == "APPROACH_CUP" ? "/approach_cup" :
-      demo_stage_ == "REFINE_CUP" ? "/refine_cup" : "/withdraw_cup");
+      demo_stage_ == "REFINE_CUP" ? "/refine_cup" :
+      demo_stage_ == "PICK_CUP" ? "/pick_cup" : "/withdraw_cup");
   const auto arm = demo_stage_ == "WITHDRAW_CUP" ? "both" : "left";
   if (!active_cup_motion_ || !active_cup_motion_->start(arm, demo_cup_id_, reason, true)) {
     finish_demo(false, "NOT_READY", reason.empty() ? "Cup module missing" : reason, true);
@@ -308,11 +311,13 @@ void TaskManager::tick_demo() {
           }
         } else if (demo_stage_ == "HANDOVER") demo_stage_ = "APPROACH_CUP";
         else if (demo_stage_ == "APPROACH_CUP") demo_stage_ = "REFINE_CUP";
-        else if (demo_stage_ == "REFINE_CUP") demo_stage_ = "WITHDRAW_CUP";
-        else if (demo_stage_ == "WITHDRAW_CUP") demo_stage_ = "RETURN_INITIAL";
+        else if (demo_stage_ == "REFINE_CUP")
+          demo_stage_ = demo_withdraw_cup_ ? "WITHDRAW_CUP" : "PICK_CUP"; // Cup position is already saved.
+        else if (demo_stage_ == "WITHDRAW_CUP") demo_stage_ = "PICK_CUP";
         else {
-          finish_demo(true, "", "Pick, handover, cup release and return to initial pose completed; "
-                               "transfer and landing are not sensor-verified");
+          finish_demo(true, "", "Pick, handover, cup release and cup pick completed; "
+                               "left hand holds the cup; transfer, landing and grasp are not "
+                               "sensor-verified");
           return;
         }
         context_.set_phase(demo_stage_, demo_completed_stage_);

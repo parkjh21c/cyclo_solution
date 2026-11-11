@@ -1,3 +1,4 @@
+#include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/motions/pick/pick_cup_motion.hpp"
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
@@ -43,8 +44,9 @@ int main(int argc, char ** argv) {
             approach_config.cup_source});
     demo_1f::TrajectoryExecutor trajectory_executor(*node, config, robot_context);
     demo_1f::HandoverMotion handover_motion(config, robot_context, trajectory_executor);
-    demo_1f::InitialPoseMotion initial_motion(config, robot_context, trajectory_executor);
     demo_1f::ApproachScene approach_scene(*node);
+    demo_1f::InitialPoseMotion initial_motion(
+        config, robot_context, trajectory_executor, &approach_scene);
     demo_1f::ApproachCupMotion approach_motion(
         config, approach_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::RefineCupMotion refine_motion(
@@ -54,13 +56,16 @@ int main(int argc, char ** argv) {
     const auto pick_config = demo_1f::load_pick_config(*node);
     demo_1f::PickCupMotion pick_motion(
         config, approach_config, pick_config, robot_context, trajectory_executor, approach_scene);
+    demo_1f::CupHandoverMotion cup_handover_motion(
+        config, approach_config, robot_context, trajectory_executor, approach_scene, "left");
     demo_1f::TaskManager task_manager(*node,
         robot_context,
         handover_motion,
         {{"/approach_cup", approach_motion},
             {"/refine_cup", refine_motion},
             {"/withdraw_cup", withdraw_motion},
-            {"/pick_cup", pick_motion}}, &initial_motion);
+            {"/pick_cup", pick_motion},
+            {"/handover_cup", cup_handover_motion}}, &initial_motion);
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     RCLCPP_INFO(

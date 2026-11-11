@@ -52,6 +52,9 @@ std::string validate_motion_sequence(const MotionSequence & sequence, const Conf
       return prefix +
              "Planning tolerance must be zero (inherit) or no larger than completion tolerance";
     }
+    if (step.pipeline.empty() != step.planner.empty()) {
+      return prefix + "Planner override needs both pipeline and planner";
+    }
     if (step.gripper_wait_only && step.type != "gripper") {
       return prefix + "Gripper wait-only completion requires a gripper step";
     }
@@ -296,11 +299,14 @@ Config load_config(rclcpp::Node & node) {
       c.motion_limits.emplace(joint, limits);
     }
   }
-  for (const std::string direction : {"left_to_right", "right_to_left", "initial_pose"}) {
+  // cup_<giver>_to_<receiver> runs up to the receiver closing; *_release follows the scene swap.
+  for (const std::string direction : {"left_to_right", "right_to_left", "initial_pose",
+           "cup_left_to_right", "cup_left_to_right_grasp", "cup_left_to_right_release"}) {
     MotionSequence sequence;
     sequence.direction = direction;
-    sequence.giver = direction == "left_to_right" ? "left" : "right";
-    sequence.receiver = direction == "left_to_right" ? "right" : "left";
+    const bool from_left = direction.find("left_to_right") != std::string::npos;
+    sequence.giver = from_left ? "left" : "right";
+    sequence.receiver = from_left ? "right" : "left";
     const std::string p = "motion_sequences." + direction + ".";
     const auto names = node.declare_parameter<std::vector<std::string>>(
         p + "steps", std::vector<std::string>{}, descriptor);
@@ -329,6 +335,8 @@ Config load_config(rclcpp::Node & node) {
           q + "gripper_target", std::vector<double>{}, descriptor);
       step.frame = text(q + "frame", c.planning_frame);
       step.gripper_wait_only = node.declare_parameter<bool>(q + "gripper_wait_only", false, descriptor);
+      step.pipeline = text(q + "pipeline", "");
+      step.planner = text(q + "planner", "");
       step.duration = node.declare_parameter<double>(q + "duration", 1.0, descriptor);
       step.timeout = node.declare_parameter<double>(q + "timeout", 15.0, descriptor);
       step.tolerance = node.declare_parameter<double>(q + "tolerance", 0.02, descriptor);

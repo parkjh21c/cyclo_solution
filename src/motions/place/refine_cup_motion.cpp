@@ -259,28 +259,56 @@ void RefineCupMotion::tick() {
       return;
     }
     if (phase_ == "CORRECT_TO_CUP_CENTER") {
-      Step release;
-      release.name = "OPEN_GRIPPER";
-      release.type = "gripper";
-      release.arm = arm_;
-      release.target = {config_.refine_gripper_open};
-      release.duration = .6;
-      release.timeout = 12;
-      phase("OPEN_GRIPPER");
-      execute_step(release);
+      open_gripper();
       return;
     }
     at_observation_pose_ = true;
     result_.state = "SUCCEEDED";
     result_.sequence_completed = true;
-    result_.detail = "TCP centered, lowered and gripper opened; object landing is not verified";
+    result_.detail = config_.refine_observe ?
+        "TCP centered, lowered and gripper opened; object landing is not verified" :
+        "Gripper opened at the approach pose without wrist observation; landing is not verified";
     phase("RELEASE_COMPLETE");
     return;
   }
   if (phase_ != "FIND_WRIST_RIM") {
     return;
   }
+  if (!config_.refine_observe) {
+    release_in_place();
+    return;
+  }
   find_wrist_target();
+}
+
+bool RefineCupMotion::open_gripper() {
+  Step release;
+  release.name = "OPEN_GRIPPER";
+  release.type = "gripper";
+  release.arm = arm_;
+  release.target = {config_.refine_gripper_open};
+  release.duration = .6;
+  release.timeout = 12;
+  phase("OPEN_GRIPPER");
+  return execute_step(release);
+}
+
+void RefineCupMotion::release_in_place() {
+  // The approach already used the saved cup location; open at the current TCP.
+  const auto tcp = context_.pose_of(robot_.arms.at(arm_).tcp);
+  if (!tcp) {
+    fail("TCP_TF_MISSING", "Cannot report release pose");
+    return;
+  }
+  approach_target_ = *tcp;
+  if (!execute_) {
+    result_.state = "SUCCEEDED";
+    result_.sequence_completed = true;
+    result_.detail = "Observation disabled; execution opens the gripper at the current pose";
+    phase("RELEASE_PREVIEW_READY");
+    return;
+  }
+  open_gripper();
 }
 
 void RefineCupMotion::find_wrist_target() {

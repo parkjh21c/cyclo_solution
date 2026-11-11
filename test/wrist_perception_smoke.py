@@ -62,10 +62,11 @@ try:
     assert selection("3", "cup")[1].direction == "right_to_left"
     assert selection("4", "cup")[0] == "approach" and selection("4", "cup")[1].arm == "left"
     assert selection("5", "cup")[0] == "refine" and selection("5", "cup")[1].execute
-    assert selection("6", "cup")[0] == "withdraw" and selection("6", "cup")[1].arm == "both"
+    assert selection("6", "cup")[0] == "pick" and selection("6", "cup")[1].arm == "left"
     assert selection("d", "cup")[1].command == "start"
     assert selection("r", "cup")[1].command == "resume"
-    for removed in ("0", "7", "8", "9", "10", "11", "i", "k", "g", "s", "h"):
+    assert selection("7", "cup")[0] == "handover_cup" and selection("7", "cup")[1].arm == "left"
+    for removed in ("0", "8", "9", "10", "11", "i", "k", "g", "s", "h"):
         assert selection(removed, "cup") is None
     print("PASS: missing cup and unconfirmed rim never produce a valid target; runner modes")
 finally:

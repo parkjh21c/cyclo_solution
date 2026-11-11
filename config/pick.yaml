@@ -1,7 +1,16 @@
 handover_demo:
   ros__parameters:
     pick:
-      grasp_height: 0.065 # Above inferred cup bottom; assumes upright 16.5cm cup.
+      grasp_height: 0.075 # Above inferred cup bottom; assumes upright 16.5cm cup. +10 mm for table clearance.
       stand_off: 0.12
-      speed: 0.12
+      speed: 0.12 # Pilz PTP to pregrasp and fallback clear waypoint.
       tcp_forward_offset: -0.03 # Initial URDF-based pad center behind TCP; tune on hardware.
+      insert_speed: 0.06 # Pilz LIN insert and lift velocity scale.
+      insert_depth: 0.025 # Past pads-on-cup-axis toward the palm; ~0.027 touches the 5 cm cup model.
+      clear_height: 0.05 # Fallback when direct PTP is blocked: above rim, then LIN down.
+      approach_yaw_deg: 0.0 # Fixed heading, robot +X = 0, left +; sweep 2026-11-10: -45..+30 all ok.
+      approach_pitch_deg: 15.0 # Fingers tilted down; level (0) hits the arm reach limit.
+      close_target: 0.8 # Fingers stop on the cup before this; grasp is not sensor-verified.
+      close_duration: 1.0
+      lift_height: 0.08
+      stop_at_pregrasp: false # true: old behavior, stop before contact.

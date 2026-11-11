@@ -1,7 +1,13 @@
-## 전체 데모: 다이나믹셀 픽 → 핸드오버 → 컵에 놓기
+## 전체 데모: 다이나믹셀 픽 → 핸드오버 → 컵에 놓기 → 컵 잡기
 
 TaskManager가 전체 순서와 제한된 자동 재시도·취소·재개를 관리합니다.
-전체 실행 순서는 초기 자세 → 셀 픽 → 오른손에서 왼손으로 핸드오버 → 컵 접근 → 보정·놓기 → 손 빼기 → 초기 자세 복귀입니다.
+전체 실행 순서는 초기 자세 → 셀 픽 → 오른손에서 왼손으로 핸드오버 → 컵 접근 → 보정·놓기 → 왼손 컵 잡기입니다.
+놓기 직후 초기 자세로 돌아가지 않고, 시작 때 저장한 손목 컵 위치로 바로 컵을 잡습니다.
+데모는 왼손이 컵을 든 채로 끝납니다. 다음 `d`/`1`의 초기 자세 단계는 그리퍼를 열기 전에
+MoveIt에서 손에 붙은 컵 모델(`demo_place_cup`)을 떼고 삭제합니다(`RELEASE_CUP_MODEL`).
+책상 위에 장애물로 등록된 컵은 그대로 둡니다. 재시작 없이 다시 실행할 수 있습니다.
+놓기 뒤 손 빼기(`WITHDRAW_CUP`)는 기본으로 끕니다. `config/demo.yaml`의 `demo.withdraw_cup: true`로 켭니다.
+`PICK_CUP`은 동작 전 실패인 `CUP_NOT_FOUND`만 자동 재시도합니다.
 초기 자세는 `config/demo.yaml`에서 설정하며 헤드는 0.69rad, 리프트는 -0.1m입니다.
 픽 재시도나 중간 단계 재개 때 완료한 초기 자세 이동은 반복하지 않습니다.
 `ai_worker`의 인식·파지·해석 IK 코드는 `modules/dynamixel_pick/`에 포함되어 있습니다.
@@ -29,6 +35,20 @@ ros2 run demo_1f action_runner.py
 (`existing path cannot be removed`). 호스트에서 바꾼 파일을 `docker cp`로 넣고 같은 방식으로 빌드합니다.
 
 ```bash
+# 호스트: 초기 자세 변경과 핸드오버 계획 오류 진단 변경 복사
+cd /home/robotis/ai_worker_demo/cyclo_solution
+docker exec docker-demo_1f-1 mkdir -p /root/ros2_ws/src/demo_1f/src/motions/initial
+for f in CMakeLists.txt include/demo_1f/motions/initial/initial_pose_motion.hpp \
+         src/motions/initial/initial_pose_motion.cpp include/demo_1f/motions/common/cup_scene.hpp \
+         src/motions/common/approach_scene.cpp src/nodes/main.cpp test/test_demo_task.cpp \
+         include/demo_1f/runtime/execution/trajectory_executor.hpp \
+         src/runtime/execution/moveit_goal.cpp src/runtime/execution/path_preparation.cpp \
+         test/test_handover.cpp README.md; do
+  docker cp "$f" docker-demo_1f-1:/root/ros2_ws/src/demo_1f/"$f"
+done
+```
+
+```bash
 # 데모 컨테이너 안: 바뀐 패키지만 (예: demo_1f)
 cd /root/ros2_ws && source /root/ros2_ws/install/setup.bash
 colcon build --base-paths /root/ros2_ws/src/demo_1f /root/ros2_ws/src/demo_1f/modules/dynamixel_pick/ffw_* \
@@ -47,8 +67,10 @@ ROS 2 Jazzy 데모. 핸드오버, 셀 놓기, 컵 파지 전 접근을 각각 �
 - 왼손 손목 depth: 초기 자세에서 컵 입구 위치를 저장. 현재 컵 접근의 기본 입력.
 - `/approach_cup`: 저장된 컵 위치(`cup_source`: 손목 또는 헤드캠) 근처까지 TCP 이동.
 - `/refine_cup`: 손목캠 입구 관측 → 보정·하강 이동 → 그리퍼 열기.
+  `approach.refine_observe: false`(현재 설정)이면 관측·보정 없이 접근 위치에서 바로 엽니다.
 - `/withdraw_cup`: 각 손의 현재 TCP에서 10cm 상승 → TCP 정면 반대로 8cm 후퇴; 그리퍼 유지.
-- `/pick_cup`: 빈 그리퍼를 열고 컵 몸통 파지 전 대기 위치까지 이동 후 정지.
+- `/pick_cup`: 그리퍼 열기 → 파지 전 위치 → 수평 직선 삽입 → 닫기 → 컵 attach → 들어 올린 채 정지.
+- `/handover_cup`: 왼손이 든 컵을 오른손으로 넘김. 오른손이 컵을 든 채 정지 (메뉴 `7`).
 
 로봇·카메라 bringup과 Zenoh router는 기존 컨테이너에서 실행합니다.
 이 컨테이너는 들어가도 자동으로 로봇을 움직이지 않습니다.
@@ -233,13 +255,13 @@ ros2 run demo_1f action_runner.py
 
 | 입력 | 동작 |
 |---|---|
-| `d` | 전체 데모: 시작 자세 → 오른손 셀 픽 → 오른손→왼손 핸드오버 → 왼손 컵 접근·보정·놓기 → 양손 손 빼기 → 시작 자세 |
+| `d` | 전체 데모: 시작 자세 → 오른손 셀 픽 → 오른손→왼손 핸드오버 → 왼손 컵 접근·보정·놓기 → 왼손 컵 잡기 |
 | `1` | 시작 자세; 양손 열기 및 양팔·리프트·헤드 이동 |
 | `2` | 현재 자세에서 오른손 셀 픽; 초기 자세 이동 없음 |
 | `3` | 오른손→왼손 핸드오버 |
 | `4` | 저장된 헤드캠 컵 위치로 왼손 접근 |
 | `5` | 왼손 손목 보정·셀 놓기 |
-| `6` | 양손 손 빼기; 왼손→오른손 순차 상승·후퇴 |
+| `6` | 왼손 컵 잡기; 옆에서 삽입 → 닫기 → 들어 올린 채 정지 |
 | `r` | 저장된 실패 단계 재개 |
 | `c` | 이 실행기에서 보낸 액션 취소; 최종 정지 결과 대기 |
 | `p` | 서버·로봇 상태 확인 |
@@ -250,8 +272,7 @@ ros2 run demo_1f action_runner.py
 명령 + Enter로 요청하며, 최종 결과가 오기 전에는 다음 모션을 보내지 않습니다.
 실행기를 종료해도 별도 실행한 서버·카메라는 유지됩니다.
 
-컵 잡기는 파지 전 접근까지만 구현되어 있습니다. `/pick_cup` 완료 후 전진·닫기·들어올리기는
-수행하지 않습니다. 이후 ACT 등 별도 모듈을 연결할 수 있으며 현재 학습 정책은 포함하지 않습니다.
+`pick.stop_at_pregrasp: true`이면 예전처럼 파지 전 위치에서 정지합니다.
 
 ### 컵 근처로 손 이동
 
@@ -378,7 +399,7 @@ test/                        기하, 상태 전이, 취소, ROS/웹 회귀 테�
 | `ApproachCupMotion` | 헤드 BODY 관측 → 충돌 장면 적용 → 컵 근처 접근 |
 | `RefineCupMotion` | 손목 RIM 관측·필요 시 pitch 조정 → 낮아진 중심으로 이동 → 그리퍼 열기 |
 | `WithdrawCupMotion` | 지정한 손 또는 양손 순차 실행 → 방향 유지·10cm 상승 → TCP 뒤로 8cm 후퇴 |
-| `PickCupMotion` | 헤드 BODY 관측 → joint6 기준 접근 방향 계산 → 그리퍼 열기·파지 전 위치에서 정지 |
+| `PickCupMotion` | 저장된 컵 위치 → joint6 기준 접근 방향 → 열기·파지 전 위치 → 삽입·닫기·attach·상승 |
 | `HeadCupTracker` | 헤드 BODY 상시 수집 → 유효 3프레임 평균 갱신 → 가려져도 마지막 위치 유지 |
 | `HeadCupObserver` | 저장된 헤드 위치의 수명·치수·오차 확인 → 접근용 스냅샷 |
 | `CupMotion` | 컵 모션 공통 시작·취소·실패·명령 전달 |
@@ -467,7 +488,7 @@ python3 test/test_table_geometry.py
 
 1. `test_perception.sh`로 인식/웹을 실행합니다. `wrist_perception.py`가 함께 시작됩니다.
 2. `run_actions.sh`의 **4**로 왼손 접근을 실행합니다.
-3. **5**로 손목 보정·셀 놓기를 실행합니다. **6**은 양손 손 빼기, **c**는 현재 액션 취소입니다.
+3. **5**로 손목 보정·셀 놓기를 실행합니다. **6**은 왼손 컵 잡기, **c**는 현재 액션 취소입니다.
    미리보기가 필요하면 아래 ROS 액션을 직접 호출합니다.
 
 ```bash
@@ -519,17 +540,16 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
   `refine_lower_distance: 0.03`, `refine_gripper_open: 0.0`으로 조정합니다.
   출발·목표 TCP는 측정 입구보다 최소 1.5cm 위여야 하며 경로 상자의 아래쪽만 이 높이로 제한하며 X/Y 및 위쪽 여유는 기본 4cm로 유지합니다. 충돌 검사를 유지합니다.
   셀 파지 오프셋·셀 충돌 형상은 아직 반영하지 않습니다.
-  손 빼기는 별도 `/withdraw_cup` 액션(메뉴 `6`)으로 실행합니다. 메뉴 `6`과 전체 데모는
-  `arm: both`로 왼손 → 오른손을 순차 실행합니다. 동시 이동은 아닙니다.
+  손 빼기는 별도 `/withdraw_cup` 액션으로 실행합니다(메뉴에서는 제거). `demo.withdraw_cup: true`인
+  전체 데모는 `arm: both`로 왼손 → 오른손을 순차 실행합니다. 동시 이동은 아닙니다.
   `arm: left` / `right`로 한 손만 실행할 수도 있습니다. 양손 미리보기는 지원하지 않으며
   각 손을 따로 미리보기합니다. 컵 재인식 없이
   현재 TCP 방향을 유지한 채 세계 좌표 Z로 10cm 상승하고,
   TCP 정면의 반대(+TCP Z)로 8cm 후퇴합니다. 두 구간은 충돌 검사되는 Pilz LIN이며
   속도는 `refine_correction_speed`, 가속도는 그 값의 1/4을 사용합니다.
   후퇴 방향이 아래를 향하면 중단합니다. 이동 실패·취소 시 다음 구간을 실행하지 않습니다.
-  `5`번은 셀 놓기까지만 수행합니다. 수동 테스트는 `5` → `6` → `1` 순서입니다.
-  `6`은 그리퍼나 초기 자세 이동을 실행하지 않습니다. `d` 전체 데모는 놓기 후
-  `WITHDRAW_CUP` → `RETURN_INITIAL` 순서로 손 빼기와 양팔·리프트·헤드 복귀를 실행합니다.
+  `5`번은 셀 놓기까지만 수행합니다. 수동 테스트는 `5` → `6`(컵 잡기) 순서입니다.
+  `withdraw_cup`을 켠 `d` 전체 데모는 놓기 후 `WITHDRAW_CUP` → `PICK_CUP` 순서로 실행합니다.
   한 손이 실패·취소되면 나머지 손이나 초기 자세 복귀를 시작하지 않습니다.
   책상 전체 충돌 모델은 `wrist_table_init.py`의 `demo_table`이 담당합니다.
   보정 액션 완료는 하강·그리퍼 열기 완료이며 실제 셀의 컵 안 착지는 확인하지 않습니다.
@@ -548,27 +568,72 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
 
 핸드오버 준비·인계·후퇴 목표의 전방 위치는 arm_base_link 기준 X=0.33m입니다. 기존 0.38m에서 몸쪽으로 5cm 당겼으며 높이와 손 방향은 유지합니다.
 
+## Cup handover (left → right)
+
+자세한 설계, 사용한 IK, 알려진 문제는 [docs/cup_pick_handover.md](docs/cup_pick_handover.md)에 정리했습니다.
+
+`/handover_cup`(`arm: left` = 컵을 든 손)은 기존 DYNAMIXEL 핸드오버처럼 YAML 시퀀스를 실행합니다.
+`handover.yaml`의 `motion_sequences`에 세 시퀀스가 필요합니다.
+
+- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_carry`(왼손 `joint` Pilz PTP) → `cup_ready`(오른손 `joint` PTP, 잡는 위치 20cm 뒤)로 한 팔씩 움직입니다. 대기 거리는
+  `scripts/right_ready_check.py`로 고릅니다(0.12는 경로가 컵·왼손과 충돌, 0.30 이상은 IK 없음, 0.20·0.25 통과).
+  양팔 동시 Pilz PTP(`dual_joint` + `pipeline`/`planner`)는 2026-11-11 시험에서 `MoveIt error 99999`로 계획에
+  실패해서 쓰지 않습니다. 기본 OMPL `dual_joint`는
+  경로가 무작위라 컵이 크게 기울 수 있어(2026-11-11) 쓰지 않습니다.
+- `cup_left_to_right_grasp`: `cup_insert`(오른손 `linear` 직선 삽입, 컵 축을 1cm 지남) → `receiver_close`.
+  오른손과 컵의 접촉 허용(`CUP_CONTACT_SCENE`)은 이 시퀀스 직전에만 적용합니다. 그 전에는 오른손 이동 중에도
+  컵 충돌을 검사합니다.
+- `cup_left_to_right_release`: `giver_release`(왼손 열기) → `cup_retreat`(왼손 `linear` 후퇴).
+
+두 시퀀스 사이에 MoveIt 컵 모델을 옮깁니다(`CUP_DETACH`: 왼손에서 분리, `CUP_ATTACH`: 오른손에 부착,
+왼손 손가락·손바닥과의 접촉은 허용). 장면 변경 중 취소하면 부착까지 끝낸 뒤 정지합니다.
+시작 전제는 `/pick_cup` 직후(MoveIt 컵이 왼손에 붙어 있음)입니다. 미리보기(`execute: false`)는
+시퀀스 설정을 확인하고 오른손 삽입 자세를 `target_pose`로 돌려줍니다.
+
+목표 관절값은 로봇을 움직이지 않고 MoveIt IK로 구합니다. 초기 자세에서 컵이 측정된 상태로:
+
+```bash
+python3 scripts/generate_cup_handover_targets.py CUP_X CUP_Y RIM_Z --output /tmp/cup_handover.yaml
+```
+
+출력 YAML의 `motion_sequences` 항목을 `handover.yaml`에 합칩니다. 넘김 지점(base_link x 0.38, y 0.0,
+컵 바닥 z 0.88), 오른손은 바닥 + 12cm 높이 수평, 왼손은 −90° 방향·15° 기울임·7.5cm 높이입니다.
+`scripts/cup_layout_check.py`는 후보 배치의 도달·충돌을 읽기 전용으로 검사합니다.
+
 ## Cup pickup approach
 
-Cup pregrasp is a reusable API module and is not included in the demo runner menu.
+Cup pickup runs from runner menu `6` and as the last `/run_demo` stage (`PICK_CUP`, right after release).
 
 `/pick_cup` uses `demo_1f/action/ApproachCup` (`arm: left`,
 `cup_id: cup`, `execute: true`). Both arms are supported through the action API.
 Approach infers cup bottom from head BODY midpoint minus half configured cup height.
-The hand targets horizontal with roll/pitch ±10°; yaw is allowed ±15° around
-the initial joint6 wrist-center-to-cup XY direction from the first planning attempt.
-The wrist center (`arm_l_link6` / `arm_r_link6`) is captured once at request start.
-Within 5 cm horizontal distance, the initial TCP forward yaw is retained instead;
-a missing wrist/TCP TF or undefined heading aborts. The motion target remains TCP-based.
-The target is 12 cm behind the grasp TCP along that direction, at bottom + 6.5 cm.
-The TCP/pad offset is -3 cm (initial URDF estimate, not calibrated). No path-wide tilt
-constraint is applied; the measured arrival pose is returned when the approach finishes.
-OMPL samples the goal angle ranges; there is no separate ranked IK candidate search.
+The hand heading is fixed by `approach_yaw_deg` (robot +X = 0, left +) and the fingers tilt
+down by `approach_pitch_deg` (15°); the jaws stay horizontal. The heading does not depend on
+the start pose, so the grasp is the same from the initial pose or right after release.
+A level hand (0°) hit the left arm reach limit at grasp height; the 2026-11-10 IK sweep
+passed every yaw from -45° to +30° at 10° and 20° tilt, for insert depths up to 4 cm.
+The pad center targets the cup axis at bottom + 7.5 cm; the pregrasp is 12 cm behind it,
+horizontally along the heading.
+The TCP/pad offset is -3 cm (initial URDF estimate, not calibrated).
+`PICK_PREGRASP` is one Pilz PTP (nearest IK solution, joint-space interpolation, no wide
+arm swings). If it fails before the arm moves (joints within `continuous_start_tolerance`),
+`PICK_CLEAR` (PTP to `clear_height` above the rim, straight over the pregrasp) and
+`PICK_LOWER` (LIN straight down) are used instead. If those fail too, the result message
+also carries the direct PTP error.
 
-Approach opens the empty gripper, moves to the pregrasp pose and stops before contact.
-This module performs no wrist BODY detection, correction, insertion, closing or lifting.
-`/pick_cup_refine` and menu entries 12/13 have been removed. A future learned pickup
-policy can take over after the approach action succeeds; no ACT policy is connected yet.
+After the pregrasp, the hand moves horizontally with Pilz LIN (`PICK_INSERT`),
+keeping the measured arrival orientation. The target uses the measured heading, so the
+pad center ends `insert_depth` (2.5 cm) past the cup axis, toward the palm, at bottom + 7.5 cm.
+About 2.7 cm the palm (`rh_p12_rn_base`) touches the 5 cm cup model (checked 2026-11-10). Only this hand's finger links
+(`r1/r2/l1/l2`) may touch `demo_place_cup` during insertion; the palm stays checked.
+`PICK_CLOSE` commands `close_target` with `gripper_wait_only` (grasp not verified).
+`PICK_ATTACH` moves `demo_place_cup` from the world to the TCP link (fingers and palm as
+touch links) and allows cup/`demo_pick_table` contact. `PICK_LIFT` raises the TCP by
+`lift_height` (Pilz LIN, same orientation) and the action finishes holding the cup.
+While the cup stays attached, a new `/pick_cup` or `/approach_cup` scene fails with
+`OBJECT_ALREADY_HELD`. The initial pose stage detaches and deletes it before opening the grippers.
+Set `pick.stop_at_pregrasp: true` to stop before contact as before.
+`/pick_cup_refine` and menu entries 12/13 have been removed.
 Head BODY perception, handover and wrist RIM refinement for cell placement are unchanged.
 
 ```bash
@@ -621,6 +686,13 @@ CPU 사용량이 늘 수 있습니다. 1로 설정하면 단일 탐색으로 돌
 각도 조건과 보정의 TCP 이동 범위는 유지합니다. Pilz LIN/PTP와 셀 집기의 자체 IK는
 변경하지 않습니다. 탐색한 후보 중 짧은 경로를 선호하며 전역 최단 경로나 TCP·팔꿈치
 높이 상한을 보장하지 않습니다. 적용 후 **MoveIt과 동작 노드를 함께 재시작**해야 합니다.
+
+연속 핸드오버의 계획 피드백은 실제 계획 중인 구간 이름을 표시합니다. 계획 실패 결과에는
+구간 이름과 MoveIt의 상세 오류를 포함하며, 관절 목표 중심이 충돌하거나 관절 제한을
+벗어나면 충돌 대상·위반 관절·부착 물체도 표시합니다. 목표 중심 충돌만으로 허용 영역
+전체가 불가능하다고 단정하지 않으므로, 이 검사는 계획 실패 후 진단에만 사용합니다.
+`demo_place_cup`이 손에 부착된 채 남아 있으면 반대 손의 접근 목표와 충돌할 수 있습니다.
+실제 컵 유무를 확인하고 장면을 정리해야 하며, 핸드오버가 부착 물체를 자동 삭제하지는 않습니다.
 
 ### DYNAMIXEL 셀 집기 업데이트 (2026-11-06)
 

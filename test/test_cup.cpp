@@ -1,3 +1,4 @@
+#include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/motions/pick/pick_cup_motion.hpp"
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
 #include "demo_1f/motions/place/refine_cup_motion.hpp"
@@ -5,6 +6,7 @@
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include "demo_1f/runtime/geometry/tcp_roll.hpp"
 #include "demo_1f/tasks/task_manager.hpp"
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <opencv2/imgproc.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -430,6 +432,27 @@ TEST_F(ApproachFixture, RefinementMissingOrOldInputNeverTilts) {
   refinement->tick();
   EXPECT_EQ(refinement->result().code, "WRIST_INPUT_MISSING");
   EXPECT_TRUE(executor.steps.empty());
+}
+
+TEST_F(ApproachFixture, RefinementWithoutObservationOpensInPlace) {
+  config.refine_observe = false;
+  tcp_for_refinement();
+  std::string reason;
+  ASSERT_TRUE(refinement->start("left", "cup", reason, false));
+  refinement->tick();
+  EXPECT_TRUE(refinement->result().sequence_completed) << refinement->result().detail;
+  EXPECT_TRUE(executor.steps.empty()); // Preview never opens.
+  ASSERT_TRUE(refinement->start("left", "cup", reason, true));
+  for (int i = 0; i < 10 && refinement->running(); ++i) {
+    feedback();
+    complete();
+    refinement->tick();
+  }
+  ASSERT_TRUE(refinement->result().sequence_completed) << refinement->result().detail;
+  ASSERT_EQ(executor.steps.size(), 1u); // No wrist input, tilt, correction or lowering.
+  EXPECT_EQ(executor.steps[0].name, "OPEN_GRIPPER");
+  EXPECT_EQ(executor.steps[0].target, std::vector<double>{config.refine_gripper_open});
+  EXPECT_TRUE(scene.scenes.empty());
 }
 
 TEST_F(ApproachFixture, RefinementWaitsForGripperBeforeTilting) {
@@ -1359,22 +1382,28 @@ TEST(PickGeometry, SideGraspUsesRimHeightAndHorizontalJawOrientation) {
   EXPECT_FALSE(c.validate(.165).empty());
 }
 
-TEST(PickGeometry, HeadingUsesInitialTcpAndNearCupFallback) {
-  geometry_msgs::msg::Pose tcp;
-  tcp.position.x = .2;
-  tcp.position.y = .3;
+TEST(PickGeometry, TiltedGraspKeepsPadsOnCupAxisAndJawsLevel) {
+  PickCupConfig c;
+  c.approach_pitch_deg = 15;
+  geometry_msgs::msg::Point rim;
+  rim.x = .6;
+  rim.y = .2;
+  rim.z = 1.0;
+  const double yaw = -.3, pitch = 15 * M_PI / 180;
+  auto p = cup_grasp_pose(rim, .165, c, yaw);
+  EXPECT_NEAR(*tcp_pitch(p.orientation), pitch, 1e-9);
+  EXPECT_NEAR(*tcp_yaw(p.orientation), yaw, 1e-9);
+  EXPECT_NEAR(*tcp_roll(p.orientation), 0, 1e-9); // Jaw axis stays horizontal.
+  // Pad center = TCP - 3 cm along the tilted forward = cup axis at grasp height.
   tf2::Quaternion q;
-  q.setRPY(0, -M_PI / 2, -.4);
-  tcp.orientation = tf2::toMsg(q);
-  geometry_msgs::msg::Point cup;
-  cup.x = .6;
-  cup.y = .1;
-  EXPECT_NEAR(*cup_approach_yaw(tcp, cup), std::atan2(-.2, .4), 1e-9);
-  cup.x = .21;
-  cup.y = .31;
-  EXPECT_NEAR(*cup_approach_yaw(tcp, cup), -.4, 1e-9);
-  tcp.orientation = geometry_msgs::msg::Quaternion{};
-  EXPECT_FALSE(cup_approach_yaw(tcp, cup));
+  tf2::fromMsg(p.orientation, q);
+  const auto forward = tf2::quatRotate(q, tf2::Vector3(0, 0, -1));
+  EXPECT_NEAR(p.position.x - .03 * forward.x(), .6, 1e-9);
+  EXPECT_NEAR(p.position.y - .03 * forward.y(), .2, 1e-9);
+  EXPECT_NEAR(p.position.z - .03 * forward.z(), .9, 1e-9);
+  EXPECT_TRUE(c.validate(.165).empty());
+  c.approach_pitch_deg = 40;
+  EXPECT_FALSE(c.validate(.165).empty());
 }
 
 TEST_F(ApproachFixture, PickPreviewNeverOpensGripperOrChangesScene) {
@@ -1393,26 +1422,31 @@ TEST_F(ApproachFixture, PickPreviewNeverOpensGripperOrChangesScene) {
   EXPECT_TRUE(scene.scenes.empty());
 }
 
-TEST_F(ApproachFixture, PickHeadingIsFrozenWhileCollectingCupSamples) {
-  tcp_for_refinement("left", .2, .3);
+TEST_F(ApproachFixture, PickHeadingIsFixedRegardlessOfStartPose) {
   PickCupConfig pc;
-  PickCupMotion pick(robot, config, pc, *context, executor, scene);
-  std::string reason;
-  ASSERT_TRUE(pick.start("left", "cup", reason, false));
-  pick.tick();
-  tcp_for_refinement("left", .8, -.2);
-  for (int i = 0; i < 10 && pick.running(); ++i) {
-    observe("head");
-    pick.tick();
+  pc.approach_yaw_deg = -20;
+  pc.approach_pitch_deg = 15;
+  for (const double x : {.2, .8}) {
+    tcp_for_refinement("left", x, x - .5);
+    PickCupMotion pick(robot, config, pc, *context, executor, scene);
+    std::string reason;
+    ASSERT_TRUE(pick.start("left", "cup", reason, false));
+    for (int i = 0; i < 10 && pick.running(); ++i) {
+      observe("head");
+      pick.tick();
+    }
+    ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+    const auto & q = pick.approach_target().pose.orientation;
+    EXPECT_NEAR(*tcp_yaw(q), -20 * M_PI / 180, 1e-9);
+    EXPECT_NEAR(*tcp_pitch(q), 15 * M_PI / 180, 1e-9);
   }
-  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
-  EXPECT_NEAR(*tcp_yaw(pick.approach_target().pose.orientation), std::atan2(-.3, .44), 1e-9);
 }
 
 TEST_F(ApproachFixture, PickApproachStopsAfterOpenAndPregrasp) {
   tcp_for_refinement("left");
   relaxed_pick_arrival = true;
   PickCupConfig pc;
+  pc.stop_at_pregrasp = true;
   PickCupMotion pick(robot, config, pc, *context, executor, scene);
   std::string reason;
   ASSERT_TRUE(pick.start("left", "cup", reason, true));
@@ -1427,10 +1461,9 @@ TEST_F(ApproachFixture, PickApproachStopsAfterOpenAndPregrasp) {
   EXPECT_EQ(executor.steps[0].name, "PICK_OPEN");
   EXPECT_EQ(executor.steps[0].target, std::vector<double>{0.0});
   EXPECT_EQ(executor.steps[1].name, "PICK_PREGRASP");
-  EXPECT_TRUE(executor.steps[1].position_only);
-  EXPECT_NEAR(executor.steps[1].tcp_roll_limit, 10 * M_PI / 180, 1e-9);
-  EXPECT_NEAR(executor.steps[1].tcp_pitch_limit, 10 * M_PI / 180, 1e-9);
-  EXPECT_NEAR(executor.steps[1].tcp_yaw_limit, 15 * M_PI / 180, 1e-9);
+  EXPECT_EQ(executor.steps[1].type, "pose");
+  EXPECT_FALSE(executor.steps[1].position_only); // Full pose selects Pilz PTP.
+  EXPECT_EQ(executor.steps[1].orientation_slack, 0);
   EXPECT_NEAR(pick.approach_target().pose.position.x, .45, 1e-8);
   EXPECT_NEAR(pick.approach_target().pose.position.z, .84 - .165 / 2 + .065, 1e-8);
   EXPECT_FALSE(pick.blocks_other_motion());
@@ -1446,6 +1479,343 @@ TEST_F(ApproachFixture, PickApproachStopsAfterOpenAndPregrasp) {
       }));
     }
   }
+}
+
+TEST_F(ApproachFixture, PickInsertsClosesAttachesAndLifts) {
+  tcp_for_refinement("left");
+  relaxed_pick_arrival = true;
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    complete();
+    pick.tick();
+  }
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  EXPECT_EQ(context->snapshot().phase, "PICK_COMPLETE");
+  ASSERT_EQ(executor.steps.size(), 5u);
+  EXPECT_EQ(executor.steps[2].name, "PICK_INSERT");
+  EXPECT_EQ(executor.steps[2].type, "linear");
+  EXPECT_EQ(executor.steps[3].name, "PICK_CLOSE");
+  EXPECT_TRUE(executor.steps[3].gripper_wait_only);
+  EXPECT_EQ(executor.steps[3].target, std::vector<double>{pc.close_target});
+  EXPECT_EQ(executor.steps[4].name, "PICK_LIFT");
+  EXPECT_EQ(executor.steps[4].type, "linear");
+  // Pads end insert_depth past the cup axis along the measured heading, at grasp height.
+  const auto & insert = executor.steps[2].target;
+  geometry_msgs::msg::Quaternion q;
+  q.x = insert[3];
+  q.y = insert[4];
+  q.z = insert[5];
+  q.w = insert[6];
+  const double yaw = *tcp_yaw(q);
+  EXPECT_GT(std::abs(yaw), 5 * M_PI / 180); // Relaxed arrival heading, not the planned 0.
+  const double past_axis = pc.insert_depth - pc.tcp_forward_offset;
+  EXPECT_NEAR(insert[0], .54 + past_axis * std::cos(yaw), 1e-6);
+  EXPECT_NEAR(insert[1], past_axis * std::sin(yaw), 1e-6);
+  EXPECT_NEAR(insert[2], .84 - .165 / 2 + pc.grasp_height, 1e-6);
+  EXPECT_NEAR(executor.steps[4].target[2], insert[2] + pc.lift_height, 1e-6);
+  for (size_t i = 3; i < 7; ++i) {
+    EXPECT_NEAR(executor.steps[4].target[i], insert[i], 1e-9); // Lift keeps hand orientation.
+  }
+  ASSERT_EQ(scene.scenes.size(), 3u);
+  const auto & contact = scene.scenes[1].allowed_collision_matrix;
+  ASSERT_EQ(contact.entry_names[0], "demo_place_cup");
+  for (size_t i = 1; i < contact.entry_names.size(); ++i) {
+    EXPECT_EQ(contact.entry_names[i].rfind("gripper_l_rh_p12_rn_", 0), 0u);
+    EXPECT_TRUE(contact.entry_values[0].enabled[i]);
+    EXPECT_TRUE(contact.entry_values[i].enabled[0]);
+  }
+  EXPECT_TRUE(scene.scenes[1].robot_state.attached_collision_objects.empty());
+  const auto & attached = scene.scenes[2].robot_state.attached_collision_objects;
+  ASSERT_EQ(attached.size(), 1u);
+  EXPECT_EQ(attached[0].object.id, "demo_place_cup");
+  EXPECT_EQ(attached[0].link_name, robot.arms.at("left").tcp);
+  EXPECT_TRUE(attached[0].object.primitives.empty());
+  EXPECT_NE(std::find(attached[0].touch_links.begin(), attached[0].touch_links.end(),
+                "gripper_l_rh_p12_rn_base"),
+      attached[0].touch_links.end());
+  EXPECT_TRUE(scene.scenes[2].world.collision_objects.empty());
+  EXPECT_FALSE(pick.blocks_other_motion());
+}
+
+TEST_F(ApproachFixture, PickFallsBackToClearAndLowerWhenDirectPtpFailsBeforeMotion) {
+  tcp_for_refinement("left");
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  bool rejected = false;
+  for (int i = 0; i < 80 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!rejected && !executor.steps.empty() && executor.steps.back().name == "PICK_PREGRASP" &&
+        executor.current.state == ExecutionState::Running) {
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "MoveIt error -31"};
+      rejected = true;
+    } else {
+      complete();
+    }
+    pick.tick();
+  }
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  ASSERT_EQ(executor.steps.size(), 7u);
+  EXPECT_EQ(executor.steps[2].name, "PICK_CLEAR");
+  EXPECT_EQ(executor.steps[2].type, "pose");
+  EXPECT_EQ(executor.steps[3].name, "PICK_LOWER");
+  EXPECT_EQ(executor.steps[3].type, "linear");
+  EXPECT_EQ(executor.steps[4].name, "PICK_INSERT");
+  // Clear waypoint sits straight above the pregrasp, clear_height above the rim.
+  EXPECT_NEAR(executor.steps[2].target[0], executor.steps[1].target[0], 1e-9);
+  EXPECT_NEAR(executor.steps[2].target[1], executor.steps[1].target[1], 1e-9);
+  EXPECT_NEAR(executor.steps[2].target[2], .84 + .165 / 2 + pc.clear_height, 1e-9);
+  EXPECT_EQ(executor.steps[3].target, executor.steps[1].target);
+}
+
+TEST_F(ApproachFixture, PickDoesNotFallBackAfterArmMoved) {
+  tcp_for_refinement("left");
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 40 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!executor.steps.empty() && executor.steps.back().name == "PICK_PREGRASP" &&
+        executor.current.state == ExecutionState::Running) {
+      sensor_msgs::msg::JointState moved;
+      moved.header.stamp = node->now();
+      moved.name = {"left_joint", "left_grip", "right_joint", "right_grip"};
+      moved.position = {.1, 0, 0, 0};
+      moved.velocity = {0, 0, 0, 0};
+      context->observe_joints(moved);
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "controller aborted"};
+      pick.tick();
+      break;
+    }
+    complete();
+    pick.tick();
+  }
+  EXPECT_EQ(pick.result().state, "FAILED");
+  EXPECT_EQ(executor.steps.back().name, "PICK_PREGRASP");
+}
+
+TEST_F(ApproachFixture, PickInsertFailureNeverClosesGripper) {
+  tcp_for_refinement("left");
+  relaxed_pick_arrival = true;
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!executor.steps.empty() && executor.steps.back().name == "PICK_INSERT" &&
+        executor.current.state == ExecutionState::Running) {
+      executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no LIN path"};
+    } else {
+      complete();
+    }
+    pick.tick();
+  }
+  EXPECT_EQ(pick.result().state, "FAILED");
+  EXPECT_EQ(pick.result().code, "PLANNING_FAILED");
+  ASSERT_EQ(executor.steps.size(), 3u);
+  EXPECT_EQ(executor.steps.back().name, "PICK_INSERT");
+  for (const auto & update : scene.scenes) {
+    EXPECT_TRUE(update.robot_state.attached_collision_objects.empty());
+  }
+}
+
+TEST(PickGeometry, InsertKeepsMeasuredOrientationAndGraspHeight) {
+  PickCupConfig c;
+  geometry_msgs::msg::Pose pregrasp;
+  tf2::Quaternion hand, axes;
+  hand.setRPY(.05, .08, .3);
+  axes.setRPY(0, -M_PI / 2, 0);
+  pregrasp.orientation = tf2::toMsg(hand * axes);
+  geometry_msgs::msg::Point rim;
+  rim.x = .6;
+  rim.y = .2;
+  rim.z = 1.0;
+  const auto p = cup_insert_pose(pregrasp, rim, .165, c);
+  ASSERT_TRUE(p);
+  const double yaw = *tcp_yaw(pregrasp.orientation);
+  EXPECT_NEAR(p->position.x, .6 + (.03 + c.insert_depth) * std::cos(yaw), 1e-9);
+  EXPECT_NEAR(p->position.y, .2 + (.03 + c.insert_depth) * std::sin(yaw), 1e-9);
+  EXPECT_NEAR(p->position.z, .9, 1e-9);
+  EXPECT_EQ(p->orientation, pregrasp.orientation);
+  pregrasp.orientation = geometry_msgs::msg::Quaternion{};
+  EXPECT_FALSE(cup_insert_pose(pregrasp, rim, .165, c));
+  EXPECT_TRUE(c.validate(.165).empty());
+  c.lift_height = .5;
+  EXPECT_FALSE(c.validate(.165).empty());
+  c.lift_height = .08;
+  c.close_target = 1.5;
+  EXPECT_FALSE(c.validate(.165).empty());
+  c.close_target = .8;
+  c.insert_depth = .05;
+  EXPECT_FALSE(c.validate(.165).empty());
+}
+
+namespace {
+Step taught(const std::string & name, const std::string & type, const std::string & arm,
+    std::vector<double> target) {
+  Step s;
+  s.name = name;
+  s.type = type;
+  s.arm = arm;
+  s.target = std::move(target);
+  s.timeout = 30;
+  s.frame = "base_link";
+  return s;
+}
+} // namespace
+
+class CupHandoverFixture : public ApproachFixture {
+protected:
+  void SetUp() override {
+    ApproachFixture::SetUp();
+    const std::vector<double> pose = {.38, -.12, .95, 0, 0, 0, 1};
+    MotionSequence transfer, grasp;
+    transfer.steps = {taught("cup_ready", "joint", "left", {.1})};
+    grasp.steps = {taught("cup_insert", "linear", "right", pose),
+        taught("receiver_close", "gripper", "right", {.8})};
+    grasp.steps[1].duration = 1;
+    grasp.steps[1].gripper_wait_only = true;
+    MotionSequence release;
+    release.steps = {taught("giver_release", "gripper", "left", {0.}),
+        taught("cup_retreat", "linear", "left", {.38, .12, .95, 0, 0, 0, 1})};
+    release.steps[0].duration = 1;
+    robot.motion_sequences["cup_left_to_right"] = transfer;
+    robot.motion_sequences["cup_left_to_right_grasp"] = grasp;
+    robot.motion_sequences["cup_left_to_right_release"] = release;
+  }
+
+  void run(CupHandoverMotion & handover, size_t failing_after = 99) {
+    size_t seen = 0;
+    for (int i = 0; i < 80 && handover.running(); ++i) {
+      feedback();
+      if (executor.steps.size() >= failing_after &&
+          executor.current.state == ExecutionState::Running) {
+        executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no path"};
+      } else {
+        complete();
+      }
+      handover.tick();
+      while (seen < scene.scenes.size()) {
+        steps_at_scene.push_back(executor.steps.size());
+        ++seen;
+      }
+    }
+  }
+
+  std::vector<size_t> steps_at_scene;
+};
+
+TEST_F(CupHandoverFixture, TransfersCupModelBetweenCloseAndRelease) {
+  CupHandoverMotion handover(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(handover.start("left", "cup", reason, true)) << reason;
+  run(handover);
+  ASSERT_TRUE(handover.result().sequence_completed) << handover.result().detail;
+  EXPECT_EQ(context->snapshot().phase, "CUP_HANDOVER_COMPLETE");
+  ASSERT_EQ(executor.steps.size(), 5u);
+  const std::vector<std::string> expected = {
+      "cup_ready", "cup_insert", "receiver_close", "giver_release", "cup_retreat"};
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(executor.steps[i].name, expected[i]);
+  }
+  // Contact is allowed only after the transfer move and before the insert; detach and attach
+  // follow the receiver's close.
+  ASSERT_EQ(scene.scenes.size(), 3u);
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{1, 3, 3}));
+  const auto & contact = scene.scenes[0].allowed_collision_matrix;
+  ASSERT_EQ(contact.entry_names[0], "demo_place_cup");
+  for (size_t i = 1; i < contact.entry_names.size(); ++i) {
+    EXPECT_EQ(contact.entry_names[i].rfind("gripper_r_rh_p12_rn_", 0), 0u);
+    EXPECT_TRUE(contact.entry_values[0].enabled[i]);
+  }
+  EXPECT_NE(std::find(contact.entry_names.begin(), contact.entry_names.end(),
+                "gripper_r_rh_p12_rn_base"),
+      contact.entry_names.end()); // The wide cup model also touches the palm at a deep grasp.
+  const auto & detach = scene.scenes[1].robot_state.attached_collision_objects;
+  ASSERT_EQ(detach.size(), 1u);
+  EXPECT_EQ(detach[0].object.operation, detach[0].object.REMOVE);
+  EXPECT_EQ(detach[0].link_name, robot.arms.at("left").tcp);
+  const auto & attach = scene.scenes[2].robot_state.attached_collision_objects;
+  ASSERT_EQ(attach.size(), 1u);
+  EXPECT_EQ(attach[0].object.id, "demo_place_cup");
+  EXPECT_EQ(attach[0].link_name, robot.arms.at("right").tcp);
+  EXPECT_TRUE(attach[0].object.primitives.empty());
+  // The giver's fingers may still touch the cup while it lets go.
+  const auto & acm = scene.scenes[2].allowed_collision_matrix;
+  ASSERT_EQ(acm.entry_names[0], "demo_place_cup");
+  for (size_t i = 1; i < acm.entry_names.size(); ++i) {
+    EXPECT_EQ(acm.entry_names[i].rfind("gripper_l_rh_p12_rn_", 0), 0u);
+    EXPECT_TRUE(acm.entry_values[0].enabled[i]);
+  }
+}
+
+TEST_F(CupHandoverFixture, PreviewNeverMovesAndReportsInsertPose) {
+  CupHandoverMotion handover(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(handover.start("left", "cup", reason, false)) << reason;
+  handover.tick();
+  EXPECT_TRUE(handover.result().sequence_completed) << handover.result().detail;
+  EXPECT_TRUE(executor.steps.empty());
+  EXPECT_TRUE(scene.scenes.empty());
+  EXPECT_NEAR(handover.approach_target().pose.position.y, -.12, 1e-9);
+}
+
+TEST_F(CupHandoverFixture, InsertFailureNeverClosesOrMovesTheCupModel) {
+  CupHandoverMotion handover(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(handover.start("left", "cup", reason, true)) << reason;
+  run(handover, 2);
+  EXPECT_EQ(handover.result().state, "FAILED");
+  EXPECT_EQ(handover.result().code, "PLANNING_FAILED");
+  ASSERT_EQ(executor.steps.size(), 2u);
+  EXPECT_EQ(executor.steps.back().name, "cup_insert");
+  ASSERT_EQ(scene.scenes.size(), 1u); // Only the contact allowance; the cup stays on the giver.
+  EXPECT_TRUE(scene.scenes[0].robot_state.attached_collision_objects.empty());
+}
+
+TEST_F(CupHandoverFixture, RejectsWrongGiverAndUnconfiguredSequences) {
+  CupHandoverMotion handover(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  EXPECT_FALSE(handover.start("right", "cup", reason, true));
+  robot.motion_sequences.erase("cup_left_to_right_release");
+  EXPECT_FALSE(handover.start("left", "cup", reason, true));
+  EXPECT_NE(reason.find("cup_left_to_right_release"), std::string::npos);
+  EXPECT_TRUE(executor.steps.empty());
+}
+
+TEST_F(CupHandoverFixture, CancelDuringSceneSwapStillAttachesBeforeStopping) {
+  CupHandoverMotion handover(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(handover.start("left", "cup", reason, true)) << reason;
+  for (int i = 0; i < 60 && scene.scenes.size() < 2; ++i) {
+    scene.finish = scene.scenes.size() != 2; // Contact completes; the detach stays pending.
+    feedback();
+    complete();
+    handover.tick();
+  }
+  ASSERT_EQ(scene.scenes.size(), 2u); // Detach is pending.
+  handover.cancel();
+  scene.finish = true;
+  for (int i = 0; i < 10 && handover.running(); ++i) {
+    feedback();
+    handover.tick();
+  }
+  EXPECT_EQ(handover.result().state, "CANCELLED");
+  ASSERT_EQ(scene.scenes.size(), 3u); // Attach still ran.
+  EXPECT_EQ(scene.scenes[2].robot_state.attached_collision_objects[0].link_name,
+      robot.arms.at("right").tcp);
+  EXPECT_EQ(executor.steps.size(), 3u); // The giver never opened.
 }
 
 TEST_F(ApproachFixture, PickCancelledDuringObservationDoesNotOpenGripper) {
