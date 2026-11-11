@@ -339,8 +339,18 @@ void validate_smooth_path(const SmoothPath & path,
       if (!state.satisfiesBounds(1e-8)) {
         throw std::runtime_error("Smoothed path exceeds joint bounds");
       }
-      if (scene.isStateColliding(state, config.coordinated_group)) {
-        throw std::runtime_error("Smoothed path is in collision");
+      collision_detection::CollisionRequest request;
+      request.group_name = config.coordinated_group;
+      request.contacts = true;
+      request.max_contacts = 10;
+      collision_detection::CollisionResult collision;
+      scene.checkCollision(request, collision, state);
+      if (collision.collision) {
+        std::string pairs;
+        for (const auto & contact : collision.contacts) {
+          pairs += "; " + contact.first.first + " / " + contact.first.second;
+        }
+        throw std::runtime_error("Smoothed path is in collision" + pairs);
       }
       // A giver gripper must stay fixed throughout the entire approach.
       const auto & step = steps[path.point_steps[i]];

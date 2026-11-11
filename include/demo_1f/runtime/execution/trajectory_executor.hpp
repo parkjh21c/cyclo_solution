@@ -50,6 +50,7 @@ private:
     std::vector<Step> steps;
     std::vector<moveit_msgs::msg::RobotTrajectory> planned_segments;
     moveit_msgs::msg::RobotState planned_start;
+    planning_scene::PlanningScenePtr planning_scene;
     SmoothPath path;
     size_t progress_point{0};
     bool executing_path{false};
@@ -66,6 +67,7 @@ private:
       const std::shared_ptr<Operation> & op, const moveit_msgs::msg::PlanningScene & scene);
   void update_path_phase(const std::shared_ptr<Operation> & op);
   void load_robot_model();
+  std::string joint_goal_diagnostic(const Operation & op, const std::string & group) const;
   bool joint_group_ready(const Step & step, std::string & reason) const;
   void send_gripper(const std::shared_ptr<Operation> & op);
   template <class Action>

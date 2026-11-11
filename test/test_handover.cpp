@@ -568,11 +568,14 @@ protected:
           (*it)->canceled(result);
           it = moves.erase(it);
         } else if (auto_complete) {
-          result->error_code.val = move_error;
+          result->error_code.val = fail_on_move == 0 || move_goals.size() == fail_on_move
+                                      ? move_error : moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+          result->error_code.message = move_error_message;
+          result->error_code.source = move_error_source;
           if (move_result_has_execution) {
             result->executed_trajectory.joint_trajectory.points.resize(1);
           }
-          if (move_error == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+          if (result->error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
             const auto & goal = *(*it)->get_goal();
             if (goal.planning_options.plan_only) {
               result->trajectory_start = goal.request.start_state;
@@ -715,6 +718,7 @@ protected:
     scene_server = mock->create_service<moveit_msgs::srv::GetPlanningScene>("/get_planning_scene",
         [this](const moveit_msgs::srv::GetPlanningScene::Request::SharedPtr,
             moveit_msgs::srv::GetPlanningScene::Response::SharedPtr response) {
+          response->scene = scene_response;
           response->scene.name = "mock_scene";
           response->scene.robot_model_name = "smoothing_mock";
           response->scene.robot_state.joint_state = sample();
@@ -771,6 +775,7 @@ protected:
       std::shared_ptr<rclcpp_action::ServerGoalHandle<moveit_msgs::action::ExecuteTrajectory>>>
       executions;
   std::vector<moveit_msgs::action::ExecuteTrajectory::Goal> execution_goals;
+  moveit_msgs::msg::PlanningScene scene_response;
   int execute_error{moveit_msgs::msg::MoveItErrorCodes::SUCCESS};
   bool auto_execute{true};
   double plan_start_offset{0};
@@ -789,6 +794,8 @@ protected:
   std::string omitted_joint;
   bool move_result_has_execution{false};
   int move_error{moveit_msgs::msg::MoveItErrorCodes::SUCCESS};
+  size_t fail_on_move{0};
+  std::string move_error_message, move_error_source;
   bool auto_complete{true}, follow_topic{true}, auto_gripper{true};
   int cancels{0};
   int feedback_count{0};
@@ -1250,6 +1257,8 @@ TEST_F(RosFixture, TaskActionRejectsOverlapAndCancelsOnlyItsActiveExecution) {
   ASSERT_TRUE(until([&]() {
     return client->action_server_is_ready();
   }));
+  // Server construction/discovery can interrupt the short feedback window.
+  warmup(executor);
   demo_1f::action::Handover::Goal request;
   request.direction = "left_to_right";
   auto first = client->async_send_goal(request);
@@ -1615,6 +1624,55 @@ TEST_F(RosFixture, CurrentLimitedReceiverDoesNotBlockReleaseAndRetreat) {
     EXPECT_EQ(execution_goals[execution_goals.size() - 2].trajectory.joint_trajectory.joint_names.size(), 15u);
     EXPECT_EQ(execution_goals.back().trajectory.joint_trajectory.joint_names.size(), 14u);
   }
+}
+
+TEST_F(RosFixture, ContinuousPlanningFailureReportsApproachAndAttachedCupCollision) {
+  enable_smoothing();
+  move_error = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
+  move_error_source = "mock_ompl";
+  move_error_message = "Unable to sample a valid goal";
+  fail_on_move = 2;
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "other_hand";
+  obstacle.header.frame_id = "base_link";
+  shape_msgs::msg::SolidPrimitive sphere;
+  sphere.type = sphere.SPHERE;
+  sphere.dimensions = {.03};
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1;
+  pose.position.x = std::cos(.2);
+  pose.position.y = std::sin(.2);
+  obstacle.primitives = {sphere};
+  obstacle.primitive_poses = {pose};
+  scene_response.world.collision_objects = {obstacle};
+  moveit_msgs::msg::AttachedCollisionObject cup;
+  cup.link_name = "left_joint1_link";
+  cup.object.id = "demo_place_cup";
+  cup.object.header.frame_id = cup.link_name;
+  cup.object.primitives = {sphere};
+  pose.position.x = 1;
+  pose.position.y = 0;
+  cup.object.primitive_poses = {pose};
+  cup.touch_links = {cup.link_name};
+  scene_response.robot_state.attached_collision_objects = {cup};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  HandoverMotion motion(config, *context, executor);
+  std::string reason;
+  ASSERT_TRUE(motion.start("right_to_left", reason)) << reason;
+  ASSERT_TRUE(until([&]() { return !motion.running(); }, 3., [&]() { motion.tick(); }));
+  EXPECT_EQ(motion.result().code, "PLANNING_FAILED");
+  const auto detail = motion.result().detail;
+  EXPECT_NE(detail.find("open_approach: MoveIt error 99999"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("source=mock_ompl"), std::string::npos) << detail;
+  EXPECT_NE(detail.find(move_error_message), std::string::npos) << detail;
+  EXPECT_NE(detail.find("nominal goal collision:"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("other_hand"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("attached object: demo_place_cup @ left_joint1_link"),
+      std::string::npos) << detail;
+  ASSERT_EQ(move_goals.size(), 2u);
+  EXPECT_TRUE(execution_goals.empty());
+  EXPECT_TRUE(grippers.empty());
 }
 
 TEST_F(RosFixture, CancelDuringPlanningNeverDispatchesExecution) {

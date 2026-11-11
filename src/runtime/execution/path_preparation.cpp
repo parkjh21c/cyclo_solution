@@ -96,6 +96,10 @@ void TrajectoryExecutor::request_scene(
             return;
           }
           op->planned_start = scene.robot_state;
+          op->planning_scene = scene_template_->diff();
+          if (!op->planning_scene->setPlanningSceneMsg(scene)) {
+            throw std::runtime_error("Cannot load the planning scene");
+          }
           const auto snapshot = context_.snapshot();
           auto & joints = op->planned_start.joint_state;
           // Use the complete scene (lift, attached objects, ACM, etc.) and current controlled
@@ -122,6 +126,49 @@ void TrajectoryExecutor::request_scene(
           op->result = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", error.what()};
         }
       });
+}
+
+std::string TrajectoryExecutor::joint_goal_diagnostic(
+    const Operation & op, const std::string & group_name) const {
+  if (!op.planning_scene || op.joint_targets.empty()) return {};
+  const auto * group = robot_model_->getJointModelGroup(group_name);
+  if (!group) return {};
+  auto goal = op.planning_scene->getCurrentState();
+  moveit::core::robotStateMsgToRobotState(op.planned_start, goal);
+  std::vector<double> positions;
+  for (const auto * joint : group->getActiveJointModels()) {
+    for (const auto & name : joint->getVariableNames()) {
+      const auto target = op.joint_targets.find(name);
+      positions.push_back(target == op.joint_targets.end()
+                              ? goal.getVariablePosition(name) : target->second);
+    }
+  }
+  goal.setJointGroupActivePositions(group, positions); // Propagate mimic fingers too.
+  goal.update();
+  std::string detail;
+  for (const auto & name : group->getVariableNames()) {
+    const auto & bounds = robot_model_->getVariableBounds(name);
+    const double value = goal.getVariablePosition(name);
+    if (bounds.position_bounded_ &&
+        (value < bounds.min_position_ - 1e-8 || value > bounds.max_position_ + 1e-8)) {
+      detail += "; nominal goal outside joint bounds: " + name + "=" + std::to_string(value);
+    }
+  }
+  collision_detection::CollisionRequest request;
+  request.group_name = group_name;
+  request.contacts = true;
+  request.max_contacts = 10;
+  collision_detection::CollisionResult collision;
+  op.planning_scene->checkCollision(request, collision, goal);
+  for (const auto & contact : collision.contacts) {
+    detail += "; nominal goal collision: " + contact.first.first + " / " + contact.first.second;
+  }
+  if (!detail.empty()) {
+    for (const auto & object : op.planned_start.attached_collision_objects) {
+      detail += "; attached object: " + object.object.id + " @ " + object.link_name;
+    }
+  }
+  return detail;
 }
 
 void TrajectoryExecutor::prepare_path(

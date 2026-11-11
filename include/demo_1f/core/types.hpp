@@ -88,6 +88,8 @@ struct Step {
   std::vector<std::string> joint_names{};
   // Gripper only: wait for command duration without checking physical closure.
   bool gripper_wait_only{false};
+  // Optional planner override (e.g. pilz_industrial_motion_planner + PTP for dual_joint).
+  std::string pipeline{}, planner{};
 };
 
 struct MotionSequence {

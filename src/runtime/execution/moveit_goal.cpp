@@ -13,6 +13,7 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
   const auto & step = plan_only && !op->steps.empty()
                          ? op->steps.at(op->planned_segments.size()) : op->step;
   op->planning_only = plan_only;
+  if (plan_only) op->result.phase = step.name;
   op->joint_targets.clear();
   const bool both_arms = step.type == "dual_joint" || step.type == "dual_joint_gripper";
   const bool move_gripper = step.type == "joint_gripper" || step.type == "dual_joint_gripper";
@@ -29,6 +30,10 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
     // Pilz PTP expects a complete pose. OMPL can sample unconstrained orientations.
     request.pipeline_id = "ompl";
     request.planner_id = "RRTConnectkConfigDefault";
+  }
+  if (!step.pipeline.empty() && !(joint_group || step.position_only || step.orientation_slack > 0)) {
+    request.pipeline_id = step.pipeline;
+    request.planner_id = step.planner;
   }
   // OMPL ParallelPlan compares candidates inside one allowed_planning_time budget.
   // sg2_moveit.launch.py enables path-length scoring and hybridization, so this
@@ -221,10 +226,24 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
       move_client_,
       goal,
       op,
-      [](const Move::Result & result) {
-        return result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS
-                   ? std::string{}
-                   : "MoveIt error " + std::to_string(result.error_code.val);
+      [this, op, step_name = step.name, group_name = request.group_name,
+          plan_only](const Move::Result & result) {
+        if (result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+          return std::string{};
+        }
+        std::string detail = step_name + ": MoveIt error " + std::to_string(result.error_code.val);
+        if (!result.error_code.source.empty()) detail += "; source=" + result.error_code.source;
+        if (!result.error_code.message.empty()) detail += "; " + result.error_code.message;
+        // Diagnose the nominal target only after planning fails. A colliding centre
+        // does not prove the entire goal tolerance region is invalid.
+        if (plan_only) {
+          try {
+            detail += joint_goal_diagnostic(*op, group_name);
+          } catch (const std::exception & error) {
+            detail += "; goal diagnosis unavailable: " + std::string(error.what());
+          }
+        }
+        return detail;
       },
       plan_only ? std::function<void(const Move::Result &)>([this, op](
                                                                 const Move::Result & result) {
