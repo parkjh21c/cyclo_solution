@@ -89,6 +89,7 @@ add_library(
   src/motions/place/approach_cup_motion.cpp
   src/motions/place/refine_cup_motion.cpp
   src/motions/place/withdraw_cup_motion.cpp
+  src/motions/place/place_cup_motion.cpp
   src/motions/pick/pick_cup_motion.cpp
 )
 # TaskManager owns action routing, arbitration and status reporting.

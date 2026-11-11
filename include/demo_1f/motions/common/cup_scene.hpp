@@ -29,6 +29,8 @@ moveit_msgs::msg::PlanningScene make_cup_detach_scene(
     const Config & robot, const std::string & giver);
 moveit_msgs::msg::PlanningScene make_cup_attach_scene(
     const Config & robot, const std::string & receiver, const std::string & giver);
+// Place: the open hand leaves the cup in the world; its fingers and palm may still touch it.
+moveit_msgs::msg::PlanningScene make_cup_place_scene(const Config & robot, const std::string & arm);
 
 class ApproachScenePort {
 public:

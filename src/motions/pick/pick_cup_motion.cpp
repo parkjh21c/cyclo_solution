@@ -17,6 +17,19 @@ void PickCupMotion::reset() {
   direct_failure_.clear();
 }
 
+void PickCupMotion::record_pick() {
+  PickRecord record{arm_, pregrasp_, grasp_tcp_, {}};
+  const auto snapshot = context_.snapshot();
+  for (const auto & name : robot_.arms.at(arm_).joints) {
+    const auto joint = snapshot.joints.find(name);
+    if (joint == snapshot.joints.end()) {
+      return; // No place target without full joint feedback.
+    }
+    record.lifted_joints.push_back(joint->second.position);
+  }
+  last_pick_ = record;
+}
+
 bool PickCupMotion::move(const std::string & name, const geometry_msgs::msg::Pose & pose) {
   Step s;
   s.name = name;
@@ -248,6 +261,7 @@ void PickCupMotion::lift() {
     fail("TCP_TF_MISSING", "Cannot compute lift from measured TCP");
     return;
   }
+  grasp_tcp_ = tcp->pose;
   auto target = tcp->pose;
   target.position.z += pick_.lift_height;
   linear("PICK_LIFT", target);
@@ -273,6 +287,9 @@ void PickCupMotion::tick() {
     return;
   }
   if (phase_ == "PICK_APPROACH") {
+    if (execute_) {
+      last_pick_.reset(); // A real attempt invalidates the old place target; a preview does not.
+    }
     const auto error = pick_.validate(config_.cup_height);
     if (!error.empty()) {
       fail("PICK_CONFIG_INVALID", error);
@@ -387,6 +404,7 @@ void PickCupMotion::tick() {
     } else if (phase_ == "PICK_CLOSE") {
       attach_cup();
     } else if (phase_ == "PICK_LIFT") {
+      record_pick();
       at_observation_pose_ = true;
       result_.state = "SUCCEEDED";
       result_.sequence_completed = true;

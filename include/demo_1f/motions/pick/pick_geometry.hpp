@@ -14,6 +14,7 @@ struct PickCupConfig {
   double approach_yaw_deg{0}, approach_pitch_deg{0};
   double close_target{.8}, close_duration{1.0};
   bool stop_at_pregrasp{false}; // Leave the cup untouched for an external pickup policy.
+  double place_clearance{.005}; // Place: release this far above the recorded grasp height.
   std::string validate(double cup_height) const;
 };
 

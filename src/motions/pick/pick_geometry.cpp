@@ -24,6 +24,9 @@ std::string PickCupConfig::validate(double height) const {
       !std::isfinite(approach_pitch_deg) || approach_pitch_deg < 0 || approach_pitch_deg > 30) {
     return "Invalid cup insert, close or lift settings";
   }
+  if (!std::isfinite(place_clearance) || place_clearance < 0 || place_clearance > .03) {
+    return "Place clearance must be 0..0.03 m";
+  }
   return {};
 }
 
@@ -46,6 +49,7 @@ PickCupConfig load_pick_config(rclcpp::Node & node) {
   number("approach_pitch_deg", c.approach_pitch_deg);
   number("close_target", c.close_target);
   number("close_duration", c.close_duration);
+  number("place_clearance", c.place_clearance);
   c.stop_at_pregrasp = node.declare_parameter("pick.stop_at_pregrasp", c.stop_at_pregrasp, d);
   return c;
 }

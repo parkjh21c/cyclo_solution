@@ -3,6 +3,7 @@
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
 #include "demo_1f/motions/place/refine_cup_motion.hpp"
 #include "demo_1f/motions/place/withdraw_cup_motion.hpp"
+#include "demo_1f/motions/place/place_cup_motion.hpp"
 #include "demo_1f/motions/pour/cup_pour_motion.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include "demo_1f/runtime/geometry/tcp_roll.hpp"
@@ -1541,6 +1542,111 @@ TEST_F(ApproachFixture, PickInsertsClosesAttachesAndLifts) {
       attached[0].touch_links.end());
   EXPECT_TRUE(scene.scenes[2].world.collision_objects.empty());
   EXPECT_FALSE(pick.blocks_other_motion());
+}
+
+class PlaceFixture : public ApproachFixture {
+protected:
+  void run_pick(PickCupMotion & pick) {
+    std::string reason;
+    ASSERT_TRUE(pick.start("left", "cup", reason, true)) << reason;
+    for (int i = 0; i < 60 && pick.running(); ++i) {
+      feedback(0);
+      observe("head");
+      complete();
+      pick.tick();
+    }
+    ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  }
+};
+
+TEST_F(PlaceFixture, PlaceReversesTheRecordedPick) {
+  tcp_for_refinement("left");
+  relaxed_pick_arrival = true;
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  run_pick(pick);
+  ASSERT_TRUE(pick.last_pick().has_value());
+  const auto insert = executor.steps[2].target;
+  const size_t steps = executor.steps.size(), scenes = scene.scenes.size();
+  PlaceCupMotion place(robot, config, pc, *context, executor, scene, pick);
+  std::string reason;
+  EXPECT_FALSE(place.start("right", "cup", reason, true)); // The left hand picked the cup.
+  ASSERT_TRUE(place.start("left", "cup", reason, true)) << reason;
+  size_t steps_at_scene = 0;
+  for (int i = 0; i < 60 && place.running(); ++i) {
+    feedback(0);
+    complete();
+    place.tick();
+    if (!steps_at_scene && scene.scenes.size() > scenes) {
+      steps_at_scene = executor.steps.size() - steps;
+    }
+  }
+  ASSERT_TRUE(place.result().sequence_completed) << place.result().detail;
+  EXPECT_EQ(context->snapshot().phase, "PLACE_COMPLETE");
+  ASSERT_EQ(executor.steps.size(), steps + 4);
+  const auto & carry = executor.steps[steps];
+  EXPECT_EQ(carry.name, "PLACE_CARRY");
+  EXPECT_EQ(carry.type, "joint");
+  EXPECT_EQ(carry.target, pick.last_pick()->lifted_joints);
+  const auto & lower = executor.steps[steps + 1];
+  EXPECT_EQ(lower.name, "PLACE_LOWER");
+  EXPECT_EQ(lower.type, "linear");
+  EXPECT_NEAR(lower.target[2], insert[2] + pc.place_clearance, 1e-6);
+  for (size_t i : {0u, 1u, 3u, 4u, 5u, 6u}) {
+    EXPECT_NEAR(lower.target[i], insert[i], 1e-6); // Same spot and hand orientation as the grasp.
+  }
+  EXPECT_EQ(executor.steps[steps + 2].name, "PLACE_OPEN");
+  EXPECT_EQ(executor.steps[steps + 2].target, std::vector<double>{0.0});
+  EXPECT_EQ(executor.steps[steps + 3].name, "PLACE_RETREAT");
+  // The cup model leaves the hand only after the gripper opened.
+  EXPECT_EQ(steps_at_scene, 3u);
+  ASSERT_EQ(scene.scenes.size(), scenes + 1);
+  const auto & placed = scene.scenes.back();
+  ASSERT_EQ(placed.robot_state.attached_collision_objects.size(), 1u);
+  EXPECT_EQ(placed.robot_state.attached_collision_objects[0].object.operation,
+      placed.robot_state.attached_collision_objects[0].object.REMOVE);
+  EXPECT_EQ(placed.robot_state.attached_collision_objects[0].link_name,
+      robot.arms.at("left").tcp);
+  const auto & acm = placed.allowed_collision_matrix;
+  ASSERT_EQ(acm.entry_names[0], "demo_place_cup");
+  EXPECT_NE(std::find(acm.entry_names.begin(), acm.entry_names.end(), "gripper_l_rh_p12_rn_base"),
+      acm.entry_names.end());
+}
+
+TEST_F(PlaceFixture, PlaceLowerFailureNeverOpensTheGripper) {
+  tcp_for_refinement("left");
+  relaxed_pick_arrival = true;
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  run_pick(pick);
+  const size_t steps = executor.steps.size(), scenes = scene.scenes.size();
+  PlaceCupMotion place(robot, config, pc, *context, executor, scene, pick);
+  std::string reason;
+  ASSERT_TRUE(place.start("left", "cup", reason, true)) << reason;
+  for (int i = 0; i < 40 && place.running(); ++i) {
+    feedback(0);
+    if (executor.steps.size() == steps + 2 && executor.current.state == ExecutionState::Running) {
+      executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "table in the way"};
+    } else {
+      complete();
+    }
+    place.tick();
+  }
+  EXPECT_EQ(place.result().state, "FAILED");
+  EXPECT_EQ(place.result().code, "PLANNING_FAILED");
+  ASSERT_EQ(executor.steps.size(), steps + 2);
+  EXPECT_EQ(executor.steps.back().name, "PLACE_LOWER");
+  EXPECT_EQ(scene.scenes.size(), scenes); // The cup model stays in the hand.
+}
+
+TEST_F(PlaceFixture, PlaceNeedsARecordedPick) {
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  PlaceCupMotion place(robot, config, pc, *context, executor, scene, pick);
+  std::string reason;
+  EXPECT_FALSE(place.start("left", "cup", reason, true));
+  EXPECT_NE(reason.find("No recorded pick"), std::string::npos);
+  EXPECT_TRUE(executor.steps.empty());
 }
 
 TEST_F(ApproachFixture, PickFallsBackToClearAndLowerWhenDirectPtpFailsBeforeMotion) {

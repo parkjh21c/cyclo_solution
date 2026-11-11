@@ -4,6 +4,13 @@
 #include "demo_1f/motions/pick/pick_geometry.hpp"
 
 namespace demo_1f {
+// What the last successful pick did; PlaceCupMotion puts the cup back by reversing it.
+struct PickRecord {
+  std::string arm;
+  geometry_msgs::msg::Pose pregrasp, grasp; // Measured TCP before the insert and when closed.
+  std::vector<double> lifted_joints;         // Arm joints after the lift, in config order.
+};
+
 // Side grasp: PTP pregrasp (or clear + lower) -> insert -> close -> attach -> lift.
 // Preview never moves.
 class PickCupMotion final : public CupMotion {
@@ -16,6 +23,10 @@ public:
       ApproachScenePort & scene);
 
   void tick() override;
+
+  const std::optional<PickRecord> & last_pick() const {
+    return last_pick_;
+  }
 
 private:
   const char * initial_phase() const override {
@@ -42,5 +53,8 @@ private:
   geometry_msgs::msg::Pose pregrasp_, body_, insert_;
   std::map<std::string, double> start_joints_; // Arm joints before the direct PTP.
   std::string direct_failure_;                  // Kept for the fallback failure message.
+  geometry_msgs::msg::Pose grasp_tcp_;          // Measured TCP when the lift starts.
+  std::optional<PickRecord> last_pick_;
+  void record_pick();
 };
 } // namespace demo_1f

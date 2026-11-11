@@ -110,6 +110,23 @@ moveit_msgs::msg::PlanningScene make_cup_detach_scene(
   return scene;
 }
 
+moveit_msgs::msg::PlanningScene make_cup_place_scene(const Config & robot, const std::string & arm) {
+  auto scene = make_cup_detach_scene(robot, arm);
+  auto & acm = scene.allowed_collision_matrix;
+  acm.entry_names = {"demo_place_cup"};
+  for (const auto & link : hand_links(arm, true)) {
+    acm.entry_names.push_back(link);
+  }
+  acm.entry_values.resize(acm.entry_names.size());
+  for (size_t i = 0; i < acm.entry_names.size(); ++i) {
+    acm.entry_values[i].enabled.resize(acm.entry_names.size());
+    for (size_t j = 0; j < acm.entry_names.size(); ++j) {
+      acm.entry_values[i].enabled[j] = (i == 0) != (j == 0); // Cup-hand pairs only.
+    }
+  }
+  return scene;
+}
+
 moveit_msgs::msg::PlanningScene make_cup_attach_scene(
     const Config & robot, const std::string & receiver, const std::string & giver) {
   moveit_msgs::msg::PlanningScene scene;

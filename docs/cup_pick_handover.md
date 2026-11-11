@@ -1,7 +1,7 @@
-# 컵 잡기, 컵 핸드오버(양방향), 붓기
+# 컵 잡기, 컵 핸드오버(양방향), 붓기, 내려놓기
 
 2026-11-10~11 작업 기록. 로봇에서 `1` → `6` → `7`, 그리고 셀 집기부터 `2` → `3` → `4` → `5` → `6` → `7` → `8`
-→ `9` 순서로 동작을 확인했습니다. 이후 내려놓기가 이어질 예정입니다(아래 "다음 단계").
+→ `9` → `0` 순서로 동작을 확인했습니다. 남은 일은 전체 데모 연결입니다(아래 "다음 단계").
 
 ## 전체 흐름
 
@@ -10,6 +10,7 @@
 7  /handover_cup    왼손 → 오른손 컵 넘김, 끝나면 오른손이 컵을 든 상태로 정지
 8  /pour_cup        오른손이 바구니 위에서 오른쪽 → 왼쪽으로 130° 기울였다가 넘김 자세로 복귀
 9  /handover_cup_back  오른손 → 왼손 컵 넘김, 왼손이 컵을 든 채 정지, 오른손은 초기 자세
+0  /place_cup       왼손이 6번에서 집은 자리에 컵을 세우고, 열린 손을 삽입 전 자세로 뺀 채 정지
 ```
 
 셀 핸드오버(`3`, `d`의 HANDOVER)는 마지막에 `giver_home`으로 오른팔을 초기 자세로 되돌립니다. 이후 바구니에 남은
@@ -47,6 +48,24 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
 | `cup_right_to_left_release` | `giver_release` → `cup_retreat`(오른손 LIN 20 cm 뒤) → `giver_via` → `giver_home` | `cup_insert`, `cup_ready_via`의 반대 |
 
 로봇에서 `6` → `7` → `8` → `9`가 첫 시도에 통과했습니다(빈 컵).
+
+## 내려놓기 (`/place_cup`, `PlaceCupMotion`)
+
+`PickCupMotion`이 성공할 때 남긴 `PickRecord`(손, 삽입 전 TCP, 잡은 TCP, 들어 올린 뒤 관절값)를 거꾸로
+씁니다. 새 IK가 없고, 컵을 집었던 자리에 그대로 돌려놓습니다.
+
+| 단계 | 내용 | 무엇의 반대 |
+|---|---|---|
+| `PLACE_CARRY` | 기록된 들어 올린 관절값으로 PTP(0.3) | `cup_carry` |
+| `PLACE_LOWER` | 잡은 TCP + `pick.place_clearance`(0.005)까지 LIN | `PICK_LIFT` |
+| `PLACE_OPEN` | 그리퍼 열기(내린 뒤에만) | `PICK_CLOSE` |
+| `PLACE_DETACH` | 컵 모델을 손에서 떼어 그 자리에 둠, 손가락·손바닥 접촉 허용 | `PICK_ATTACH` |
+| `PLACE_RETREAT` | 기록된 삽입 전 TCP까지 LIN | `PICK_INSERT` |
+
+- 기록은 노드 메모리에만 있습니다. `full_demo`를 다시 시작하면 사라지고 `NOT_READY`로 거부합니다. 실제 잡기를
+  새로 시작하면 지워지고, 미리보기는 지우지 않습니다.
+- 끝나면 왼손은 열린 채 삽입 전 자세에서 멈춥니다. `1`이 초기 자세로 보내고 장면의 컵 모델을 지웁니다.
+- 로봇에서 `6` → `7` → `8` → `9` → `0`이 첫 시도에 통과했습니다.
 
 ## 붓기 (`/pour_cup`, `CupPourMotion`)
 
@@ -155,8 +174,14 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
   (`Smoothed path is in collision; A / B`). 계획 단계의 MoveIt 실패(`-2`, `-31`, `99999`)는 원인이 코드만으로
   구분되지 않아서, 필요하면 위 도구로 재현해야 합니다.
 - 저장된 손목 컵 위치는 왼팔이 초기 자세를 떠난 뒤 120 s가 지나면 만료됩니다(`CUP_NOT_FOUND`).
+- 내려놓기는 컵이 실제로 손에 있는지 보지 않습니다. `6` 뒤에 `1`로 컵을 놓았어도 기록이 남아 있으면 `0`이 빈손으로
+  같은 경로를 움직입니다.
 - `d`에서 셀 핸드오버 `open_approach`가 `Robot moved during planning: gripper_r_joint1`로 한 번 실패했습니다
   (집은 직후 그리퍼가 아직 움직이는 중으로 보임). 바로 `3`을 실행하면 통과했습니다. 원인은 아직 보지 않았습니다.
+- `test_handover`가 Jetson에서 실행마다 다른 1~2개의 `RosFixture` 타이밍 테스트로 실패합니다(예:
+  `ContinuousPlansAreReadOnlyUntilOneCombinedExecution`, `GripperWaitOnlyCanCancelBeforeAcceptance`; 그리퍼
+  피드백 창 0.04 s). `test_cup`(95)과 `test_demo_task`(22)는 통과. 데모 이미지는 `BUILD_TESTING=OFF`로 캐시되어
+  있어 `colcon build ... --cmake-args -DBUILD_TESTING=ON`으로 빌드해야 테스트가 생깁니다.
 
 ## 시험 절차
 
@@ -172,5 +197,5 @@ docker cp config/handover.yaml docker-demo_1f-1:/root/ros2_ws/install/demo_1f/sh
 
 ## 다음 단계
 
-원래 책상 위치에 내려놓기, 전체 데모 연결(`PICK_CUP` 다음에 이어 붙임).
+전체 데모 연결(`PICK_CUP` 다음에 넘김 → 붓기 → 되돌려 넘기기 → 내려놓기 → 초기 자세).
 그 뒤 위 문제들을 다듬습니다.

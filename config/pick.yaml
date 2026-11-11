@@ -13,4 +13,5 @@ handover_demo:
       close_target: 0.8 # Fingers stop on the cup before this; grasp is not sensor-verified.
       close_duration: 1.0
       lift_height: 0.08
+      place_clearance: 0.005 # /place_cup releases this far above the recorded grasp height.
       stop_at_pregrasp: false # true: old behavior, stop before contact.
