@@ -193,11 +193,11 @@ install(
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch models DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/perception_viewer.py scripts/action_runner.py scripts/wrist_perception.py
-                 scripts/wrist_cup_init.py scripts/wrist_table_init.py
+                 scripts/wrist_cup_init.py scripts/wrist_table_init.py scripts/wrist_basket_init.py
         DESTINATION lib/${PROJECT_NAME}
 )
 
-install(FILES scripts/wrist_cup_geometry.py scripts/table_geometry.py
+install(FILES scripts/wrist_cup_geometry.py scripts/table_geometry.py scripts/initial_pose_check.py
         DESTINATION lib/${PROJECT_NAME})
 install(
   DIRECTORY scripts/demo_perception
@@ -209,6 +209,8 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   add_test(NAME test_gripper_model COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_gripper_model.py")
+  add_test(NAME test_initial_pose_check
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_initial_pose_check.py")
   ament_add_gtest(test_demo_task test/test_demo_task.cpp TIMEOUT 60)
   target_link_libraries(test_demo_task demo_tasks)
   set_tests_properties(test_demo_task PROPERTIES ENVIRONMENT "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=151;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")

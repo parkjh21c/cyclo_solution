@@ -11,6 +11,7 @@
   <depend>rclcpp</depend>
   <depend>ffw_vision_msgs</depend>
   <exec_depend>ffw_pick</exec_depend>
+  <exec_depend>ffw_grasp</exec_depend>
   <exec_depend>ffw_vision</exec_depend>
   <depend>cv_bridge</depend>
   <depend>libopencv-dev</depend>

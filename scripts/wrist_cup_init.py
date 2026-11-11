@@ -13,6 +13,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
+from initial_pose_check import InitialPoseCheck
 from wrist_cup_geometry import rotation_matrix, table_cup_rim
 
 ARM_JOINTS = [f"arm_l_joint{i}" for i in range(1, 8)]
@@ -36,7 +37,8 @@ class WristCupInit(Node):
         self.initial = self.declare_parameter(
             "initial_joints", [1.05, 0.0, 0.0, -2.27, 0.0, 0.35, 0.0]
         ).value
-        self.joint_tolerance = self.declare_parameter("joint_tolerance", 0.03).value
+        self.joint_tolerance = self.declare_parameter("joint_tolerance", 0.02).value
+        lift_tolerance = self.declare_parameter("lift_tolerance", 0.01).value
         self.period = self.declare_parameter("period", 0.2).value
         if not (
             0 < self.near < self.far
@@ -49,9 +51,11 @@ class WristCupInit(Node):
             and self.inner + self.wall <= self.error <= 0.15
         ):
             raise ValueError("Invalid wrist cup initial-pose parameters")
+        # Same rule as the basket: joints, lift and a still arm (initial_pose_check).
+        self.check = InitialPoseCheck("left", joint_tolerance=self.joint_tolerance,
+                                      lift_tolerance=lift_tolerance, initial=self.initial)
         self.bridge = CvBridge()
         self.info = None
-        self.joints = None
         self.pending = deque(maxlen=8)
         self.tf_wait = None
         self.buffer = Buffer()
@@ -80,18 +84,10 @@ class WristCupInit(Node):
         self.pending.append(message)
 
     def joint_state(self, message):
-        positions = dict(zip(message.name, message.position))
-        if all(name in positions for name in ARM_JOINTS):
-            self.joints = (self.get_clock().now(), [positions[name] for name in ARM_JOINTS])
+        self.check.observe(self.get_clock().now().nanoseconds / 1e9, message.name, message.position)
 
     def at_initial_pose(self):
-        if self.joints is None:
-            return "NO_JOINT_STATES"
-        stamp, positions = self.joints
-        if (self.get_clock().now() - stamp).nanoseconds / 1e9 > 0.5:
-            return "JOINT_STATES_STALE"
-        offset = np.max(np.abs(np.subtract(positions, self.initial)))
-        return None if offset <= self.joint_tolerance else f"NOT_INITIAL_POSE: {offset:.3f}rad"
+        return self.check.reason(self.get_clock().now().nanoseconds / 1e9)
 
     def publish(self, message, detail, frame=None, fit=None):
         observation = CupObservation()

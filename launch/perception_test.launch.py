@@ -94,6 +94,13 @@ def nodes(context):
         ),
         Node(
             package="demo_1f",
+            executable="wrist_basket_init.py",
+            name="wrist_basket_init",
+            output="screen",
+            parameters=[{"use_sim_time": parameters["use_sim_time"]}],
+        ),
+        Node(
+            package="demo_1f",
             executable="wrist_table_init.py",
             name="wrist_table_init",
             output="screen",
