@@ -64,8 +64,9 @@ int main(int argc, char ** argv) {
         config, approach_config, robot_context, trajectory_executor, approach_scene, "right");
     demo_1f::PlaceCupMotion place_motion(config, approach_config, pick_config, robot_context,
         trajectory_executor, approach_scene, pick_motion);
+    const auto pour_config = demo_1f::load_pour_config(*node);
     demo_1f::CupPourMotion cup_pour_motion(
-        config, approach_config, robot_context, trajectory_executor, approach_scene);
+        config, approach_config, pour_config, robot_context, trajectory_executor, approach_scene);
     demo_1f::TaskManager task_manager(*node,
         robot_context,
         handover_motion,

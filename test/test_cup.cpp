@@ -5,6 +5,7 @@
 #include "demo_1f/motions/place/withdraw_cup_motion.hpp"
 #include "demo_1f/motions/place/place_cup_motion.hpp"
 #include "demo_1f/motions/pour/cup_pour_motion.hpp"
+#include "demo_1f/motions/pour/pour_geometry.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include "demo_1f/runtime/geometry/tcp_roll.hpp"
 #include "demo_1f/tasks/task_manager.hpp"
@@ -1973,19 +1974,122 @@ TEST_F(CupHandoverFixture, RightGiverHandsTheCupBackToTheLeft) {
       robot.arms.at("left").tcp);
 }
 
+TEST(PourGeometry, MatchesTheGeneratorAtTheTestedBasket) {
+  // scripts/generate_cup_pour_targets.py at basket 0.412 -0.247 (robot-tested 2026-11-11).
+  geometry_msgs::msg::Pose tcp;
+  tcp.position.x = .38;
+  tcp.position.y = .04;
+  tcp.position.z = 1.0;
+  tcp.orientation.x = .5;
+  tcp.orientation.y = -.5;
+  tcp.orientation.z = .5;
+  tcp.orientation.w = .5;
+  geometry_msgs::msg::Pose basket; // Long side along base y, as measured that day.
+  basket.position.x = .412;
+  basket.position.y = -.247;
+  basket.position.z = .725;
+  basket.orientation.z = std::sin(M_PI / 4);
+  basket.orientation.w = std::cos(M_PI / 4);
+  PourConfig pc;
+  pc.clearance = .05; // The generator run used 5 cm.
+  std::string reason;
+  const auto plan = plan_pour(tcp, basket, .165, pc, reason);
+  ASSERT_TRUE(plan) << reason;
+  EXPECT_NEAR(plan->lowered.position.x, .451994, 2e-3);
+  EXPECT_NEAR(plan->lowered.position.y, -.303704, 2e-3);
+  EXPECT_NEAR(plan->lowered.position.z, .917349, 2e-3);
+  EXPECT_NEAR(plan->raise, .037417, 2e-3);
+  EXPECT_NEAR(plan->above.position.z, plan->lowered.position.z + plan->raise, 1e-9);
+  const auto & q = plan->tilted.orientation;
+  const double sign = q.w < 0 ? -1 : 1;
+  EXPECT_NEAR(sign * q.x, -.640855, 1e-3);
+  EXPECT_NEAR(sign * q.y, -.298845, 1e-3);
+  EXPECT_NEAR(sign * q.z, .640854, 1e-3);
+  EXPECT_NEAR(sign * q.w, .298835, 1e-3);
+  EXPECT_FALSE(plan->clamped);
+  // The pour follows the measured basket one to one.
+  basket.position.x += .05;
+  basket.position.y -= .02;
+  const auto moved = plan_pour(tcp, basket, .165, pc, reason);
+  ASSERT_TRUE(moved) << reason;
+  EXPECT_NEAR(moved->lowered.position.x - plan->lowered.position.x, .05, 1e-9);
+  EXPECT_NEAR(moved->lowered.position.y - plan->lowered.position.y, -.02, 1e-9);
+  // The default 9 cm keeps the upright cup above the walls: no lowering into the basket.
+  const auto high = plan_pour(tcp, basket, .165, PourConfig{}, reason);
+  ASSERT_TRUE(high) << reason;
+  EXPECT_EQ(high->raise, 0.0);
+  EXPECT_NEAR(high->lowered.position.z, plan->lowered.position.z + .04, 1e-9);
+  // A tilted hand means the cup is not held as the handover leaves it.
+  tcp.orientation = geometry_msgs::msg::Quaternion{};
+  EXPECT_FALSE(plan_pour(tcp, basket, .165, pc, reason));
+}
+
+TEST(PourGeometry, KeepsTheLipInsideARotatedBasket) {
+  geometry_msgs::msg::Pose tcp;
+  tcp.position.x = .38;
+  tcp.position.y = .04;
+  tcp.position.z = 1.0;
+  tcp.orientation.x = .5;
+  tcp.orientation.y = -.5;
+  tcp.orientation.z = .5;
+  tcp.orientation.w = .5;
+  geometry_msgs::msg::Pose basket; // Long side along base x: 0.21 inside along y (robot 2026-11-11).
+  basket.position.x = .512;
+  basket.position.y = -.264;
+  basket.position.z = .727;
+  basket.orientation.w = 1;
+  PourConfig pc;
+  std::string reason;
+  auto plan = plan_pour(tcp, basket, .165, pc, reason);
+  ASSERT_TRUE(plan) << reason;
+  EXPECT_FALSE(plan->clamped);
+  EXPECT_NEAR(plan->lip.y, -.314, 1e-6);
+  EXPECT_NEAR(plan->lowered.position.x, .551, 2e-3); // Robot-checked to tilt 130 deg there.
+  EXPECT_NEAR(plan->lowered.position.y, -.321, 2e-3);
+  pc.shift = -.12; // Past the rim: pulled back to inner_margin inside it.
+  plan = plan_pour(tcp, basket, .165, pc, reason);
+  ASSERT_TRUE(plan) << reason;
+  EXPECT_TRUE(plan->clamped);
+  EXPECT_NEAR(plan->lip.y, -.264 - (pc.inner_width / 2 - pc.inner_margin), 1e-6);
+}
+
 class CupPourFixture : public ApproachFixture {
 protected:
   void SetUp() override {
     ApproachFixture::SetUp();
-    const std::vector<double> level = {.47, -.26, .92, 0, -.7071068, 0, .7071068};
-    const std::vector<double> tilted = {.47, -.26, .92, -.3535534, -.6123724, .3535534, .6123724};
-    MotionSequence pour;
-    pour.steps = {taught("pour_above", "joint", "right", {.1}),
-        taught("pour_tilt", "linear", "right", tilted), taught("pour_hold", "wait", "right", {}),
-        taught("pour_untilt", "linear", "right", level),
-        taught("pour_return", "joint", "right", {.2})};
-    pour.steps[2].duration = 1;
-    robot.motion_sequences["cup_pour_right"] = pour;
+    MotionSequence grasp; // The pour checks the right TCP against this transfer hold.
+    grasp.steps = {taught("cup_insert", "linear", "right", {.38, .04, 1., .5, -.5, .5, .5})};
+    robot.motion_sequences["cup_left_to_right_grasp"] = grasp;
+    hold_tcp();
+  }
+
+  void hold_tcp(double dx = 0) {
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.frame_id = robot.planning_frame;
+    tf.header.stamp = node->now();
+    tf.child_frame_id = robot.arms.at("right").tcp;
+    tf.transform.translation.x = .38 + dx;
+    tf.transform.translation.y = .04;
+    tf.transform.translation.z = 1.;
+    tf.transform.rotation.x = .5;
+    tf.transform.rotation.y = -.5;
+    tf.transform.rotation.z = .5;
+    tf.transform.rotation.w = .5;
+    broadcaster->sendTransform(tf);
+    for (int i = 0; i < 3; ++i) {
+      ros.spin_some();
+      std::this_thread::sleep_for(2ms);
+    }
+  }
+
+  void basket(double x = .412) {
+    geometry_msgs::msg::PoseStamped b;
+    b.header.frame_id = robot.planning_frame;
+    b.pose.position.x = x;
+    b.pose.position.y = -.247;
+    b.pose.position.z = .725;
+    b.pose.orientation.w = 1;
+    context->observe_basket(b);
   }
 
   void run(CupPourMotion & pour, size_t failing_after = 99) {
@@ -2000,52 +2104,127 @@ protected:
       pour.tick();
     }
   }
+
+  PourConfig pc;
 };
 
-TEST_F(CupPourFixture, RunsTaughtStepsWithoutSceneChanges) {
-  CupPourMotion pour(robot, config, *context, executor, scene);
+TEST_F(CupPourFixture, PoursOverTheMeasuredBasketWithoutSceneChanges) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
   std::string reason;
   ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
   run(pour);
   ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
   EXPECT_EQ(context->snapshot().phase, "CUP_POUR_COMPLETE");
+  // 9 cm above the walls: the hand goes straight to the pour height, no lower/raise.
   const std::vector<std::string> expected = {
       "pour_above", "pour_tilt", "pour_hold", "pour_untilt", "pour_return"};
   ASSERT_EQ(executor.steps.size(), expected.size());
   for (size_t i = 0; i < expected.size(); ++i) {
     EXPECT_EQ(executor.steps[i].name, expected[i]);
   }
+  EXPECT_EQ(executor.steps[0].type, "pose"); // Pilz PTP to the turned hand over the basket.
+  EXPECT_NEAR(executor.steps[1].target[0], .451994, 2e-3);
+  EXPECT_NEAR(executor.steps[1].target[1], -.303704, 2e-3);
+  EXPECT_EQ(executor.steps[2].duration, pc.hold_duration);
+  EXPECT_EQ(executor.steps[4].type, "joint");
+  EXPECT_EQ(executor.steps[4].target, std::vector<double>{0.0}); // Start joints.
   EXPECT_TRUE(scene.scenes.empty()); // The cup stays attached to the right hand.
 }
 
-TEST_F(CupPourFixture, PreviewNeverMovesAndReportsTiltPose) {
-  CupPourMotion pour(robot, config, *context, executor, scene);
+TEST_F(CupPourFixture, PreviewNeverMovesAndFollowsTheBasket) {
+  basket(.462);
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
   std::string reason;
   ASSERT_TRUE(pour.start("right", "cup", reason, false)) << reason;
   pour.tick();
   EXPECT_TRUE(pour.result().sequence_completed) << pour.result().detail;
   EXPECT_TRUE(executor.steps.empty());
-  EXPECT_NEAR(pour.approach_target().pose.orientation.x, -.3535534, 1e-9);
+  EXPECT_NEAR(pour.approach_target().pose.position.x, .451994 + .05, 2e-3);
 }
 
-TEST_F(CupPourFixture, TiltFailureStopsBeforeHoldAndReturn) {
-  CupPourMotion pour(robot, config, *context, executor, scene);
+TEST_F(CupPourFixture, TiltPlanFailureRetriesSmallerAngles) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
   std::string reason;
   ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
-  run(pour, 2);
-  EXPECT_EQ(pour.result().state, "FAILED");
-  EXPECT_EQ(pour.result().code, "PLANNING_FAILED");
-  ASSERT_EQ(executor.steps.size(), 2u);
-  EXPECT_EQ(executor.steps.back().name, "pour_tilt");
+  int tilts = 0;
+  for (int i = 0; i < 80 && pour.running(); ++i) {
+    feedback();
+    const bool tilting = executor.current.state == ExecutionState::Running &&
+                         executor.steps.back().name == "pour_tilt";
+    if (tilting && ++tilts == 1) {
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "MoveIt error -31"};
+    } else {
+      complete();
+    }
+    pour.tick();
+  }
+  ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  EXPECT_NE(pour.result().detail.find("poured at 115"), std::string::npos) << pour.result().detail;
+  std::vector<std::string> names;
+  for (const auto & step : executor.steps) names.push_back(step.name);
+  EXPECT_EQ(names, (std::vector<std::string>{"pour_above", "pour_tilt", "pour_tilt", "pour_hold",
+                       "pour_untilt", "pour_return"}));
+  EXPECT_NE(executor.steps[1].target, executor.steps[2].target); // Less steep second tilt.
 }
 
-TEST_F(CupPourFixture, RejectsArmWithoutSequence) {
-  CupPourMotion pour(robot, config, *context, executor, scene);
+TEST_F(CupPourFixture, TiltStopsWhenEveryAngleFails) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
   std::string reason;
-  EXPECT_FALSE(pour.start("left", "cup", reason, true));
-  EXPECT_NE(reason.find("cup_pour_left"), std::string::npos);
-  robot.motion_sequences.erase("cup_pour_right");
+  ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
+  for (int i = 0; i < 80 && pour.running(); ++i) {
+    feedback();
+    if (executor.current.state == ExecutionState::Running &&
+        executor.steps.back().name == "pour_tilt") {
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "MoveIt error -31"};
+    } else {
+      complete();
+    }
+    pour.tick();
+  }
+  EXPECT_EQ(pour.result().state, "FAILED");
+  ASSERT_EQ(executor.steps.size(), 1u + 1u + pc.fallback_angles_deg.size());
+  EXPECT_EQ(executor.steps.back().name, "pour_tilt"); // Never holds or returns.
+}
+
+TEST_F(CupPourFixture, TiltFailureAfterTheArmMovedIsNotRetried) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
+  for (int i = 0; i < 80 && pour.running(); ++i) {
+    feedback();
+    if (executor.current.state == ExecutionState::Running &&
+        executor.steps.back().name == "pour_tilt") {
+      sensor_msgs::msg::JointState moved; // The right arm turned before the failure.
+      moved.header.stamp = node->now();
+      moved.name = {robot.arms.at("right").joints[0]};
+      moved.position = {.2};
+      moved.velocity = {0};
+      context->observe_joints(moved);
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "trajectory aborted"};
+      pour.tick();
+      break;
+    }
+    complete();
+    pour.tick();
+  }
+  EXPECT_EQ(pour.result().state, "FAILED");
+  EXPECT_EQ(executor.steps.size(), 2u); // pour_above, one pour_tilt.
+}
+
+TEST_F(CupPourFixture, RejectsWithoutBasketAwayFromHoldOrWithTheLeftHand) {
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
   EXPECT_FALSE(pour.start("right", "cup", reason, true));
+  EXPECT_NE(reason.find("No basket"), std::string::npos) << reason;
+  basket();
+  EXPECT_FALSE(pour.start("left", "cup", reason, true));
+  hold_tcp(.05);
+  EXPECT_FALSE(pour.start("right", "cup", reason, true));
+  EXPECT_NE(reason.find("transfer hold"), std::string::npos) << reason;
   EXPECT_TRUE(executor.steps.empty());
 }
 

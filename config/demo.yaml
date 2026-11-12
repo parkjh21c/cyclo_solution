@@ -5,6 +5,29 @@ handover_demo:
       retry_delay: 1.0     # Seconds before re-acquiring observations.
       pick_timeout: 180.0 # Perception, IK search, close and lift; initialization is a separate stage.
       withdraw_cup: false # true: lift both hands out of the cup after release, before PICK_CUP.
+    # /pour_cup: targets from the latest /demo/basket_pose (wrist_basket_init), right-hand hold.
+    pour:
+      angle_deg: 130.0        # Tilt commanded (cup mouth up = 0).
+      fallback_angles_deg: [115.0, 100.0] # Tried in order when a tilt fails to plan before moving
+                              # (wrist joint 6 limit at some basket spots); 90 or more.
+      design_angle_deg: 130.0 # Tilt at which the lip sits over the target.
+      hand_yaw_deg: -90.0     # Hand turned about the cup axis; -90 points the right hand forward.
+      direction_deg: 90.0     # Lip toward +y: pours right to left.
+      shift: -0.05            # Lip 5 cm right of the basket center (negative = against direction).
+      clearance: 0.09         # Lip above the wall top; 0.09 keeps the whole cup above the walls
+                              # (no lowering into the basket, any basket yaw). 0.05 hit a wall.
+      approach_margin: 0.03   # Upright cup bottom above the wall top while moving over.
+      wall_height: 0.08       # Wall top above the measured basket pose (scene walls 0.08).
+      lip_radius: 0.043       # Real cup radius at the rim.
+      axis_behind_tcp: 0.04   # Cup axis behind the right TCP at the transfer hold.
+      grasp_height: 0.12      # Right TCP above the cup bottom at the transfer hold.
+      hold_duration: 2.0
+      lin_speed: 0.08
+      ptp_speed: 0.2
+      hold_tolerance: 0.02    # Right TCP distance from the transfer hold allowed at start.
+      inner_length: 0.295     # Basket inside at the rim (ffw_grasp basket_inner_top).
+      inner_width: 0.21
+      inner_margin: 0.03      # Lip target kept this far inside the rim for any basket yaw.
     motion_sequences:
       # From ai_worker origin/feature-demo:
       # ffw_bringup/config/ffw_sg2_rev1_follower/ffw_sg2_follower_custom_positions.yaml

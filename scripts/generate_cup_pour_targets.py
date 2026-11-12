@@ -6,7 +6,8 @@ held by the right hand (menu 7). Cup contacts ARE checked here (cup vs basket, t
 Carry: Pilz PTP to a joint target with the hand turned about the upright cup axis (--yaws),
 checked along the joint-space path. Pour: LIN down, LIN rotation about the fixed TCP so the lip
 ends --clearances above the wall top at --design-angle, wait, LIN back, PTP to the start joints.
-Merge the output under handover_demo.ros__parameters.motion_sequences.
+/pour_cup now computes the same targets at start from the measured basket (demo.yaml pour.*,
+pour_geometry.cpp); use this tool to check reach and collisions offline for new settings.
 Usage: python3 generate_cup_pour_targets.py --output /tmp/cup_pour.yaml [--angle 60]
 """
 import argparse
@@ -35,6 +36,7 @@ class PourChecker(Checker):
     """Checker whose IK check reports every contact, including the held cup."""
 
     limit_margin = 0.05  # rad; solutions closer to a joint limit are rejected.
+    ik_timeout = 0.5  # s per IK call; MoveIt's kinematics.yaml gives Pilz 0.005.
 
     def check(self, arm, pose, seed):
         (x, y, z), (w, qx, qy, qz) = pose
@@ -48,7 +50,8 @@ class PourChecker(Checker):
         ik.ik_request.pose_stamped = target
         ik.ik_request.robot_state = seed
         ik.ik_request.avoid_collisions = False
-        ik.ik_request.timeout.nanosec = 500_000_000
+        ik.ik_request.timeout.sec = int(self.ik_timeout)
+        ik.ik_request.timeout.nanosec = int((self.ik_timeout % 1) * 1e9)
         answer = self.call(self.ik, ik)
         if answer.error_code.val != 1:
             return "NOIK", None
@@ -170,12 +173,14 @@ def main():
     parser.add_argument("--directions", default="+y",
                         help="lip directions, preference order; +y pours right to left")
     parser.add_argument("--shifts", default="0.0", help="lip offset along the direction")
-    parser.add_argument("--clearances", default="0.05", help="lip height above the wall top")
+    parser.add_argument("--clearances", default="0.09", help="lip height above the wall top")
     parser.add_argument("--approach-margin", type=float, default=0.03,
                         help="cup bottom above the wall top while moving over the basket")
     parser.add_argument("--max-carry-tilt", type=float, default=10.0, help="cup tilt allowed in the PTP")
     parser.add_argument("--ik-tries", type=int, default=8)
     parser.add_argument("--limit-margin", type=float, default=0.05, help="rad from any joint limit")
+    parser.add_argument("--ik-timeout", type=float, default=0.5,
+                        help="s per IK call; 0.005 is what Pilz gets from kinematics.yaml")
     parser.add_argument("--hold", type=float, default=2.0, help="seconds at full tilt")
     parser.add_argument("--speed", type=float, default=0.08, help="LIN velocity scale")
     parser.add_argument("--joint-speed", type=float, default=0.2, help="PTP velocity scale")
@@ -190,6 +195,7 @@ def main():
     rclpy.init()
     node = PourChecker()
     node.limit_margin = args.limit_margin
+    node.ik_timeout = args.ik_timeout
     try:
         scene = node.read_scene()
         start = scene.robot_state

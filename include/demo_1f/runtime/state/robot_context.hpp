@@ -34,6 +34,9 @@ public:
   bool ready(std::string & reason) const;
   std::optional<std::string> capture_targets(std::string & reason) const;
   std::optional<geometry_msgs::msg::PoseStamped> pose_of(const std::string & frame) const;
+  // Latest /demo/basket_pose (wrist_basket_init): outer bottom center, base frame.
+  void observe_basket(const geometry_msgs::msg::PoseStamped & pose);
+  std::optional<geometry_msgs::msg::PoseStamped> basket() const;
   std::optional<geometry_msgs::msg::PoseStamped> transform_pose(
       const geometry_msgs::msg::PoseStamped & input) const;
   void set_task(const std::string & state,
@@ -62,6 +65,8 @@ private:
   std::map<std::string, CupState> cups_;
   HeadCupTracker head_cup_tracker_;
   rclcpp::Subscription<msg::CupObservation>::SharedPtr cup_subscription_, wrist_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr basket_subscription_;
+  std::optional<geometry_msgs::msg::PoseStamped> basket_;
 
   struct PositionSample {
     double position;

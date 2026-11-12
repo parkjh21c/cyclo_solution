@@ -27,6 +27,11 @@ RobotContext::RobotContext(rclcpp::Node & node, const Config & config, HeadCupTr
           queue_cup(message);
         }
       });
+  basket_subscription_ = node.create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/demo/basket_pose", rclcpp::QoS(1).transient_local(),
+      [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr message) {
+        observe_basket(*message);
+      });
   cup_tf_timer_ = node.create_wall_timer(std::chrono::milliseconds(10), [this]() {
     process_pending_cups();
   });
@@ -35,6 +40,16 @@ RobotContext::RobotContext(rclcpp::Node & node, const Config & config, HeadCupTr
       [this](sensor_msgs::msg::JointState::ConstSharedPtr message) {
         observe_joints(*message);
       });
+}
+
+void RobotContext::observe_basket(const geometry_msgs::msg::PoseStamped & pose) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  basket_ = pose;
+}
+
+std::optional<geometry_msgs::msg::PoseStamped> RobotContext::basket() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return basket_;
 }
 
 Snapshot RobotContext::snapshot() const {
