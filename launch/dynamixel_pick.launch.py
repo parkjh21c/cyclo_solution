@@ -23,6 +23,8 @@ def generate_launch_description():
         DeclareLaunchArgument('dynamixel_config', default_value=str(pick / 'config/pick.yaml')),
         DeclareLaunchArgument('dynamixel_task', default_value=str(grasp / 'config/dynamixel_top_grasp.yaml')),
         SetEnvironmentVariable('YOLO_AUTOINSTALL', 'false'),
+        # OpenBLAS threads on busy cores make small numpy products ~30x slower; same results
+        SetEnvironmentVariable('OPENBLAS_NUM_THREADS', '1'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(vision / 'launch/auto_detect.launch.py')),
             launch_arguments={'python_executable': LaunchConfiguration('pick_python'), 'camera_id': 'right_wrist',

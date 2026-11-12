@@ -12,7 +12,7 @@ from ffw_vision.obb_detector import yolo_obb_detector
 from ffw_vision.observation import make_object_array
 from ffw_vision.overlay import ANGLE_SOURCE_TEXT, draw_blobs, draw_seg_objects
 from ffw_vision.seg_detector import (
-    detect_seg, pixel_rays, resolve_model, SegParams, yolo_segmenter)
+    add_time, detect_seg, pixel_rays, resolve_model, SegParams, yolo_segmenter)
 from ffw_vision_msgs.msg import ObjectObservationArray
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -26,6 +26,24 @@ from std_msgs.msg import String
 BUFFER_SIZE = 30
 LOG_PERIOD_SEC = 2.0
 SPIN_TIMEOUT_SEC = 0.1
+# process_seg steps; basket .. match are inside detect_hybrid
+FRAME_STEPS = ('convert', 'seg', 'obb', 'basket', 'plane', 'seg_tops', 'obb_tops', 'match',
+               'publish', 'debug')
+# parts of 'plane' (support_scene, fit_plane), keyed 'plane:<part>' in the timings
+PLANE_STEPS = ('valid', 'points', 'ring', 'ring_pts', 'ransac', 'refine', 'inner', 'gray',
+               'heights')
+
+
+def frame_timing(total, idle, timings, size):
+    """One log line: one frame's total, the gap before it, image size and its steps in ms."""
+    steps = [(name, timings.get(name, 0.0)) for name in FRAME_STEPS]
+    steps.append(('other', total - sum(t for _, t in steps)))
+    plane = [(name, timings.get(f'plane:{name}', 0.0)) for name in PLANE_STEPS]
+    idle_text = '-' if idle is None else f'{idle * 1000:.0f}'
+    return (f'frame timing: total {total * 1000:.0f} ms, idle {idle_text} ms, image'
+            f' {size[0]}x{size[1]} ['
+            + ', '.join(f'{name} {t * 1000:.0f}' for name, t in steps) + '] plane ['
+            + ', '.join(f'{name} {t * 1000:.0f}' for name, t in plane) + ']')
 
 
 def image_msg(header, bgr):
@@ -125,6 +143,7 @@ class ObjectDetectorNode(Node):
             raise ValueError(f'unknown detector: {self.detector}')
         self.camera_info = None
         self.rays = None  # (key, rays) cached per CameraInfo
+        self.seg_end = None  # perf_counter when the last process_seg returned
         self.target_label = self.get_parameter('target_label').value
         self.depth_scale = self.get_parameter('depth_scale').value
         self.images = {}
@@ -186,6 +205,7 @@ class ObjectDetectorNode(Node):
     def process(self, color_msg, depth_msg):
         if self.detector in ('yolo_seg', 'yolo_hybrid'):
             self.process_seg(color_msg, depth_msg)
+            self.seg_end = time.perf_counter()
             return
         try:
             color = color_from_msg(color_msg)
@@ -205,6 +225,9 @@ class ObjectDetectorNode(Node):
             f'floor={floor:.3f}m n={len(blobs)} {summary}', throttle_duration_sec=LOG_PERIOD_SEC)
 
     def process_seg(self, color_msg, depth_msg):
+        begin = time.perf_counter()
+        idle = None if self.seg_end is None else begin - self.seg_end
+        timings = {}
         info = self.camera_info
         if info is None:
             self.get_logger().warn('waiting for camera_info', throttle_duration_sec=LOG_PERIOD_SEC)
@@ -214,9 +237,12 @@ class ObjectDetectorNode(Node):
             depth = depth_from_msg(depth_msg, self.depth_scale)
             if (info.width, info.height) != (color_msg.width, color_msg.height):
                 raise ValueError(f'camera_info {info.width}x{info.height} does not match image')
+            add_time(timings, 'convert', begin)
             start = time.perf_counter()
             segments = self.segment(color, self.params.conf)
+            lap = add_time(timings, 'seg', start)
             boxes = None if self.boxes is None else self.boxes(color, self.params.conf)
+            add_time(timings, 'obb', lap)
             model_ms = (time.perf_counter() - start) * 1000
             if self.boxes is None:
                 objects, plane = detect_seg(color, depth, info.k, info.d, segments, self.params,
@@ -224,14 +250,16 @@ class ObjectDetectorNode(Node):
             else:
                 objects, plane = detect_hybrid(
                     color, depth, info.k, info.d, segments, boxes, self.params,
-                    self.rays_for(info))
+                    self.rays_for(info), timings=timings)
             total_ms = (time.perf_counter() - start) * 1000
         except ValueError as error:
             self.get_logger().error(str(error), throttle_duration_sec=LOG_PERIOD_SEC)
             return
+        lap = time.perf_counter()
         self.array_pub.publish(make_object_array(
             self.config, color_msg.header, color_msg.width, color_msg.height, objects,
             self.target_label, plane))
+        lap = add_time(timings, 'publish', lap)
         if self.debug_pub is not None:
             self.debug_pub.publish(image_msg(
                 color_msg.header, draw_seg_objects(color, objects, plane is not None)))
@@ -240,11 +268,15 @@ class ObjectDetectorNode(Node):
                 self.info_head + [f'frame     {plane_text}   objects {len(objects)}   models'
                                   f' {model_ms:.0f} ms   total {total_ms:.0f} ms', '']
                 + info_rows(objects))))
+            add_time(timings, 'debug', lap)
         summary = ' '.join(seg_summary(o) for o in objects)
         plane_text = f'{plane[1]:.3f}m' if plane else '-'
         self.get_logger().info(
             f'camera above plane={plane_text} n={len(objects)} {summary}',
             throttle_duration_sec=LOG_PERIOD_SEC)
+        self.get_logger().info(frame_timing(time.perf_counter() - begin, idle, timings,
+                                            (color_msg.width, color_msg.height)),
+                               throttle_duration_sec=LOG_PERIOD_SEC)
 
 
 def main(args=None):

@@ -1,6 +1,7 @@
 from collections import Counter
 from dataclasses import dataclass, replace
 import math
+import time
 
 import cv2
 from ffw_vision.blob_detector import normalize_angle
@@ -237,6 +238,20 @@ def pick_object(frames, radius, min_count):
     return ranked[0][0], ranked[0][1], seen
 
 
+def add_time(timings, name, start):
+    """Add the seconds since start to timings[name] (None = off); returns the current time."""
+    now = time.perf_counter()
+    if timings is not None:
+        timings[name] = timings.get(name, 0.0) + now - start
+    return now
+
+
+def add_count(timings, name, count=1):
+    """Add count to timings[name] (None = off)."""
+    if timings is not None:
+        timings[name] = timings.get(name, 0) + count
+
+
 def near_any(xy, points, radius):
     """True if xy is within radius of one of points (base x, y)."""
     return any(math.hypot(xy[0] - p[0], xy[1] - p[1]) <= radius for p in points)
@@ -363,13 +378,21 @@ def veil_pixels(depth, step, jump):
 
 
 def finger_blocks(points, heights, center, close_axis, normal, opening, tip_height, params,
-                  lean=None, tilt=0.0):
+                  lean=None, tilt=0.0, timings=None):
     """Most scene points inside either finger's space; the finger thickens above its tip.
 
     A tilted finger runs toward lean (camera frame, in the plane) by tan(tilt) per height.
+    timings: dict that gets the call count and seconds of 'finger' and its parts (None = off).
     """
-    return max(int(m.sum()) for m in finger_masks(points, heights, center, close_axis, normal,
-                                                  opening, tip_height, params, lean, tilt))
+    start = time.perf_counter()
+    masks = finger_masks(points, heights, center, close_axis, normal, opening, tip_height,
+                         params, lean, tilt, timings)
+    lap = time.perf_counter()
+    count = max(int(m.sum()) for m in masks)
+    add_time(timings, 'finger:mask', lap)
+    add_time(timings, 'finger', start)
+    add_count(timings, 'finger:n')
+    return count
 
 
 def blocking_points(points, heights, center, close_axis, normal, opening, tip_height, params,
@@ -382,14 +405,17 @@ def blocking_points(points, heights, center, close_axis, normal, opening, tip_he
 
 
 def finger_masks(points, heights, center, close_axis, normal, opening, tip_height, params,
-                 lean=None, tilt=0.0):
+                 lean=None, tilt=0.0, timings=None):
     """Scene points inside each finger's space (see finger_blocks)."""
+    start = time.perf_counter()
     dz = heights - tip_height
     rel = points - center
     if tilt:
         rel = rel - np.outer(dz * math.tan(tilt), lean)
+    start = add_time(timings, 'finger:rel', start)
     along = rel @ close_axis
     across = np.abs(rel @ np.cross(normal, close_axis))
+    start = add_time(timings, 'finger:proj', start)
     run = dz / math.cos(tilt)  # length along the finger
     thick = np.minimum(params.finger_tip + (params.finger_thick - params.finger_tip)
                        * run / params.taper_height, params.finger_max)
@@ -397,27 +423,36 @@ def finger_masks(points, heights, center, close_axis, normal, opening, tip_heigh
     if params.finger_width_root and params.finger_length:
         width = width + (params.finger_width_root - width) * np.clip(
             run / params.finger_length, 0.0, 1.0)
+    start = add_time(timings, 'finger:shape', start)
     near = (dz > 0) & (across <= width / 2)
-    return [near & (out >= 0) & (out <= thick)
-            for out in (along - opening / 2, -along - opening / 2)]
+    masks = [near & (out >= 0) & (out <= thick)
+             for out in (along - opening / 2, -along - opening / 2)]
+    add_time(timings, 'finger:mask', start)
+    return masks
 
 
-def body_blocks(points, tip, x_axis, y_axis, z_axis, params):
+def body_blocks(points, tip, x_axis, y_axis, z_axis, params, timings=None):
     """Scene points in the gripper body or the next link, each swept up the finger axis."""
+    began = time.perf_counter()  # not start: the loop below uses that name
     rel = points - tip
     a, b, c = rel @ x_axis, np.abs(rel @ y_axis), rel @ z_axis
+    lap = add_time(timings, 'body:proj', began)
     count = 0
     for start, half_y, x_min, x_max in (
             (params.finger_length, params.body_half_y, params.body_x_min, params.body_x_max),
             (params.link_start, params.link_half_y, params.link_x_min, params.link_x_max)):
         if half_y > 0:
             count += int(((c >= start) & (b <= half_y) & (a >= x_min) & (a <= x_max)).sum())
+    add_time(timings, 'body:mask', lap)
+    add_time(timings, 'body', began)
+    add_count(timings, 'body:n')
     return count
 
 
-def rolled_blocks(points, tip, x_axis, y_axis, z_axis, opening, params):
+def rolled_blocks(points, tip, x_axis, y_axis, z_axis, opening, params, timings=None):
     """Most scene points inside either finger's space for any gripper frame (tip = between the
     fingertips): the finger thickens outward along y as it runs up z."""
+    began = time.perf_counter()
     counts = []
     for side in (1, -1):
         rel = points - (tip + y_axis * side * opening / 2)
@@ -430,6 +465,8 @@ def rolled_blocks(points, tip, x_axis, y_axis, z_axis, opening, params):
                 run / params.finger_length, 0.0, 1.0)
         counts.append(int(((run > 0) & (across <= width / 2) & (out >= 0)
                            & (out <= thick)).sum()))
+    add_time(timings, 'rolled', began)
+    add_count(timings, 'rolled:n')
     return max(counts)
 
 
@@ -478,7 +515,7 @@ def wall_points(points, heights, basket, normal, params):
 
 
 def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, params,
-               samples=None, basket=None):
+               samples=None, basket=None, timings=None, checks=None):
     """Grasp from above: end effector y along the closing axis (horizontal), z up the fingers,
     vertical or tilted about y up to max_tilt_deg.
 
@@ -486,7 +523,10 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
     rotation, translation: camera frame -> base frame. ee_y: current end effector y in the base.
     samples: the per-frame targets merged into target (default: target alone).
     basket: fit_basket result; with wall_band its walls are left to the arm side's model.
+    timings: dict that gets the seconds of each step added (None = off).
+    checks: dict that gets point counts and collision check counts and seconds (None = off).
     """
+    start = time.perf_counter()
     normal, plane_d = plane
     center, axis, length, width = merge_faces(samples or [target], k, d, normal, plane_d,
                                               target.angle_period)
@@ -501,6 +541,9 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
     if basket is not None and params.wall_band > 0 and params.basket_inner_top[0] > 0:
         keep = ~wall_points(points, heights, basket, normal, params)
         finger_points, finger_heights = points[keep], heights[keep]
+    if checks is not None:  # the last object planned
+        checks.update({'points:n': len(points), 'finger_points:n': len(finger_points)})
+    start = add_time(timings, 'points', start)
 
     # near square (period pi/2): which side is long is not known, open for the long one
     square = target.angle_period < math.pi - 1e-6
@@ -545,11 +588,11 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
             for tilt in tilts:
                 cand_tip = tip_height_for(target.top_height, tilt, params)
                 blocked = finger_blocks(finger_points, finger_heights, center, close_axis,
-                                        normal, width, cand_tip, params, lean_cam, tilt)
+                                        normal, width, cand_tip, params, lean_cam, tilt, checks)
                 z_cam = math.cos(tilt) * normal + math.sin(tilt) * lean_cam
                 tip_point = center - normal * (target.top_height - cand_tip)
                 body = body_blocks(points, tip_point, np.cross(y_cam, z_cam), y_cam, z_cam,
-                                   params)
+                                   params, checks)
                 last = (tilt, cand_tip, blocked, body)
                 if blocked < params.obstacle_points and body < params.obstacle_points:
                     free.append(tilt)
@@ -558,6 +601,7 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
         free, first, last = scan(opening)
         # the candidate is shown at its largest free tilt
         tilt, cand_tip, blocked, body = first or last
+        start = add_time(timings, 'upright', start)
         narrow = []
         for gap in sorted(params.backup_clearances, reverse=True):
             narrow_open = min(params.max_open, grip + 2 * gap)  # not width: that is the top face
@@ -566,6 +610,7 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
             free_n = scan(narrow_open)[0]
             if free_n:
                 narrow.append((narrow_open, tuple(free_n)))
+        start = add_time(timings, 'narrow', start)
         where, shown = '', None
         if first is None and blocked >= params.obstacle_points:
             # where the blocking points are: above the object = wall or a taller neighbor
@@ -581,6 +626,7 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
                                     y, turn, tilt, z_axis, lean_cam, lean, cand_tip,
                                     tuple(free), narrow=tuple(narrow) if reason != 'too wide'
                                     else (), block_points=shown))
+        start = add_time(timings, 'upright', start)
     usable = [c for c in candidates if not c.reason]
     if not usable and any(c.narrow for c in candidates):
         # nothing fits at the normal opening: the widest free narrow one is shown and chosen
@@ -589,23 +635,28 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
         usable = [c for c in candidates if not c.reason]
     if not usable and params.max_roll_deg > 0:
         candidates = [roll_candidate(c, points, center, normal, target.top_height, params,
-                                     finger_points)
+                                     finger_points, checks)
                       for c in candidates]
         usable = [c for c in candidates if not c.reason]
+    start = add_time(timings, 'roll', start)
     backups = []  # (candidate, tilt, roll) tried after every upright option
     if usable and not usable[0].roll and params.roll_backup and params.max_roll_deg > 0:
         for c in sorted(candidates, key=lambda c: abs(c.wrist_turn)):
             if c.reason == 'too wide':
                 continue
             rolls, tilts, blocked = roll_grid(c, points, center, normal, target.top_height,
-                                              params, finger_points)
+                                              params, finger_points, checks)
             away = away_roll_sign(center, c.close_axis, normal, basket, params)
 
             def free(t, r, blocked=blocked):
+                add_count(checks, 'backup_rolls:n')
                 count = blocked(t, r)
                 return count is not None and count < params.obstacle_points
-            backups += [(c, t, r) for t, r in backup_rolls(rolls, tilts, away,
-                                                            params.roll_backup_max, free)]
+            lap = time.perf_counter()
+            found = backup_rolls(rolls, tilts, away, params.roll_backup_max, free)
+            add_time(checks, 'backup_rolls', lap)
+            backups += [(c, t, r) for t, r in found]
+    start = add_time(timings, 'backup', start)
     # least wrist turn (user 2026-10-29): it also leans best, so the arm moves least
     chosen = min(usable, key=lambda c: abs(c.wrist_turn)) if usable else None
 
@@ -639,6 +690,7 @@ def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, pa
                 for t in f]
     options += [option(c, t, r) for c in by_turn if not c.reason for t, r in c.free_rolls]
     options += [option(c, t, r) for c, t, r in backups]
+    add_time(timings, 'options', start)
     best = options[0]
     return Grasp(target, normal, center, axis, length, width, chosen.tip_height, table_z,
                  candidates, chosen, '', best.tip, best.position, best.rotation, best.hover,
@@ -654,10 +706,11 @@ def narrowed(c, top_height, params):
                    tip_height=tip_height_for(top_height, tilt, params), block_points=None)
 
 
-def roll_grid(c, points, center, normal, top_height, params, finger_points=None):
+def roll_grid(c, points, center, normal, top_height, params, finger_points=None, timings=None):
     """(rolls, tilts, blocked) for rolling c: rolls by roll_step_deg up to max_roll_deg, its
     tilts largest first, blocked(tilt, signed roll) = most scene points in a finger or the
     body, None when the fingertips do not fit the side face."""
+    start = time.perf_counter()
     near = points[np.linalg.norm(points - center, axis=1) < params.near_radius]  # fingers, body
     if finger_points is None:
         finger_points = points
@@ -670,6 +723,8 @@ def roll_grid(c, points, center, normal, top_height, params, finger_points=None)
     tilt_step = math.radians(params.tilt_step_deg)
     tilts = sorted({max(tilt_top - i * tilt_step, 0.0)
                     for i in range(int(tilt_top / tilt_step) + 1)} | {0.0}, reverse=True)
+    add_time(timings, 'roll_grid', start)  # setup only; checks run later through blocked
+    add_count(timings, 'roll_grid:n')
 
     def blocked(tilt, signed):
         height = roll_tip_height(top_height, tilt, signed, c.opening, params)
@@ -677,18 +732,19 @@ def roll_grid(c, points, center, normal, top_height, params, finger_points=None)
             return None
         x, y, z = rolled_frame(normal, c.lean, c.close_axis, tilt, signed)
         tip = center - normal * (top_height - height)
-        return max(rolled_blocks(near_f, tip, x, y, z, c.opening, params),
-                   body_blocks(near, tip, x, y, z, params))
+        return max(rolled_blocks(near_f, tip, x, y, z, c.opening, params, timings),
+                   body_blocks(near, tip, x, y, z, params, timings))
     return rolls, tilts, blocked
 
 
-def roll_candidate(c, points, center, normal, top_height, params, finger_points=None):
+def roll_candidate(c, points, center, normal, top_height, params, finger_points=None,
+                   timings=None):
     """Candidate retried rolled (both ways, roll_step_deg up to max_roll_deg) at each of its
     tilts: a finger whose thick upper part meets a wall leans away from it."""
     if c.reason == 'too wide':
         return c
     rolls, tilts, blocked = roll_grid(c, points, center, normal, top_height, params,
-                                      finger_points)
+                                      finger_points, timings)
     free, least = [], None
     for roll in rolls:
         for tilt in tilts:

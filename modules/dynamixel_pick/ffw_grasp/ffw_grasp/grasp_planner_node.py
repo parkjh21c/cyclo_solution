@@ -1,10 +1,11 @@
 import math
 import threading
+import time
 import warnings
 
 from ffw_grasp.grasp_planner import (
-    fit_basket, GraspParams, matrix_to_quat, merge_planes, merge_targets, near_any, on_plane,
-    pick_target, plan_grasp, quat_to_matrix, rank_objects, Target)
+    add_time, fit_basket, GraspParams, matrix_to_quat, merge_planes, merge_targets, near_any,
+    on_plane, pick_target, plan_grasp, quat_to_matrix, rank_objects, Target)
 from ffw_grasp.overlay import draw_basket, draw_grasp
 from ffw_vision.camera_config import declare_camera_parameters, load_camera_config
 from ffw_vision.depth_stats import color_from_msg, depth_from_msg
@@ -124,6 +125,35 @@ def overlay_text(g):
             + f' turn {math.degrees(g.wrist_turn):+.0f}deg')
 
 
+PLAN_STEPS = ('object', 'depth', 'basket', 'grasp', 'publish')  # plan_object, publish_object
+GRASP_STEPS = ('points', 'upright', 'narrow', 'roll', 'backup', 'options')  # inside plan_grasp
+
+
+def checks_summary(c):
+    """Point counts and collision checks of plan_grasp (count x seconds, parts in seconds)."""
+    def part(name):
+        return f'{c.get(name + ":n", 0)}x {c.get(name, 0.0):.2f} s'
+
+    def parts(prefix, names):
+        return ', '.join(f'{name} {c.get(f"{prefix}:{name}", 0.0):.2f}' for name in names)
+    return (f'checks [points {c.get("points:n", 0)}/{c.get("finger_points:n", 0)},'
+            f' finger {part("finger")} ({parts("finger", ("rel", "proj", "shape", "mask"))}),'
+            f' body {part("body")} ({parts("body", ("proj", "mask"))}),'
+            f' rolled {part("rolled")}, roll_grid {part("roll_grid")},'
+            f' backup_rolls {part("backup_rolls")}]')
+
+
+def timing_summary(collect, frames, compute, timings, grasp_timings, checks=None):
+    """One log line: collect and compute seconds, compute split by step (summed over objects)."""
+    steps = [(name, timings.get(name, 0.0)) for name in PLAN_STEPS]
+    steps.append(('other', compute - sum(t for _, t in steps)))
+    grasp = [(name, grasp_timings.get(name, 0.0)) for name in GRASP_STEPS]
+    return (f'plan timing: collect {collect:.2f} s ({frames} frames), compute {compute:.2f} s ['
+            + ', '.join(f'{name} {t:.2f}' for name, t in steps) + '], grasp ['
+            + ', '.join(f'{name} {t:.2f}' for name, t in grasp) + ']'
+            + ('' if checks is None else ' ' + checks_summary(checks)))
+
+
 class GraspPlannerNode(Node):
     """On plan: object_observations + aligned depth + TF -> grasp and hover poses (no motion)."""
 
@@ -165,6 +195,9 @@ class GraspPlannerNode(Node):
         self.rays = None  # (key, rays) cached per CameraInfo
         self.skips = []  # base x, y of objects skip_last left out, until clear_skips
         self.last_xy = None  # base x, y of the object the last plan chose
+        self.timings = {}  # seconds per PLAN_STEPS name in the current plan
+        self.grasp_timings = {}  # seconds per GRASP_STEPS name in the current plan
+        self.check_timings = {}  # plan_grasp collision check counts and seconds (checks_summary)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -236,24 +269,32 @@ class GraspPlannerNode(Node):
         return transform_parts(self.tf_buffer.lookup_transform(target, source, stamp, TF_TIMEOUT))
 
     def on_plan(self, request, response):
+        self.timings, self.grasp_timings, self.check_timings = {}, {}, {}
+        start = time.perf_counter()
         with self.lock:
             self.frames_seen = []
             self.done.clear()
             self.collecting = True
         self.done.wait(self.timeout_sec)
+        collect = time.perf_counter() - start
         with self.lock:
             self.collecting = False
             frames = self.frames_seen
         self.last_xy = None
+        start = time.perf_counter()
         try:
             response.message = self.plan(frames)
+            compute = time.perf_counter() - start
             response.success = True
             self.get_logger().info(response.message)
         except (ValueError, tf2_ros.TransformException) as error:
+            compute = time.perf_counter() - start
             kind = error.kind if isinstance(error, PlanFailure) else 'view'
             response.success = False
             response.message = f'{kind}: {len(frames)} frames: {error}'
             self.get_logger().warn(response.message)
+        self.get_logger().info(timing_summary(collect, len(frames), compute, self.timings,
+                                              self.grasp_timings, self.check_timings))
         return response
 
     def on_skip_last(self, request, response):
@@ -313,13 +354,17 @@ class GraspPlannerNode(Node):
                 reasons.append(f'#{n} {grasp_summary(grasp)}')
                 failed = failed or result
                 continue
+            start = time.perf_counter()
             self.publish_object(*result)
+            add_time(self.timings, 'publish', start)
             self.last_xy = result[-1]
             others = (f' (object {n} of {len(ranked)}; ' + '; '.join(reasons) + ')' if n > 1
                       else f' (highest score of {seen} objects)' if seen > 1 else '')
             return f'{result[1]}{others}; {len(grasp.options)} options'
         if failed is not None:
+            start = time.perf_counter()
             self.publish_object(*failed)  # the scene and the image of the best object tried
+            add_time(self.timings, 'publish', start)
         raise PlanFailure('skipped' if skipped == len(ranked) else 'objects',
                           f'{len(ranked)} objects, none graspable: '
                           + '; '.join(reasons))
@@ -328,6 +373,7 @@ class GraspPlannerNode(Node):
         """Grasp of one object over its frames: (grasp, summary, basket, plane, rotation,
         translation, stamp, color, base x, y). ValueError = this object only; PlanFailure =
         the view (no other object would do better)."""
+        start = time.perf_counter()
         planes = [frame[0].support_plane for frame in used]
         target, kept = merge_targets(targets, self.max_center_jitter_px, self.min_frames,
                                      self.standing_min_height)
@@ -356,6 +402,7 @@ class GraspPlannerNode(Node):
         if near_any(xy, self.skips, self.skip_radius):
             raise ValueError(f'skipped at ({xy[0]:.3f}, {xy[1]:.3f}): no arm path before')
         ee_rotation, _ = self.lookup(self.base_frame, self.end_effector_frame, Time())
+        start = add_time(self.timings, 'object', start)
 
         depths = np.stack([depth_from_msg(f[1], self.depth_scale) for f in kept_frames])
         with warnings.catch_warnings():
@@ -363,13 +410,17 @@ class GraspPlannerNode(Node):
             depth = np.nanmedian(depths, axis=0)
         color = kept_frames[-1][2]
         image = color_from_msg(color) if color is not None else None
+        start = add_time(self.timings, 'depth', start)
         # the basket first: its walls are checked by the arm side's model (wall_band)
         basket, basket_reason = (fit_basket(image, depth, info.k, info.d, self.rays_for(info),
                                             plane, self.params)
                                  if image is not None else (None, 'no color image'))
+        start = add_time(self.timings, 'basket', start)
         grasp = plan_grasp(target, plane, depth, info.k, info.d, self.rays_for(info),
                            rotation, translation, ee_rotation[:, 1], self.params,
-                           [targets[i] for i in kept], basket)
+                           [targets[i] for i in kept], basket, self.grasp_timings,
+                           self.check_timings)
+        add_time(self.timings, 'grasp', start)
         summary = (f'{grasp_summary(grasp)} frames {len(kept)}/{total};'
                    f' {basket_summary(basket, basket_reason, self.params)}'
                    f' ({bias_summary(self.params)})')

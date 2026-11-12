@@ -1,12 +1,13 @@
 from dataclasses import replace
 import math
+import time
 import unittest
 
 import cv2
 from ffw_grasp.grasp_planner import (
-    away_roll_sign, backup_rolls, Basket, fit_basket, GraspParams, matrix_to_quat, merge_planes,
-    merge_targets, near_any, pick_object, pick_target, plan_grasp, quat_to_matrix, rank_objects,
-    Target, top_face, UP, veil_pixels)
+    add_time, away_roll_sign, backup_rolls, Basket, fit_basket, GraspParams, matrix_to_quat,
+    merge_planes, merge_targets, near_any, pick_object, pick_target, plan_grasp, quat_to_matrix,
+    rank_objects, Target, top_face, UP, veil_pixels)
 from ffw_vision.blob_detector import normalize_angle
 from ffw_vision.seg_detector import pixel_rays, project
 import numpy as np
@@ -678,6 +679,57 @@ class TestRoll(unittest.TestCase):
         self.assertEqual(away_roll_sign(0.1 * x, x, n, basket, BASKET), 1)
         self.assertEqual(away_roll_sign(-0.1 * x, x, n, basket, BASKET), -1)
         self.assertEqual(away_roll_sign(0.1 * x, x, n, None, BASKET), 0)
+
+
+class TestTimings(unittest.TestCase):
+
+    def test_add_time_sums_per_name(self):
+        timings = {}
+        now = add_time(timings, 'a', time.perf_counter() - 1.0)
+        add_time(timings, 'a', now - 2.0)
+        self.assertGreaterEqual(timings['a'], 3.0)
+        self.assertLess(timings['a'], 4.0)
+        self.assertGreaterEqual(add_time(None, 'a', 0.0), now)  # None = off, still the time
+
+    def test_timings_leave_the_grasp_unchanged(self):
+        scene = Scene()
+        scene.raise_box(*STANDING)
+        target = scene.target(*STANDING, period=math.pi / 2, pose='standing')
+        params = replace(PARAMS, max_roll_deg=25.0, roll_backup=True, roll_backup_max=4,
+                         backup_clearances=(0.008,), **FINGERS)
+        plain = scene.plan(target, params=params)
+        timings = {}
+        g = plan_grasp(target, (scene.n, scene.plane_d), scene.depth, K, scene.d, scene.rays,
+                       scene.rotation, scene.translation, np.array([0.0, 1.0, 0.0]), params,
+                       timings=timings)
+        self.assertEqual(set(timings),
+                         {'points', 'upright', 'narrow', 'roll', 'backup', 'options'})
+        self.assertTrue(all(t >= 0.0 for t in timings.values()))
+        self.assertEqual([(o.name, o.tilt, o.roll, o.opening, o.backup) for o in g.options],
+                         [(o.name, o.tilt, o.roll, o.opening, o.backup) for o in plain.options])
+        np.testing.assert_allclose(g.position, plain.position)
+
+    def test_checks_leave_the_grasp_unchanged(self):
+        scene = Scene()
+        scene.raise_box(*STANDING)
+        target = scene.target(*STANDING, period=math.pi / 2, pose='standing')
+        params = replace(PARAMS, max_roll_deg=25.0, roll_backup=True, roll_backup_max=4,
+                         backup_clearances=(0.008,), **FINGERS)
+        plain = scene.plan(target, params=params)
+        checks = {}
+        g = plan_grasp(target, (scene.n, scene.plane_d), scene.depth, K, scene.d, scene.rays,
+                       scene.rotation, scene.translation, np.array([0.0, 1.0, 0.0]), params,
+                       checks=checks)
+        self.assertEqual([(o.name, o.tilt, o.roll, o.opening, o.backup) for o in g.options],
+                         [(o.name, o.tilt, o.roll, o.opening, o.backup) for o in plain.options])
+        np.testing.assert_array_equal(g.position, plain.position)
+        self.assertEqual(checks['points:n'], checks['finger_points:n'])  # no basket: same
+        self.assertGreater(checks['finger:n'], 0)
+        self.assertGreater(checks['backup_rolls:n'], 0)
+        # every upright check runs both, every rolled check rolled_blocks and body_blocks
+        self.assertEqual(checks['body:n'], checks['finger:n'] + checks['rolled:n'])
+        parts = sum(checks[f'finger:{p}'] for p in ('rel', 'proj', 'shape', 'mask'))
+        self.assertLessEqual(parts, checks['finger'])
 
 
 if __name__ == '__main__':

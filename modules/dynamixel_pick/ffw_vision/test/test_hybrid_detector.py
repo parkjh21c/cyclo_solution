@@ -128,6 +128,21 @@ class TestDetectHybrid(unittest.TestCase):
     def test_masks_without_a_box_are_dropped(self):
         self.assertEqual(self.run_hybrid([]), [])
 
+    def test_timings_leave_the_objects_unchanged(self):
+        s, boxes = self.scene, [(box_corners(self.scene, 12), 0.9)]
+        (plain,) = self.run_hybrid(boxes)
+        timings = {}
+        (obj,), plane = detect_hybrid(s.color, s.depth, K, s.d, self.segments, boxes, PARAMS,
+                                      timings=timings)
+        parts = ('valid', 'points', 'ring', 'ring_pts', 'ransac', 'refine', 'inner', 'gray',
+                 'heights')
+        self.assertEqual(set(timings), {'basket', 'plane', 'seg_tops', 'obb_tops', 'match'}
+                         | {f'plane:{p}' for p in parts})
+        self.assertTrue(all(t >= 0.0 for t in timings.values()))
+        self.assertEqual((obj.u, obj.v, obj.angle, obj.length_m, obj.width_m, obj.angle_source),
+                         (plain.u, plain.v, plain.angle, plain.length_m, plain.width_m,
+                          plain.angle_source))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 import math
+import time
 
 from ffw_vision.obb_detector import detect_obb, face_object, ObbParams, windowed_peak
-from ffw_vision.seg_detector import detect_seg, plane_axes, support_scene
+from ffw_vision.seg_detector import add_time, detect_seg, plane_axes, support_scene
 import numpy as np
 
 # angle sources: seg direction kept / seg vote peak near the box / box angle (no seg partner)
@@ -28,7 +29,8 @@ def diff90(x, y):
     return abs((x - y + 45) % 90 - 45)
 
 
-def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, debug=None):
+def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, debug=None,
+                  timings=None):
     """OBB boxes give the objects, center and top height; the seg mask gives the direction (color
     edge votes) and the size (top face points; the boxes come out 4-12 mm too large). The seg
     direction is kept within hybrid_window_deg of the box angle; further off (a wrong peak won,
@@ -40,17 +42,21 @@ def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, de
 
     segments: [(bool mask, score)], boxes: [(4x2 corners, score)] in source pixels.
     Returns (objects, plane or None) like detect_seg; debug gets one dict per object.
+    timings: dict that gets the seconds of each step added (None = off).
     """
-    scene = support_scene(color_bgr, depth, k, d, params, rays)
+    scene = support_scene(color_bgr, depth, k, d, params, rays, timings)
     if scene is None:
         return [], None
+    start = time.perf_counter()
     n, plane_d = scene.n, scene.plane_d
     a, b = plane_axes(n)
     seg_info, box_info = [], []
     seg_objects, _ = detect_seg(color_bgr, depth, k, d, segments, params, scene.rays, seg_info,
                                 scene)
+    start = add_time(timings, 'seg_tops', start)
     box_objects, _ = detect_obb(color_bgr, depth, k, d, boxes, params, scene.rays, box_info,
                                 scene)
+    start = add_time(timings, 'obb_tops', start)
     objects = []
     for box, info in zip(box_objects, box_info):
         box_deg = plane_deg(info['axis'], a, b)
@@ -89,5 +95,6 @@ def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, de
             debug.append(dict(votes, mask=info['mask'], region=region | info['region'],
                               top_level=info['top_level'], rect_deg=box_deg, box_deg=box_deg,
                               final_deg=final, source=source))
+    add_time(timings, 'match', start)
     return objects, (n, plane_d)
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import math
 import os
+import time
 
 import cv2
 from ffw_vision.blob_detector import normalize_angle
@@ -64,6 +65,14 @@ class SegObject:
     face_corners: np.ndarray = None  # drawn top face: 4 image corners (known size, 3D projected)
 
 
+def add_time(timings, name, start):
+    """Add the seconds since start to timings[name] (None = off); returns the current time."""
+    now = time.perf_counter()
+    if timings is not None:
+        timings[name] = timings.get(name, 0.0) + now - start
+    return now
+
+
 def basket_masks(color_bgr, params):
     """(basket area filled from its outer contour, blue pixels); basket is None if no blue."""
     hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
@@ -89,8 +98,12 @@ def pixel_rays(width, height, k, d):
     return rays.reshape(height, width, 2)
 
 
-def fit_plane(points, params, rng):
-    """RANSAC plane (n, d) with n . p + d = height; unit n toward the camera origin."""
+def fit_plane(points, params, rng, timings=None):
+    """RANSAC plane (n, d) with n . p + d = height; unit n toward the camera origin.
+
+    timings: dict that gets the seconds of 'plane:ransac' and 'plane:refine' added (None = off).
+    """
+    start = time.perf_counter()
     if len(points) > params.plane_samples:
         points = points[rng.choice(len(points), params.plane_samples, replace=False)]
     best = None
@@ -103,10 +116,12 @@ def fit_plane(points, params, rng):
         inliers = np.abs((points - a) @ n) < params.plane_tol
         if best is None or inliers.sum() > best.sum():
             best = inliers
+    start = add_time(timings, 'plane:ransac', start)
     q = points[best]
     center = q.mean(axis=0)
-    n = np.linalg.svd(q - center)[2][2]
+    n = np.linalg.svd(q - center, full_matrices=False)[2][2]  # no unused N x N U
     d = -float(n @ center)
+    add_time(timings, 'plane:refine', start)
     return (n, d) if d > 0 else (-n, -d)
 
 
@@ -257,28 +272,47 @@ class SupportScene:
     rays: np.ndarray
 
 
-def support_scene(color_bgr, depth, k, d, params, rays=None):
-    """Basket, support plane (table ring around the basket) and heights; None without them."""
+def support_scene(color_bgr, depth, k, d, params, rays=None, timings=None):
+    """Basket, support plane (table ring around the basket) and heights; None without them.
+
+    timings: dict that gets the seconds of 'basket' and 'plane' added (None = off), and of
+    the plane's parts as 'plane:<part>'.
+    """
+    start = time.perf_counter()
     height_px, width_px = color_bgr.shape[:2]
     basket, blue = basket_masks(color_bgr, params)
+    start = add_time(timings, 'basket', start)
     if basket is None:
         return None
     if rays is None:
         rays = pixel_rays(width_px, height_px, k, d)
+    lap = time.perf_counter()
     with np.errstate(invalid='ignore'):
         valid = np.isfinite(depth) & (depth >= params.min_depth) & (depth <= params.max_depth)
     z = np.nan_to_num(depth)
+    lap = add_time(timings, 'plane:valid', lap)
     points = np.dstack((rays[:, :, 0] * z, rays[:, :, 1] * z, z))
+    lap = add_time(timings, 'plane:points', lap)
 
     ring = ((cv2.dilate(basket, np.ones((params.ring_outer_px,) * 2, np.uint8)) > 0)
             & (cv2.dilate(basket, np.ones((params.ring_gap_px,) * 2, np.uint8)) == 0) & valid)
     if ring.sum() < params.min_plane_points:
         return None
-    n, plane_d = fit_plane(points[ring], params, np.random.default_rng(0))
+    lap = add_time(timings, 'plane:ring', lap)
+    ring_points = points[ring]
+    add_time(timings, 'plane:ring_pts', lap)
+    n, plane_d = fit_plane(ring_points, params, np.random.default_rng(0), timings)
+    lap = time.perf_counter()
     inner = cv2.erode(basket, np.ones((params.inner_erode_px,) * 2, np.uint8)).astype(bool)
+    lap = add_time(timings, 'plane:inner', lap)
     gray = cv2.GaussianBlur(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-    return SupportScene(blue, inner, valid, points, points @ n + plane_d, n, plane_d,
-                 gray.astype(np.float32), rays)
+    gray = gray.astype(np.float32)
+    lap = add_time(timings, 'plane:gray', lap)
+    heights = points @ n + plane_d
+    add_time(timings, 'plane:heights', lap)
+    scene = SupportScene(blue, inner, valid, points, heights, n, plane_d, gray, rays)
+    add_time(timings, 'plane', start)
+    return scene
 
 
 def detect_seg(color_bgr, depth, k, d, segments, params, rays=None, debug=None, scene=None):

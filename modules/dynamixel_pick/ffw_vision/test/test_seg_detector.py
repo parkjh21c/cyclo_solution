@@ -1,10 +1,12 @@
 from dataclasses import replace
 import math
+import time
 import unittest
 
 import cv2
 from ffw_vision.blob_detector import normalize_angle
-from ffw_vision.seg_detector import detect_seg, fit_plane, project, resolve_model, SegParams
+from ffw_vision.seg_detector import (
+    add_time, detect_seg, fit_plane, project, resolve_model, SegParams)
 import numpy as np
 
 WIDTH, HEIGHT = 424, 240
@@ -87,6 +89,36 @@ class TestFitPlane(unittest.TestCase):
         self.assertGreater(d, 0)
         self.assertAlmostEqual(d, 0.30, places=3)
         self.assertGreater(n @ scene.n, 0.999)
+
+    def test_timings_leave_the_plane_bit_identical(self):
+        scene = Scene(tilt_deg=40)
+        points = (scene.rays * scene.depth[:, :, None]).reshape(-1, 3)
+        n, d = fit_plane(points, PARAMS, np.random.default_rng(0))
+        timings = {}
+        n_t, d_t = fit_plane(points, PARAMS, np.random.default_rng(0), timings)
+        np.testing.assert_array_equal(n_t, n)
+        self.assertEqual(d_t, d)
+        self.assertEqual(set(timings), {'plane:ransac', 'plane:refine'})
+
+    def noisy_plane(self):
+        """2500 points within 1 mm of a tilted plane, centered as fit_plane centers them."""
+        rng = np.random.default_rng(7)
+        xy = rng.uniform(-0.15, 0.15, (2500, 2))
+        z = 0.3 + 0.2 * xy[:, 0] - 0.1 * xy[:, 1] + rng.normal(0.0, 0.001, 2500)
+        q = np.column_stack((xy, z))
+        return q - q.mean(axis=0)
+
+    def test_reduced_svd_normal_matches_full(self):
+        centered = self.noisy_plane()
+        full = np.linalg.svd(centered)[2][2]
+        reduced = np.linalg.svd(centered, full_matrices=False)[2][2]
+        np.testing.assert_allclose(reduced, full, rtol=0, atol=1e-12)  # sign included
+
+    def test_reduced_svd_normal_is_bit_identical(self):
+        # same LAPACK path for Vh (QR, then the 3 x 3 R); fails if this build differs
+        centered = self.noisy_plane()
+        self.assertTrue(np.array_equal(np.linalg.svd(centered, full_matrices=False)[2][2],
+                                       np.linalg.svd(centered)[2][2]))
 
 
 class TestDetectSeg(unittest.TestCase):
@@ -257,6 +289,17 @@ class TestResolveModel(unittest.TestCase):
         self.assertEqual(resolve_model('', '/w/a.pt', '/share/models'), '/w/a.pt')
         with self.assertRaises(ValueError):
             resolve_model('', '', '/share/models')
+
+
+class TestAddTime(unittest.TestCase):
+
+    def test_sums_per_name(self):
+        timings = {}
+        now = add_time(timings, 'a', time.perf_counter() - 1.0)
+        add_time(timings, 'a', now - 2.0)
+        self.assertGreaterEqual(timings['a'], 3.0)
+        self.assertLess(timings['a'], 4.0)
+        self.assertGreaterEqual(add_time(None, 'a', 0.0), now)  # None = off, still the time
 
 
 if __name__ == '__main__':
