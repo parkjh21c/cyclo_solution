@@ -11,6 +11,7 @@ struct ApproachConfig {
   double tcp_pitch_min_deg{0};
   bool tcp_pitch_downward_only{true};
   bool tcp_yaw_inward_only{true};
+  double tcp_yaw_deg{-45}, tcp_yaw_limit_deg{0}; // Left-hand heading, mirrored right; 0 = free.
   std::vector<double> offset_xy{0, 0};
   double offset_z{0}; // TCP target offset in planning frame; does not change cup geometry.
   std::string cup_source{"head"}; // head (YOLO BODY) or wrist_left_init (initial-pose rim).

@@ -8,7 +8,7 @@ handover_demo:
       insert_speed: 0.06 # Pilz LIN insert and lift velocity scale.
       insert_depth: 0.025 # Past pads-on-cup-axis toward the palm; ~0.027 touches the 5 cm cup model.
       clear_height: 0.05 # Fallback when direct PTP is blocked: above rim, then LIN down.
-      approach_yaw_deg: 0.0 # Fixed heading, robot +X = 0, left +; sweep 2026-11-10: -45..+30 all ok.
+      approach_yaw_deg: -45.0 # Fixed heading, robot +X = 0, left +; sweep 2026-11-10: -45..+30 all ok.
       approach_pitch_deg: 15.0 # Fingers tilted down; level (0) hits the arm reach limit.
       close_target: 0.8 # Fingers stop on the cup before this; grasp is not sensor-verified.
       close_duration: 1.0

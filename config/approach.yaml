@@ -16,6 +16,8 @@ handover_demo:
       tcp_pitch_limit_deg: 60.0
       tcp_pitch_downward_only: true # Hand elevation -60..-20 deg; internal pitch +20..+60.
       tcp_yaw_inward_only: true # Left -90..0 deg; right 0..90 deg, goal only.
+      tcp_yaw_deg: -45.0 # Left-hand heading over the cup, same as pick approach_yaw_deg; mirrored right.
+      tcp_yaw_limit_deg: 0.0 # Goal heading tolerance; 0 = any heading in the inward range.
       travel_scale: 0.3
       max_position_error: 0.15
       max_age: 120.0 # Keep the last confirmed head BODY location through temporary occlusion.

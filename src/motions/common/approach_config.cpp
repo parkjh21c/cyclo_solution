@@ -1,6 +1,8 @@
 #include "demo_1f/motions/common/cup_scene.hpp"
 #include <algorithm>
 #include <cmath>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace demo_1f {
 std::string ApproachConfig::validate(const std::string & arm) const {
@@ -22,6 +24,11 @@ std::string ApproachConfig::validate(const std::string & arm) const {
       (tcp_pitch_min_deg > 0 &&
           (!tcp_pitch_downward_only || tcp_pitch_min_deg + 2 >= tcp_pitch_limit_deg))) {
     return "Minimum downward pitch needs downward-only mode and more than 2 degrees below maximum";
+  }
+  if (!std::isfinite(tcp_yaw_deg) || std::abs(tcp_yaw_deg) > 90 ||
+      !std::isfinite(tcp_yaw_limit_deg) || tcp_yaw_limit_deg < 0 ||
+      (tcp_yaw_limit_deg > 0 && (tcp_yaw_limit_deg < 5 || tcp_yaw_limit_deg > 90))) {
+    return "TCP yaw must be within 90 degrees; its limit zero (disabled) or 5..90 degrees";
   }
   for (double value : {cup_height,
            inner_radius,
@@ -97,6 +104,8 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("tcp_roll_limit_deg", c.tcp_roll_limit_deg);
   number("tcp_pitch_limit_deg", c.tcp_pitch_limit_deg);
   number("tcp_pitch_min_deg", c.tcp_pitch_min_deg);
+  number("tcp_yaw_deg", c.tcp_yaw_deg);
+  number("tcp_yaw_limit_deg", c.tcp_yaw_limit_deg);
   c.tcp_pitch_downward_only = node.declare_parameter(
       "approach.tcp_pitch_downward_only", c.tcp_pitch_downward_only, descriptor);
   c.tcp_yaw_inward_only =
@@ -146,6 +155,12 @@ std::optional<geometry_msgs::msg::Pose> approach_tcp_target(const geometry_msgs:
   target.position.z += config.cup_height + config.offset_z;
   target.orientation = geometry_msgs::msg::Quaternion();
   target.orientation.w = 1; // Position goal placeholder; roll/pitch have separate goal constraints.
+  if (config.tcp_yaw_limit_deg > 0) {
+    // Heading only: forward is TCP -Z; the right hand mirrors the left.
+    tf2::Quaternion q;
+    q.setRPY(0, -M_PI / 2, (arm == "left" ? 1 : -1) * config.tcp_yaw_deg * M_PI / 180);
+    target.orientation = tf2::toMsg(q);
+  }
   reason.clear();
   return target;
 }

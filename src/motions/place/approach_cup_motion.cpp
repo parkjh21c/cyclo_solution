@@ -13,6 +13,7 @@ bool ApproachCupMotion::dispatch(const geometry_msgs::msg::Pose & pose, double s
   step.tcp_pitch_min = config_.tcp_pitch_min_deg * M_PI / 180;
   step.tcp_pitch_downward_only = config_.tcp_pitch_downward_only;
   step.tcp_yaw_inward_only = config_.tcp_yaw_inward_only;
+  step.tcp_yaw_limit = config_.tcp_yaw_limit_deg * M_PI / 180;
   step.arm = arm_;
   step.frame = robot_.planning_frame;
   const auto & p = pose.position;

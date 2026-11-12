@@ -125,6 +125,27 @@ TEST(ApproachGeometry, LowersTargetWithoutMovingCupCollisionGeometry) {
   }
 }
 
+TEST(ApproachGeometry, TargetsConfiguredHeadingMirroredForRightHand) {
+  ApproachConfig config;
+  geometry_msgs::msg::Pose body;
+  body.orientation.w = 1;
+  std::string reason;
+  auto target = approach_tcp_target(body, config, "left", .01, reason);
+  ASSERT_TRUE(target) << reason;
+  EXPECT_NEAR(target->orientation.w, 1, 1e-10); // Limit zero keeps the placeholder.
+  config.tcp_yaw_limit_deg = 10;
+  for (const std::string arm : {"left", "right"}) {
+    target = approach_tcp_target(body, config, arm, .01, reason);
+    ASSERT_TRUE(target) << reason;
+    const auto yaw = tcp_yaw(target->orientation);
+    ASSERT_TRUE(yaw);
+    EXPECT_NEAR(*yaw, (arm == "left" ? -1 : 1) * M_PI / 4, 1e-9);
+    EXPECT_TRUE(tcp_yaw_is_inward(*yaw, arm));
+  }
+  config.tcp_yaw_limit_deg = 3;
+  EXPECT_FALSE(approach_tcp_target(body, config, "left", .01, reason));
+}
+
 TEST(ApproachGeometry, RejectsInconsistentMinimumPitch) {
   ApproachConfig config;
   config.tcp_pitch_limit_deg = 60;
