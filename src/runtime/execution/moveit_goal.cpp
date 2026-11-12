@@ -228,6 +228,9 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
       op,
       [this, op, step_name = step.name, group_name = request.group_name,
           plan_only](const Move::Result & result) {
+        // Planning share of the step; execution time is the rest.
+        RCLCPP_INFO(node_.get_logger(), "Planned %s: %.2f s, MoveIt code %d",
+            step_name.c_str(), result.planning_time, result.error_code.val);
         if (result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
           return std::string{};
         }
