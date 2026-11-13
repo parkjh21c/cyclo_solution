@@ -514,6 +514,61 @@ def wall_points(points, heights, basket, normal, params):
     return inside_out & ((np.abs(x) >= half_l) | (np.abs(y) >= half_w))
 
 
+def basket_core(points, basket, normal, size, margin):
+    """Points over the rectangle size (long, short) less margin a side, centered on the basket."""
+    rel = points - basket.center
+    x, y = rel @ basket.axis, rel @ np.cross(normal, basket.axis)
+    return (np.abs(x) <= size[0] / 2 - margin) & (np.abs(y) <= size[1] / 2 - margin)
+
+
+def boxes_outside(boxes, basket, normal, size, margin):
+    """Object boxes whose footprint reaches past basket_core's rectangle."""
+    count = 0
+    for center, axis, length, width, _ in boxes:
+        side = np.cross(normal, axis)
+        corners = np.array([center + a * axis * length / 2 + b * side * width / 2
+                            for a in (1, -1) for b in (1, -1)])
+        count += bool(np.any(~basket_core(corners, basket, normal, size, margin)))
+    return count
+
+
+def scene_points(depth, rays, normal, plane_d, params):
+    """(points, heights above the plane) of the usable depth pixels, as plan_grasp takes them."""
+    with np.errstate(invalid='ignore'):
+        valid = np.isfinite(depth) & (depth >= params.min_depth) & (depth <= params.max_depth)
+    valid &= ~veil_pixels(depth, params.veil_step, params.veil_jump)
+    z = depth[valid]
+    points = np.column_stack((rays[valid] * z[:, None], z))
+    return points, points @ normal + plane_d
+
+
+def object_box(target, samples, k, d, normal, plane_d):
+    """(center, long axis, length, width, height) camera frame: top face (merge_faces) to plane."""
+    center, axis, length, width = merge_faces(samples, k, d, normal, plane_d,
+                                              target.angle_period)
+    return center - normal * (target.top_height / 2), axis, length, width, target.top_height
+
+
+def in_boxes(points, boxes, normal, tol):
+    """Points inside any object_box grown by tol on every side."""
+    inside = np.zeros(len(points), bool)
+    for center, axis, length, width, height in boxes:
+        rel = points - center
+        inside |= ((np.abs(rel @ axis) <= length / 2 + tol)
+                   & (np.abs(rel @ np.cross(normal, axis)) <= width / 2 + tol)
+                   & (np.abs(rel @ normal) <= height / 2 + tol))
+    return inside
+
+
+def ceiling_stats(heights, inside, min_height, percentile):
+    """(height at percentile, max, points above min_height, of them inside); None if empty."""
+    if not len(heights):
+        return None, None, 0, 0
+    high = heights > min_height
+    return (float(np.percentile(heights, percentile)), float(heights.max()), int(high.sum()),
+            int((high & inside).sum()))
+
+
 def plan_grasp(target, plane, depth, k, d, rays, rotation, translation, ee_y, params,
                samples=None, basket=None, timings=None, checks=None):
     """Grasp from above: end effector y along the closing axis (horizontal), z up the fingers,

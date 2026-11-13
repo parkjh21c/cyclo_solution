@@ -5,9 +5,10 @@ import unittest
 
 import cv2
 from ffw_grasp.grasp_planner import (
-    add_time, away_roll_sign, backup_rolls, Basket, fit_basket, GraspParams, matrix_to_quat,
-    merge_planes, merge_targets, near_any, pick_object, pick_target, plan_grasp, quat_to_matrix,
-    rank_objects, Target, top_face, UP, veil_pixels)
+    add_time, away_roll_sign, backup_rolls, Basket, basket_core, boxes_outside, ceiling_stats,
+    fit_basket, GraspParams, in_boxes, matrix_to_quat, merge_planes, merge_targets, near_any,
+    object_box, pick_object, pick_target, plan_grasp, quat_to_matrix, rank_objects,
+    scene_points, Target, top_face, UP, veil_pixels)
 from ffw_vision.blob_detector import normalize_angle
 from ffw_vision.seg_detector import pixel_rays, project
 import numpy as np
@@ -730,6 +731,73 @@ class TestTimings(unittest.TestCase):
         self.assertEqual(checks['body:n'], checks['finger:n'] + checks['rolled:n'])
         parts = sum(checks[f'finger:{p}'] for p in ('rel', 'proj', 'shape', 'mask'))
         self.assertLessEqual(parts, checks['finger'])
+
+
+class TestSceneObjects(unittest.TestCase):
+
+    def test_box_from_a_known_top_face(self):
+        scene = Scene()
+        scene.raise_box(*LYING)
+        target = scene.target(*LYING)
+        x, y, length, width, deg, height = LYING
+        center, axis, l_m, w_m, h_m = object_box(target, [target], K, scene.d, scene.n,
+                                                 scene.plane_d)
+        np.testing.assert_allclose(center, scene.point(x, y, height / 2), atol=0.0005)
+        self.assertGreater(abs(axis @ scene.direction(deg)), math.cos(math.radians(0.5)))
+        self.assertAlmostEqual(l_m, length, delta=0.0005)
+        self.assertAlmostEqual(w_m, width, delta=0.0005)
+        self.assertEqual(h_m, height)
+        across = np.cross(scene.n, axis)
+        points = np.array([center, center + axis * (l_m / 2 + 0.004),
+                           center + across * (w_m / 2 + 0.01),
+                           center + scene.n * (h_m / 2 + 0.004),
+                           center - scene.n * (h_m / 2 + 0.01)])
+        np.testing.assert_array_equal(
+            in_boxes(points, [(center, axis, l_m, w_m, h_m)], scene.n, 0.005),
+            [True, True, False, True, False])
+
+    def test_box_holds_its_depth_points_and_plan_grasp_is_unchanged(self):
+        scene = Scene()
+        scene.raise_box(*LYING)
+        target = scene.target(*LYING)
+        before = scene.plan(target)
+        depth = scene.depth.copy()
+        points, heights = scene_points(scene.depth, scene.rays, scene.n, scene.plane_d, PARAMS)
+        box = object_box(target, [target], K, scene.d, scene.n, scene.plane_d)
+        high = heights > 0.02  # the raised top face only (sides are not drawn)
+        self.assertGreater(high.sum(), 50)
+        self.assertTrue(in_boxes(points[high], [box], scene.n, 0.005).all())
+        np.testing.assert_array_equal(scene.depth, depth)
+        after = scene.plan(target)
+        np.testing.assert_array_equal(after.position, before.position)
+        self.assertEqual([(o.name, o.tilt, o.opening) for o in after.options],
+                         [(o.name, o.tilt, o.opening) for o in before.options])
+        # the box is the top face plan_grasp measured
+        np.testing.assert_allclose(box[0] + scene.n * box[4] / 2, before.center, atol=1e-12)
+        self.assertEqual((box[2], box[3]), (before.length_m, before.width_m))
+
+    def test_basket_core_leaves_out_the_walls_at_any_height(self):
+        n, x = np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])
+        basket = Basket(np.zeros(3), x, 0.32, 0.24, '')
+        size, margin = (0.260, 0.180), 0.015  # inner floor; walls slope outward from it
+        # middle high up, just inside the area, inner wall faces at the floor and at the rim
+        points = np.array([[0.0, 0.0, 0.07], [0.114, 0.074, 0.03], [0.13, 0.0, 0.006],
+                           [0.0, 0.1, 0.07]])
+        np.testing.assert_array_equal(basket_core(points, basket, n, size, margin),
+                                      [True, True, False, False])
+        # a 46.5 x 34 mm box in the middle, one touching the y+ wall (top face up to y 0.09)
+        boxes = [(np.array([0.0, 0.0, 0.017]), x, 0.0465, 0.034, 0.034),
+                 (np.array([0.0, 0.073, 0.017]), x, 0.0465, 0.034, 0.034)]
+        self.assertEqual(boxes_outside(boxes, basket, n, size, margin), 1)
+
+    def test_ceiling_stats(self):
+        heights = np.array([0.005] * 90 + [0.03] * 9 + [0.05])
+        inside = np.array([False] * 90 + [True] * 9 + [False])
+        top, highest, high, held = ceiling_stats(heights, inside, 0.013, 99.0)
+        self.assertEqual((highest, high, held), (0.05, 10, 9))
+        self.assertAlmostEqual(top, float(np.percentile(heights, 99.0)))
+        self.assertEqual(ceiling_stats(np.array([]), np.array([], bool), 0.013, 99.0),
+                         (None, None, 0, 0))
 
 
 if __name__ == '__main__':

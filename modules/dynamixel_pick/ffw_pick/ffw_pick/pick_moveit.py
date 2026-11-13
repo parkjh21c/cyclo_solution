@@ -31,6 +31,8 @@ import sys
 import time
 
 from ffw_pick.analytic_ik import ArmIK, Line, line_points
+from ffw_pick.clearance import (
+    gripper_parts, line_poses, part_text, path_clearance, sampled_parts, shifted, thin, tip_z)
 from ffw_pick.config import (
     ArmConfig, COMMAND_LINE, from_file, PickConfig, require, ros_parameters)
 from ffw_pick.gripper import joint_for, load_gripper
@@ -55,6 +57,7 @@ HOME_EXTRA_LIFTS = 2  # --release-home: times it goes home_lift higher when HOME
 BAN_TRIES = 30  # colliding solutions left out of one line before it is given up
 BOUND_SLACK = 0.02  # rad: a grasp option is skipped once its least possible joint motion is
 # this much above the best found (the search grid may undercut it by about that)
+GRIPPER_KEYS = 6  # searched line points solved at a time while looking for a gripper contact
 
 
 def pick_result_code(status, hooks=None):
@@ -191,6 +194,21 @@ def summary_line(tally, ended):
             f' objects after NO SOLUTION, {tally.get("replan", 0)} plans again; ended: {ended}')
 
 
+def first_gripper_hit(line, contacts, chunk=GRIPPER_KEYS):
+    """(searched point, contacts(q[0])) at the first point not '', else None (or line.why)."""
+    checked = 0
+    while not line.why and checked < len(line.keys):
+        line.solve(checked + chunk)  # a few points at a time: stops at the first hit
+        for n in range(checked, checked if line.why else len(line.layers)):
+            text = contacts(line.layers[n][0][0])
+            if text:
+                if not line.reachable():  # the rest may lack a solution: solve as before
+                    line.solve()
+                return None if line.why else (line.keys[n], text)
+        checked = len(line.layers)
+    return None
+
+
 def limit_margin(chain, joints, values):
     """Smallest distance of an arm joint to its URDF limit, rad."""
     return min(min(values[n] - lo, hi - values[n])
@@ -321,6 +339,7 @@ def main(argv=None, hooks=None):
     from std_msgs.msg import Float64, Float64MultiArray, String
     from std_srvs.srv import Trigger
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from visualization_msgs.msg import Marker, MarkerArray
     from ffw_grasp.grasp_planner import matrix_to_quat
 
     from ament_index_python.packages import get_package_share_directory
@@ -412,6 +431,9 @@ def main(argv=None, hooks=None):
                              lambda m: got.update(candidates=m), latched)
     node.create_subscription(Float64MultiArray, f'{args.ns}/grasp_candidate_info',
                              lambda m: got.update(info=list(m.data)), latched)
+    # object boxes and the basket ceiling: only logged against the chosen path (clearance_line)
+    node.create_subscription(MarkerArray, f'{args.ns}/scene_objects',
+                             lambda m: got.update(scene=m), latched)
     plan_client = node.create_client(Trigger, f'{args.ns}/plan')
     skip_client = node.create_client(Trigger, f'{args.ns}/skip_last')
     clear_client = node.create_client(Trigger, f'{args.ns}/clear_skips')
@@ -875,14 +897,12 @@ def main(argv=None, hooks=None):
 
     def gripper_blocked(line, base):
         """(point index, contacts) of the first searched point where the gripper itself hits
-        the scene (one IK solution tells: every other one puts it in the same place), or None."""
-        for n, (q, _) in enumerate(line.layers):
-            if not len(q):
-                break
-            i, text, pairs = first_bad([with_arm(base, q[0])], coarse=1)
-            if i is not None and pose_only(pairs):
-                return line.keys[n], text.split(': ', 1)[-1]
-        return None
+        the scene (one IK solution tells: every other one puts it in the same place), or None.
+        Solves the line on the way (all of it unless the gripper hits); see line.why after."""
+        def contacts(q):
+            i, text, pairs = first_bad([with_arm(base, q)], coarse=1)
+            return text.split(': ', 1)[-1] if i is not None and pose_only(pairs) else ''
+        return first_gripper_hit(line, contacts)
 
     def try_approach(option, rotation, now, lift, deadline, bound=math.inf):
         """(found, why, ompl) for one grasp option at one gripper yaw. found = (segments, how,
@@ -923,15 +943,15 @@ def main(argv=None, hooks=None):
             g = len(approach) - 1
             line = Line(arm, now, approach + up, rotation)
             lines.append(line)
+            blocked = None
             if not line.why:  # the first point has solutions
                 least = line.start_bound(start)
                 if least - BOUND_SLACK >= bound:
                     return None, f'skipped: move to the {target} at least {least:.2f} rad', ompl
-                line.solve()
+                blocked = gripper_blocked(line, now)  # solves the line as line.solve() did
             if line.why:
                 why = line.why
                 continue  # the hover is only for a line with no IK solution from the above
-            blocked = gripper_blocked(line, now)
             if blocked is not None:
                 point, contacts = blocked
                 why = (f'the gripper hits {contacts} at'
@@ -1030,6 +1050,50 @@ def main(argv=None, hooks=None):
             if found:
                 return (o, rotation) + found[:4] + found[5:6]
         return None
+
+    def clearance_line(now, outbound, grasp_values, opening, table_z):
+        """'clearance: ...' of the chosen path to ffw_grasp's object boxes; never raises."""
+        started = time.time()
+        try:
+            stamp = poses['grasp'].header.stamp
+            scene = got.get('scene')
+            marks = [m for m in (scene.markers if scene is not None else [])
+                     if m.action == Marker.ADD and m.header.stamp == stamp]
+            if not marks:
+                return 'clearance: unavailable (no scene_objects for this plan)'
+            boxes, ceiling, unboxed = [], {}, 'unboxed ?'
+            for m in marks:
+                position, rotation = pose_parts(m)
+                if m.ns in ('target', 'object'):
+                    boxes.append({'id': m.id, 'target': m.ns == 'target', 'center': position,
+                                  'rotation': rotation,
+                                  'size': np.array([m.scale.x, m.scale.y, m.scale.z])})
+                elif m.ns == 'ceiling':
+                    ceiling[m.id] = position[2]
+                elif m.ns == 'unboxed':
+                    unboxed = m.text
+            parts = sampled_parts(gripper_parts(task, opening))
+            bias = np.array([0.0, 0.0, task.get('arm_z_bias', 0.0)])  # reached = FK + arm_z_bias
+            grasp_pose = chain.fk(grasp_values)
+            begin = grasp_pose.copy()  # the line keeps the grasp rotation
+            begin[:3, 3] = chain.fk(outbound[-1] if outbound else now)[:3, 3]
+            joint = [chain.fk(v) for v in [now] + list(outbound)]  # all: fingertip heights
+            line = line_poses(begin, grasp_pose[:3, 3])
+            lift = (line_poses(grasp_pose, grasp_pose[:3, 3] + np.array([0.0, 0.0, args.lift]))
+                    if args.lift > 0 else [])
+            top = (ceiling[0], ceiling[1]) if 0 in ceiling and 1 in ceiling else ()
+            texts, count = [], 0
+            for name, every, checked in (('joint', joint, thin(joint)), ('line', line, line),
+                                         ('lift', lift, lift)):
+                if checked:  # boxes on the thinned poses, fingertip heights on every one
+                    tips = [tip_z(p, tip_below) + bias[2] for p in every]
+                    texts.append(part_text(name, path_clearance(shifted(checked, bias), parts,
+                                                                boxes), tips, table_z, top))
+                    count += len(checked)
+            return ('clearance: ' + ' | '.join(texts) + f' | boxes {len(boxes)}, {unboxed}'
+                    f' ({time.time() - started:.2f} s, {count} poses checked)')
+        except Exception as error:  # a record only: the pick goes on without it
+            return f'clearance: unavailable ({type(error).__name__}: {error})'
 
     log = []
     tally = {}  # counts for the summary line
@@ -1176,6 +1240,7 @@ def main(argv=None, hooks=None):
         print('\n'.join(summary_lines('approach', samples, chain, arm_joints, tip_below, floor_z)))
         print('\n'.join(summary_lines(f'lift ({lift_how})', trajectory_values(lift, grasp_values),
                                       chain, arm_joints, tip_below, floor_z)))
+        print(clearance_line(now, outbound, grasp_values, option['opening'], basket_position[2]))
         if not args.run:
             print('plan ok: shown in RViz (Planned Path); the arm was not moved (--run to move)')
             return 'ok'

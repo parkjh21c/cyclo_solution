@@ -26,6 +26,7 @@ SMOOTH_SWEEPS = 3  # passes of smooth() over a path
 SMOOTH_SAMPLES = 9  # q7 values tried per waypoint in a pass, within +-one grid step
 WRAP_GAP = 1.0  # rad: a bigger difference is a +-pi wrap or another branch, not refined
 REFINE_LEVELS = 6  # halvings of the q7 step at most (1 deg -> 0.016 deg)
+REACH_STRIDE = 4  # Line.reachable tries every this many q7 grid values
 
 
 def rot(axis, q):
@@ -344,6 +345,19 @@ class Line:
                 where = i * 100 // max(len(self.points) - 1, 1)
                 self.why = f'no IK solution at {where}% of the line'
                 break
+
+    def reachable(self, stride=REACH_STRIDE):
+        """True if every searched point not solved yet is inside the limits at a q7 grid value
+        (solve() keeps the grid, so it finds a solution there); False = not known."""
+        todo = self.keys[len(self.layers):]
+        if not todo:
+            return True
+        q7 = self.arm.q7[::stride]
+        started = time.time()
+        _, state = self.arm.branches(self.values, np.repeat(self.points[todo], len(q7), axis=0),
+                                     self.rotation, np.tile(q7, len(todo)))
+        self.times['ik'] += time.time() - started
+        return bool((state == 2).reshape(8, len(todo), len(q7)).any(axis=(0, 2)).all())
 
     def start_bound(self, start):
         """Least possible move from start to the first point (largest joint change)."""

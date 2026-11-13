@@ -1,11 +1,13 @@
+from collections import Counter
 import math
 import threading
 import time
 import warnings
 
 from ffw_grasp.grasp_planner import (
-    add_time, fit_basket, GraspParams, matrix_to_quat, merge_planes, merge_targets, near_any,
-    on_plane, pick_target, plan_grasp, quat_to_matrix, rank_objects, Target)
+    add_time, basket_core, boxes_outside, ceiling_stats, fit_basket, GraspParams, in_boxes,
+    matrix_to_quat, merge_planes, merge_targets, near_any, object_box, on_plane, pick_target,
+    plan_grasp, quat_to_matrix, rank_objects, scene_points, Target)
 from ffw_grasp.overlay import draw_basket, draw_grasp
 from ffw_vision.camera_config import declare_camera_parameters, load_camera_config
 from ffw_vision.depth_stats import color_from_msg, depth_from_msg
@@ -27,11 +29,20 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float64, Float64MultiArray
 from std_srvs.srv import Trigger
 import tf2_ros
+from visualization_msgs.msg import Marker, MarkerArray
 
 BUFFER_SIZE = 30
 TF_TIMEOUT = Duration(seconds=0.5)
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 SPIN_TIMEOUT_SEC = 0.1
+# scene_objects (a record for ffw_pick and RViz; nothing plans with it)
+CEILING_PERCENTILE = 99.0  # ceiling = this percentile of basket point heights (spikes left out)
+SCENE_FLOOR_MARGIN = 0.008  # m above floor_height: higher basket points belong to an object
+SCENE_BOX_TOL = 0.005  # m: a point this close outside a box still counts as in it (depth noise)
+SCENE_WALL_MARGIN = 0.015  # m inside basket_inner_floor a side: counted area clear of the walls
+UP_BASE = np.array([0.0, 0.0, 1.0])
+SCENE_COLORS = {'target': (0.1, 0.9, 0.2, 0.6), 'object': (1.0, 0.6, 0.1, 0.6),
+                'ceiling': (0.2, 0.5, 1.0, 0.25), 'unboxed': (1.0, 1.0, 1.0, 1.0)}
 
 
 class PlanFailure(ValueError):
@@ -198,6 +209,7 @@ class GraspPlannerNode(Node):
         self.timings = {}  # seconds per PLAN_STEPS name in the current plan
         self.grasp_timings = {}  # seconds per GRASP_STEPS name in the current plan
         self.check_timings = {}  # plan_grasp collision check counts and seconds (checks_summary)
+        self.depth_of = {}  # id(grasp) -> merged depth of that planned object (scene_objects)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -211,6 +223,8 @@ class GraspPlannerNode(Node):
         # every usable candidate x free tilt, chosen first; info rows: opening, tilt, 0=A 1=B, turn
         self.options_pub = self.create_publisher(PoseArray, 'grasp_candidates', LATCHED)
         self.info_pub = self.create_publisher(Float64MultiArray, 'grasp_candidate_info', LATCHED)
+        # every ranked object as a box (ns target/object, id = rank), the basket ceiling, unboxed
+        self.scene_pub = self.create_publisher(MarkerArray, 'scene_objects', LATCHED)
         inputs = ReentrantCallbackGroup()
         self.create_subscription(
             ObjectObservationArray, observation_topic, self.on_observations, 10,
@@ -270,6 +284,7 @@ class GraspPlannerNode(Node):
 
     def on_plan(self, request, response):
         self.timings, self.grasp_timings, self.check_timings = {}, {}, {}
+        self.depth_of = {}
         start = time.perf_counter()
         with self.lock:
             self.frames_seen = []
@@ -357,6 +372,7 @@ class GraspPlannerNode(Node):
             start = time.perf_counter()
             self.publish_object(*result)
             add_time(self.timings, 'publish', start)
+            self.publish_scene_objects(ranked, frames, result, n)
             self.last_xy = result[-1]
             others = (f' (object {n} of {len(ranked)}; ' + '; '.join(reasons) + ')' if n > 1
                       else f' (highest score of {seen} objects)' if seen > 1 else '')
@@ -365,6 +381,7 @@ class GraspPlannerNode(Node):
             start = time.perf_counter()
             self.publish_object(*failed)  # the scene and the image of the best object tried
             add_time(self.timings, 'publish', start)
+            self.publish_scene_objects(ranked, frames, failed, None)
         raise PlanFailure('skipped' if skipped == len(ranked) else 'objects',
                           f'{len(ranked)} objects, none graspable: '
                           + '; '.join(reasons))
@@ -421,6 +438,7 @@ class GraspPlannerNode(Node):
                            [targets[i] for i in kept], basket, self.grasp_timings,
                            self.check_timings)
         add_time(self.timings, 'grasp', start)
+        self.depth_of[id(grasp)] = depth
         summary = (f'{grasp_summary(grasp)} frames {len(kept)}/{total};'
                    f' {basket_summary(basket, basket_reason, self.params)}'
                    f' ({bias_summary(self.params)})')
@@ -474,6 +492,100 @@ class GraspPlannerNode(Node):
             self.basket_pub.publish(pose_msg(
                 self.base_frame, stamp, rotation @ basket.center + translation - bias,
                 plane_rotation(up, rotation @ basket.axis)))
+
+    def publish_scene_objects(self, ranked, frames, result, target_n):
+        """scene_objects and its log line for the published object (result); never raises."""
+        try:
+            self.scene_pub.publish(self.scene_markers(ranked, frames, result, target_n))
+        except Exception as error:  # a record only: the plan stands without it
+            self.get_logger().warn(f'scene objects: not published ({error})')
+
+    def scene_markers(self, ranked, frames, result, target_n):
+        """Object boxes (ns target/object, id = rank), ceiling plates (id 0 percentile, 1 max)."""
+        grasp, _, (basket, _), plane, rotation, translation, stamp, _, _ = result
+        info, p = self.camera_info, self.params
+        normal, plane_d = plane
+        bias = np.array([p.camera_x_bias, p.camera_y_bias, p.camera_z_bias])
+        up = rotation @ normal
+
+        def to_base(point):
+            return rotation @ point + translation - bias
+
+        boxes, centers, unboxed = [], [], Counter()
+        for n, (targets, _) in enumerate(ranked, 1):
+            centers.append(np.median([(t.u, t.v) for t in targets], axis=0))
+            if len(targets) < self.min_frames:
+                unboxed['few frames'] += 1
+                continue
+            try:
+                target, kept = merge_targets(targets, self.max_center_jitter_px,
+                                             self.min_frames, self.standing_min_height)
+            except ValueError:
+                unboxed['frames disagree'] += 1
+                continue
+            boxes.append((n, object_box(target, [targets[i] for i in kept], info.k, info.d,
+                                        normal, plane_d)))
+        # objects never usable (no ranked object there): counted in the last frame
+        for o in frames[-1][0].objects:
+            if o.status == ObjectObservation.STATUS_VALID and math.isfinite(o.top_height):
+                continue
+            if any(math.hypot(o.u - c[0], o.v - c[1]) <= self.object_radius_px for c in centers):
+                continue
+            unboxed['ambiguous' if o.status == ObjectObservation.STATUS_AMBIGUOUS
+                    else 'no height' if not math.isfinite(o.top_height) else 'invalid'] += 1
+
+        markers = MarkerArray()
+
+        def add(ns, mid, kind, position, rot, scale, text=''):
+            m = Marker(ns=ns, id=mid, type=kind, action=Marker.ADD, text=text)
+            m.header.frame_id = self.base_frame
+            m.header.stamp = stamp
+            m.pose = pose_msg(self.base_frame, stamp, position, rot).pose
+            m.scale.x, m.scale.y, m.scale.z = map(float, scale)
+            m.color.r, m.color.g, m.color.b, m.color.a = SCENE_COLORS[ns]
+            markers.markers.append(m)
+
+        clear = Marker(action=Marker.DELETEALL)  # boxes of the plan before
+        clear.header.frame_id = self.base_frame
+        clear.header.stamp = stamp
+        markers.markers.append(clear)
+        for n, (center, axis, length, width, height) in boxes:
+            add('target' if n == target_n else 'object', n, Marker.CUBE, to_base(center),
+                plane_rotation(up, rotation @ axis), (length, width, height))
+        ceiling, cover = 'ceiling -', ''
+        depth = self.depth_of.get(id(grasp))
+        if basket is not None and depth is not None and p.basket_inner_floor[0] > 0:
+            # the floor's inner size less a margin: no wall at any height (they slope outward)
+            size, margin = p.basket_inner_floor, SCENE_WALL_MARGIN
+            points, heights = scene_points(depth, self.rays_for(info), normal, plane_d, p)
+            core = basket_core(points, basket, normal, size, margin)
+            inside = in_boxes(points[core], [b for _, b in boxes], normal, SCENE_BOX_TOL)
+            low = p.floor_height + SCENE_FLOOR_MARGIN
+            top, highest, high, held = ceiling_stats(heights[core], inside, low,
+                                                     CEILING_PERCENTILE)
+            area = (size[0] - 2 * margin, size[1] - 2 * margin)
+            outside = boxes_outside([b for _, b in boxes], basket, normal, size, margin)
+            where = (f'area {area[0] * 1000:.0f}x{area[1] * 1000:.0f} mm ({outside} boxes'
+                     ' partly outside); ')
+            if top is not None:
+                for i, h in enumerate((top, highest)):
+                    add('ceiling', i, Marker.CUBE, to_base(basket.center + normal * h),
+                        plane_rotation(up, rotation @ basket.axis), (area[0], area[1], 0.001))
+                ceiling = (f'ceiling p{CEILING_PERCENTILE:g} {top * 1000:.0f} mm'
+                           f' max {highest * 1000:.0f} mm')
+                cover = (f'; depth points above {low * 1000:.0f} mm in the area: {high},'
+                         f' inside a box {held} ({100 * held // max(high, 1)}%),'
+                         f' outside every box {high - held}')
+            ceiling = where + ceiling
+        reasons = ', '.join(f'{count} {why}' for why, count in sorted(unboxed.items()))
+        total = sum(unboxed.values())
+        add('unboxed', 0, Marker.TEXT_VIEW_FACING,
+            to_base(basket.center if basket is not None else grasp.center) + 0.15 * UP_BASE,
+            np.eye(3), (0.0, 0.0, 0.02), f'unboxed {total}' + (f': {reasons}' if reasons else ''))
+        self.get_logger().info(
+            f'scene objects: {len(boxes)} boxed ({sum(n == target_n for n, _ in boxes)} target),'
+            f' {total} unboxed' + (f' ({reasons})' if reasons else '') + f'; {ceiling}{cover}')
+        return markers
 
 
 def main(args=None):
