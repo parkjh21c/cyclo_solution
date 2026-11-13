@@ -81,7 +81,7 @@
     basket_wall: 0.010
     basket_wall_height: 0.08  # scene walls a little above the real rim (user 2026-10-30)
     basket_wall_margin: 0.0  # scene walls this much thicker inward (measured basket error)
-    table_margin: 0.15  # table box reaches this far beyond the basket
+    table_margin: 0.0  # table box reaches this far beyond the basket
     table_thick: 0.04
     finger_overlap: 0.01  # finger extension boxes reach this far into the URDF fingers
     finger_layers: [0.0, 0.01, 0.02, 0.03, 0.045]  # finger box layer bottoms above the tip, m
