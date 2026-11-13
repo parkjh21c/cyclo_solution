@@ -9,6 +9,70 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace demo_1f {
+namespace {
+// Codes that end before any motion (no plan, or plan/start/goal rejected); others never retry.
+bool planning_stage_failure(const moveit_msgs::action::MoveGroup::Result & result) {
+  using Codes = moveit_msgs::msg::MoveItErrorCodes;
+  static const std::set<int> planning = {Codes::PLANNING_FAILED, Codes::INVALID_MOTION_PLAN,
+      Codes::START_STATE_IN_COLLISION, Codes::START_STATE_VIOLATES_PATH_CONSTRAINTS,
+      Codes::START_STATE_INVALID, Codes::GOAL_IN_COLLISION, Codes::GOAL_VIOLATES_PATH_CONSTRAINTS,
+      Codes::GOAL_CONSTRAINTS_VIOLATED, Codes::GOAL_STATE_INVALID, Codes::NO_IK_SOLUTION};
+  return planning.count(result.error_code.val) &&
+         result.executed_trajectory.joint_trajectory.points.empty() &&
+         result.executed_trajectory.multi_dof_joint_trajectory.points.empty();
+}
+
+std::string joined(const std::vector<std::string> & items) {
+  std::string out;
+  for (const auto & item : items) out += (out.empty() ? "" : ", ") + item;
+  return out;
+}
+} // namespace
+
+bool TrajectoryExecutor::replan_with_fallback(
+    const std::shared_ptr<Operation> & op, const Move::Result & result, std::string & detail) {
+  const auto & step = op->step;
+  if (op->planning_only || step.type != "joint" || step.fallback_attempts <= 0) return false;
+  op->plan_attempts.push_back(
+      op->planner_label + ": MoveIt error " + std::to_string(result.error_code.val));
+  std::string why, reason;
+  bool unmoved = !op->fallback_start.empty();
+  const auto snapshot = context_.snapshot();
+  for (const auto & [name, position] : op->fallback_start) {
+    const auto joint = snapshot.joints.find(name);
+    unmoved = unmoved && joint != snapshot.joints.end() &&
+              std::abs(joint->second.position - position) <= config_.continuous_start_tolerance;
+  }
+  if (op->cancel_requested || op->result.state != ExecutionState::Running) {
+    why = "cancel requested";
+  } else if (!planning_stage_failure(result)) {
+    why = "not a planning failure";
+  } else if (op->fallback_tries >= step.fallback_attempts) {
+    why = "fallback attempts used up";
+  } else if (!context_.ready(reason)) {
+    why = "robot state invalid: " + reason;
+  } else if (!unmoved) {
+    why = "the arm moved";
+  } else if (elapsed(op->started) >= step.timeout) {
+    why = "step timeout";
+  }
+  if (why.empty()) {
+    ++op->fallback_tries;
+    RCLCPP_INFO(node_.get_logger(), "%s: %s plan failed (MoveIt error %d); falling back to %s,"
+        " attempt %d/%d", step.name.c_str(), op->planner_label.substr(
+            op->planner_label.find('/') + 1).c_str(), result.error_code.val,
+        step.fallback_pipeline.c_str(), op->fallback_tries, step.fallback_attempts);
+    try {
+      send_move(op);
+      return true;
+    } catch (const std::exception & error) {
+      why = std::string("fallback not sent: ") + error.what();
+    }
+  }
+  detail += "; plan attempts: " + joined(op->plan_attempts) + " (no fallback: " + why + ")";
+  return false;
+}
+
 void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool plan_only) {
   const auto & step = plan_only && !op->steps.empty()
                          ? op->steps.at(op->planned_segments.size()) : op->step;
@@ -35,6 +99,11 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
     request.pipeline_id = step.pipeline;
     request.planner_id = step.planner;
   }
+  if (op->fallback_tries > 0) {  // replan_with_fallback: same goal, the fallback planner
+    request.pipeline_id = step.fallback_pipeline;
+    request.planner_id = step.fallback_planner;
+  }
+  op->planner_label = request.pipeline_id + "/" + request.planner_id;
   // OMPL ParallelPlan compares candidates inside one allowed_planning_time budget.
   // sg2_moveit.launch.py enables path-length scoring and hybridization, so this
   // does not stop at the first successful planner. Pilz LIN/PTP remains single-shot.
@@ -221,6 +290,13 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
     RCLCPP_INFO(node_.get_logger(),
         "Planning %s: up to %d OMPL candidates, joint-space path length, %.2f s budget",
         step.name.c_str(), request.num_planning_attempts, request.allowed_planning_time);
+  }
+  if (!plan_only && step.type == "joint" && step.fallback_attempts > 0 &&
+      op->fallback_start.empty()) {
+    const auto snapshot = context_.snapshot();  // replan_with_fallback: did the arm move?
+    for (const auto & name : arm.joints) {
+      op->fallback_start[name] = snapshot.joints.at(name).position;
+    }
   }
   dispatch<Move>(
       move_client_,

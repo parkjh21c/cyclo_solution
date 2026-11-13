@@ -90,6 +90,10 @@ struct Step {
   bool gripper_wait_only{false};
   // Optional planner override (e.g. pilz_industrial_motion_planner + PTP for dual_joint).
   std::string pipeline{}, planner{};
+  // joint only: after a planning failure with the arm unmoved, plan again with this planner up
+  // to fallback_attempts times (zero = no fallback). The step timeout covers every attempt.
+  std::string fallback_pipeline{}, fallback_planner{};
+  int fallback_attempts{0};
 };
 
 struct MotionSequence {
@@ -130,10 +134,12 @@ struct Config {
   double gripper_goal_tolerance{0.004};
   double gripper_stop_max_gap{0.1};
   bool require_tcp_tf{true};
+  bool tf_spin_thread{false}; // True: TF received on tf2_ros's own thread, not the node executor.
   bool smooth_motion{false};
   double path_simplification_tolerance{0.002};
   double trajectory_sample_period{0.01};
   double continuous_start_tolerance{0.01};
+  double held_gripper_start_tolerance{0}; // Zero inherits continuous_start_tolerance.
   std::map<std::string, MotionLimits> motion_limits;
   std::map<std::string, ArmConfig> arms;
   std::map<std::string, MotionSequence> motion_sequences;

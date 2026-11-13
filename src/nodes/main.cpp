@@ -82,6 +82,7 @@ int main(int argc, char ** argv) {
     executor.add_node(node);
     RCLCPP_INFO(
         node->get_logger(), "Handover demo ready for requests; startup performs no robot motion");
+    auto pass_started = std::chrono::steady_clock::now();
     while (rclcpp::ok()) {
       executor.spin_some();
       if (stop_requested) {
@@ -91,6 +92,9 @@ int main(int argc, char ** argv) {
         }
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      const auto pass_ended = std::chrono::steady_clock::now();
+      robot_context.note_loop(std::chrono::duration<double>(pass_ended - pass_started).count());
+      pass_started = pass_ended;
     }
     if (task_manager.demo_faulted() ||
         trajectory_executor.result().state == demo_1f::ExecutionState::StopUnconfirmed) {

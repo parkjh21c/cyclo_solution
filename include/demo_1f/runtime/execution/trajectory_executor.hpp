@@ -57,9 +57,17 @@ private:
     std::future<SmoothPath> preparation;
     TimePoint preparation_started;
     std::map<std::string, double> preparation_positions;
+    // Planner fallback of a joint step (Step::fallback_*): attempts sent and their outcomes.
+    std::string planner_label;                    // pipeline/planner of the request in flight
+    int fallback_tries{0};                        // fallback plans sent so far
+    std::vector<std::string> plan_attempts;       // "pipeline/planner: MoveIt error N" per failure
+    std::map<std::string, double> fallback_start; // arm joints when the step was first sent
   };
 
   void send_move(const std::shared_ptr<Operation> & op, bool plan_only = false);
+  // True: replanned with the step's fallback planner; false: failure stands (history in detail).
+  bool replan_with_fallback(
+      const std::shared_ptr<Operation> & op, const Move::Result & result, std::string & detail);
   void execute_planned_pose(const std::shared_ptr<Operation> & op,
       const moveit_msgs::msg::RobotTrajectory & trajectory);
   void request_scene(const std::shared_ptr<Operation> & op, bool prepare_execution);

@@ -3,7 +3,7 @@
 namespace demo_1f {
 RobotContext::RobotContext(rclcpp::Node & node, const Config & config, HeadCupTrackConfig head_tracking)
     : node_(node), config_(config), head_cup_tracker_(head_tracking),
-      buffer_(node.get_clock()), listener_(buffer_, &node, false) {
+      buffer_(node.get_clock()), listener_(buffer_, &node, config.tf_spin_thread) {
   for (const auto & [side, arm] : config_.arms) {
     (void)side;
     gripper_history_.try_emplace(arm.gripper_joint);
@@ -34,6 +34,10 @@ RobotContext::RobotContext(rclcpp::Node & node, const Config & config, HeadCupTr
       });
   cup_tf_timer_ = node.create_wall_timer(std::chrono::milliseconds(10), [this]() {
     process_pending_cups();
+  });
+  // Measurement only: latest TCP TF age as this node sees it, logged every 5 s.
+  tf_age_timer_ = node.create_wall_timer(std::chrono::milliseconds(100), [this]() {
+    sample_tf_age();
   });
   subscription_ = node.create_subscription<sensor_msgs::msg::JointState>(config.joint_states_topic,
       rclcpp::SensorDataQoS(),

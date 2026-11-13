@@ -55,6 +55,15 @@ std::string validate_motion_sequence(const MotionSequence & sequence, const Conf
     if (step.pipeline.empty() != step.planner.empty()) {
       return prefix + "Planner override needs both pipeline and planner";
     }
+    const bool fallback_named = !step.fallback_pipeline.empty() || !step.fallback_planner.empty();
+    if (step.fallback_attempts < 0 || step.fallback_attempts > 5) {
+      return prefix + "Fallback attempts must be in [0, 5]";
+    }
+    if ((fallback_named || step.fallback_attempts > 0) &&
+        (step.type != "joint" || step.fallback_pipeline.empty() ||
+            step.fallback_planner.empty() || step.fallback_attempts == 0)) {
+      return prefix + "Planner fallback needs a joint step, pipeline, planner and attempts";
+    }
     if (step.gripper_wait_only && step.type != "gripper") {
       return prefix + "Gripper wait-only completion requires a gripper step";
     }
@@ -256,11 +265,17 @@ Config load_config(rclcpp::Node & node) {
     throw std::invalid_argument("Invalid gripper normal completion timing");
   }
   c.require_tcp_tf = node.declare_parameter<bool>("require_tcp_tf", true, descriptor);
+  c.tf_spin_thread = node.declare_parameter<bool>("tf_spin_thread", c.tf_spin_thread, descriptor);
   c.smooth_motion = node.declare_parameter<bool>("smooth_motion", c.smooth_motion, descriptor);
   c.path_simplification_tolerance =
       number("path_simplification_tolerance", c.path_simplification_tolerance);
   c.trajectory_sample_period = number("trajectory_sample_period", c.trajectory_sample_period);
   c.continuous_start_tolerance = number("continuous_start_tolerance", c.continuous_start_tolerance);
+  c.held_gripper_start_tolerance = node.declare_parameter<double>(
+      "held_gripper_start_tolerance", c.held_gripper_start_tolerance, descriptor);
+  if (!std::isfinite(c.held_gripper_start_tolerance) || c.held_gripper_start_tolerance < 0) {
+    throw std::invalid_argument("held_gripper_start_tolerance must be finite and not negative");
+  }
   if (c.trajectory_sample_period > 0.02) {
     throw std::invalid_argument("trajectory_sample_period must not exceed 0.02 s");
   }
@@ -339,6 +354,10 @@ Config load_config(rclcpp::Node & node) {
       step.gripper_wait_only = node.declare_parameter<bool>(q + "gripper_wait_only", false, descriptor);
       step.pipeline = text(q + "pipeline", "");
       step.planner = text(q + "planner", "");
+      step.fallback_pipeline = text(q + "fallback_pipeline", "");
+      step.fallback_planner = text(q + "fallback_planner", "");
+      step.fallback_attempts =
+          node.declare_parameter<int>(q + "fallback_attempts", 0, descriptor);
       step.duration = node.declare_parameter<double>(q + "duration", 1.0, descriptor);
       step.timeout = node.declare_parameter<double>(q + "timeout", 15.0, descriptor);
       step.tolerance = node.declare_parameter<double>(q + "tolerance", 0.02, descriptor);

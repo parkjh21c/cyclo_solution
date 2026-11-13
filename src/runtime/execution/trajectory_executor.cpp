@@ -3,8 +3,28 @@
 #include "demo_1f/runtime/config.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace demo_1f {
+namespace {
+constexpr double HELD_GRIPPER_NOTE = 0.005; // rad: held gripper drift worth an INFO line
+
+// True when a step opens or closes this gripper joint (moveit_goal: the step arm's gripper).
+bool moves_gripper(const Config & config, const Step & step, const std::string & joint) {
+  return (step.type == "gripper" || step.type == "joint_gripper" ||
+             step.type == "dual_joint_gripper") &&
+         config.arms.count(step.arm) && config.arms.at(step.arm).gripper_joint == joint;
+}
+
+std::string start_mismatch(
+    const std::string & name, double planned, double measured, double tolerance) {
+  char text[96];
+  std::snprintf(text, sizeof(text), " (planned %.3f, measured %.3f, tolerance %.3f)", planned,
+      measured, tolerance);
+  return name + text;
+}
+} // namespace
+
 TrajectoryExecutor::TrajectoryExecutor(
     rclcpp::Node & node, const Config & config, RobotContext & context)
     : node_(node), config_(config), context_(context) {
@@ -220,13 +240,33 @@ void TrajectoryExecutor::tick() {
         }
         const auto snapshot = context_.snapshot();
         const auto & trajectory = path.trajectory.joint_trajectory;
-        for (const auto & [name, planned] : op->preparation_positions) {
+        // A gripper no step of this operation moves (it may be squeezing an object) is held.
+        const auto held_gripper = [&](const std::string & name) {
+          return context_.is_gripper_joint(name) && !moves_gripper(config_, op->step, name) &&
+                 std::none_of(op->steps.begin(), op->steps.end(), [&](const Step & step) {
+                   return moves_gripper(config_, step, name);
+                 });
+        };
+        const auto check_start = [&](const std::string & what, const std::string & name,
+                                     double planned) {
           const auto & measured = snapshot.joints.at(name);
-          if (!context_.joint_ready_for_motion(name, measured, reason, true) ||
-              std::abs(measured.position - planned) > config_.continuous_start_tolerance) {
-            throw std::runtime_error(
-                "Robot moved during trajectory preparation: " + name + "; " + reason);
+          const bool held = held_gripper(name);
+          const double tolerance = held && config_.held_gripper_start_tolerance > 0
+                                       ? config_.held_gripper_start_tolerance
+                                       : config_.continuous_start_tolerance;
+          const double error = std::abs(measured.position - planned);
+          if (!context_.joint_ready_for_motion(name, measured, reason, true) || error > tolerance) {
+            throw std::runtime_error(what + ": " +
+                start_mismatch(name, planned, measured.position, tolerance) + "; " + reason);
           }
+          if (held && error > HELD_GRIPPER_NOTE) {
+            RCLCPP_INFO(node_.get_logger(), "Held gripper drift before %s (%s): %s",
+                op->step.name.c_str(), what.c_str(),
+                start_mismatch(name, planned, measured.position, tolerance).c_str());
+          }
+        };
+        for (const auto & [name, planned] : op->preparation_positions) {
+          check_start("Robot moved during trajectory preparation", name, planned);
         }
         const double duration =
             rclcpp::Duration(trajectory.points.back().time_from_start).seconds();
@@ -236,13 +276,8 @@ void TrajectoryExecutor::tick() {
               "Motion timeout is too short for the prepared path and stop verification");
         }
         for (size_t joint = 0; joint < trajectory.joint_names.size(); ++joint) {
-          const auto & name = trajectory.joint_names[joint];
-          const auto & measured = snapshot.joints.at(name);
-          if (!context_.joint_ready_for_motion(name, measured, reason, true) ||
-              std::abs(measured.position - trajectory.points.front().positions[joint]) >
-                  config_.continuous_start_tolerance) {
-            throw std::runtime_error("Robot moved during planning: " + name + "; " + reason);
-          }
+          check_start("Robot moved during planning", trajectory.joint_names[joint],
+              trajectory.points.front().positions[joint]);
         }
         op->path = std::move(path);
         if (op->step.type == "gripper") {
@@ -311,6 +346,17 @@ void TrajectoryExecutor::tick() {
           elapsed(*op->gripper_sent) >= op->step.duration;
       if (finished && (wait_only ? duration_elapsed : settled(op, true))) {
         op->result.state = ExecutionState::Succeeded;
+        if (op->fallback_tries > 0) {  // which planner made it, after which failures
+          std::string failed;
+          for (const auto & attempt : op->plan_attempts) {
+            failed += (failed.empty() ? "" : ", ") + attempt;
+          }
+          op->result.detail = "planned with " + op->planner_label + " on fallback attempt " +
+                              std::to_string(op->fallback_tries) + "/" +
+                              std::to_string(op->step.fallback_attempts) + " after " + failed;
+          RCLCPP_INFO(node_.get_logger(), "%s: %s", op->step.name.c_str(),
+              op->result.detail.c_str());
+        }
       } else if (finished && wait_only) {
         op->completion_wait_reason = "Waiting for gripper command duration; grasp not verified";
       } else if (!finished) {

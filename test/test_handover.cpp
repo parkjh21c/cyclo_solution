@@ -43,6 +43,28 @@ TEST(PlanningConfig, CandidateCountIsBoundedAndReadOnly) {
   }
 }
 
+TEST(PlanningConfig, TfSpinThreadDefaultsOff) {
+  auto defaults = std::make_shared<rclcpp::Node>("tf_spin_thread_default");
+  EXPECT_FALSE(load_config(*defaults).tf_spin_thread);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("tf_spin_thread", true)});
+  auto node = std::make_shared<rclcpp::Node>("tf_spin_thread_override", options);
+  EXPECT_TRUE(load_config(*node).tf_spin_thread);
+}
+
+TEST(PlanningConfig, HeldGripperStartToleranceDefaultsToInherit) {
+  auto defaults = std::make_shared<rclcpp::Node>("held_gripper_default");
+  EXPECT_EQ(load_config(*defaults).held_gripper_start_tolerance, 0.0); // 0 = continuous value
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("held_gripper_start_tolerance", .05)});
+  auto node = std::make_shared<rclcpp::Node>("held_gripper_override", options);
+  EXPECT_EQ(load_config(*node).held_gripper_start_tolerance, .05);
+  rclcpp::NodeOptions negative;
+  negative.parameter_overrides({rclcpp::Parameter("held_gripper_start_tolerance", -.01)});
+  auto bad = std::make_shared<rclcpp::Node>("held_gripper_negative", negative);
+  EXPECT_THROW(load_config(*bad), std::invalid_argument);
+}
+
 Config fixture_config(const std::string & prefix) {
   Config c;
   c.require_tcp_tf = false;
@@ -570,6 +592,11 @@ protected:
         } else if (auto_complete) {
           result->error_code.val = fail_on_move == 0 || move_goals.size() == fail_on_move
                                       ? move_error : moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+          if (!move_errors.empty()) {  // per request, in order; success past the list
+            result->error_code.val = move_goals.size() <= move_errors.size()
+                                         ? move_errors[move_goals.size() - 1]
+                                         : moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+          }
           result->error_code.message = move_error_message;
           result->error_code.source = move_error_source;
           if (move_result_has_execution) {
@@ -801,7 +828,212 @@ protected:
   int feedback_count{0};
   double gripper_position_jitter{0.0};
   std::string jitter_joint, blocked_gripper;
+  std::vector<int> move_errors; // MoveIt code of each move request in order (empty: move_error)
+
+  // A left arm joint step with an OMPL fallback after a failed PTP plan.
+  Step fallback_step(int attempts) {
+    Step step;
+    step.name = "home_via";
+    step.type = "joint";
+    step.arm = "left";
+    step.target = std::vector<double>(7, 0.1);
+    step.timeout = 4;
+    step.fallback_pipeline = attempts ? "ompl" : "";
+    step.fallback_planner = attempts ? "RRTConnectkConfigDefault" : "";
+    step.fallback_attempts = attempts;
+    return step;
+  }
+
+  ExecutionResult run_step(TrajectoryExecutor & executor, const Step & step) {
+    EXPECT_TRUE(executor.start(step));
+    until([&] {
+      executor.tick();
+      return executor.result().state != ExecutionState::Running;
+    }, 5.0);
+    return executor.result();
+  }
+
+  // left_to_right with joint moved 0.02 rad once planning has started (after the planned start).
+  std::string drifted_handover(const std::string & joint) {
+    enable_smoothing();
+    config.require_passive_gripper_stationary = false;
+    TrajectoryExecutor executor(*node, config, *context);
+    warmup(executor);
+    HandoverMotion motion(config, *context, executor);
+    std::string reason;
+    if (!motion.start("left_to_right", reason)) return "not started: " + reason;
+    bool drifted = false;
+    until([&]() { return !motion.running(); }, 5.0, [&]() {
+      if (!drifted && !move_goals.empty()) {
+        positions.at(joint) += .02;
+        drifted = true;
+      }
+      motion.tick();
+    });
+    return motion.result().sequence_completed ? "" : motion.result().detail;
+  }
 };
+
+TEST(PlanningConfig, PlannerFallbackIsValidatedForJointStepsOnly) {
+  const auto config = fixture_config("/fallback_validation");
+  MotionSequence sequence;
+  Step step;
+  step.name = "home_via";
+  step.type = "joint";
+  step.arm = "left";
+  step.target = std::vector<double>(7, 0.0);
+  step.timeout = 5;
+  step.fallback_pipeline = "ompl";
+  step.fallback_planner = "RRTConnectkConfigDefault";
+  step.fallback_attempts = 3;
+  sequence.steps = {step};
+  EXPECT_EQ(validate_motion_sequence(sequence, config), "");
+  const auto with = [&](const std::function<void(Step &)> & change) {
+    auto changed = sequence;
+    change(changed.steps[0]);
+    return validate_motion_sequence(changed, config);
+  };
+  EXPECT_NE(with([](Step & s) { s.fallback_attempts = 6; }), "");
+  EXPECT_NE(with([](Step & s) { s.fallback_attempts = -1; }), "");
+  EXPECT_NE(with([](Step & s) { s.fallback_attempts = 0; }), ""); // named but never used
+  EXPECT_NE(with([](Step & s) { s.fallback_planner.clear(); }), "");
+  EXPECT_NE(with([](Step & s) {
+    s.type = "linear";
+    s.target = {0.3, 0, 0.8, 0, 0, 0, 1};
+  }), "");
+}
+
+TEST_F(RosFixture, JointStepWithoutFallbackFailsOnTheFirstPlan) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(0));
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_EQ(result.code, "EXECUTION_FAILED");
+  EXPECT_EQ(result.detail.find("plan attempts"), std::string::npos) << result.detail;
+  EXPECT_EQ(move_goals.size(), 1u);
+}
+
+TEST_F(RosFixture, FailedPtpPlanFallsBackToOmplWithTheSameGoal) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(3));
+  EXPECT_EQ(result.state, ExecutionState::Succeeded) << result.detail;
+  ASSERT_EQ(move_goals.size(), 2u);
+  EXPECT_EQ(move_goals[0].request.planner_id, "PTP");
+  EXPECT_EQ(move_goals[1].request.pipeline_id, "ompl");
+  EXPECT_EQ(move_goals[1].request.planner_id, "RRTConnectkConfigDefault");
+  EXPECT_EQ(move_goals[1].request.goal_constraints, move_goals[0].request.goal_constraints);
+  EXPECT_EQ(move_goals[1].request.max_velocity_scaling_factor,
+      move_goals[0].request.max_velocity_scaling_factor);
+  EXPECT_FALSE(move_goals[1].planning_options.plan_only);
+  EXPECT_NE(result.detail.find("planned with ompl/RRTConnectkConfigDefault on fallback attempt 1/3"
+                               " after pilz_industrial_motion_planner/PTP: MoveIt error -2"),
+      std::string::npos)
+      << result.detail;
+}
+
+TEST_F(RosFixture, SecondFallbackAttemptCanSucceed) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN,
+      moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(3));
+  EXPECT_EQ(result.state, ExecutionState::Succeeded) << result.detail;
+  EXPECT_EQ(move_goals.size(), 3u);
+  EXPECT_NE(result.detail.find("fallback attempt 2/3"), std::string::npos) << result.detail;
+}
+
+TEST_F(RosFixture, UsedUpFallbackFailsWithTheAttemptHistory) {
+  move_errors = std::vector<int>(3, moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN);
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(2));
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_EQ(move_goals.size(), 3u);
+  EXPECT_NE(result.detail.find("plan attempts: pilz_industrial_motion_planner/PTP: MoveIt error -2,"
+                               " ompl/RRTConnectkConfigDefault: MoveIt error -2,"
+                               " ompl/RRTConnectkConfigDefault: MoveIt error -2"
+                               " (no fallback: fallback attempts used up)"),
+      std::string::npos)
+      << result.detail;
+}
+
+TEST_F(RosFixture, ExecutionFailureIsNotReplanned) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::CONTROL_FAILED};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(3));
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_EQ(move_goals.size(), 1u);
+  EXPECT_NE(result.detail.find("(no fallback: not a planning failure)"), std::string::npos)
+      << result.detail;
+}
+
+TEST_F(RosFixture, PlanFailureWithAnExecutedTrajectoryIsNotReplanned) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN};
+  move_result_has_execution = true;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  const auto result = run_step(executor, fallback_step(3));
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_EQ(move_goals.size(), 1u);
+  EXPECT_NE(result.detail.find("(no fallback: not a planning failure)"), std::string::npos)
+      << result.detail;
+}
+
+TEST_F(RosFixture, PlanFailureAfterTheArmMovedIsNotReplanned) {
+  move_errors = {moveit_msgs::msg::MoveItErrorCodes::INVALID_MOTION_PLAN};
+  auto_complete = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start(fallback_step(3)));
+  ASSERT_TRUE(until([&] {
+    executor.tick();
+    return !move_goals.empty();
+  }));
+  positions.at("left_joint0") += .05; // moved before MoveIt answered
+  until([&] {
+    executor.tick();
+    return false;
+  }, .1);
+  auto_complete = true;
+  ASSERT_TRUE(until([&] {
+    executor.tick();
+    return executor.result().state != ExecutionState::Running;
+  }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(move_goals.size(), 1u);
+  EXPECT_NE(executor.result().detail.find("(no fallback: the arm moved)"), std::string::npos)
+      << executor.result().detail;
+}
+
+TEST_F(RosFixture, HeldGripperDriftFailsAtTheDefaultToleranceWithNumbers) {
+  // The giver's gripper is held through face_each_other + open_approach (receiver opens).
+  const auto held = config.arms.at(config.motion_sequences.at("left_to_right").giver).gripper_joint;
+  const auto detail = drifted_handover(held);
+  EXPECT_NE(detail.find("Robot moved during "), std::string::npos) << detail; // either check
+  EXPECT_NE(detail.find(held + " (planned 0.200, measured 0.220, tolerance 0.010)"),
+      std::string::npos)
+      << detail;
+}
+
+TEST_F(RosFixture, HeldGripperDriftPassesWithItsOwnTolerance) {
+  config.held_gripper_start_tolerance = .05;
+  const auto held = config.arms.at(config.motion_sequences.at("left_to_right").giver).gripper_joint;
+  EXPECT_EQ(drifted_handover(held), "");
+}
+
+TEST_F(RosFixture, ArmDriftStillFailsWithAWideHeldGripperTolerance) {
+  config.held_gripper_start_tolerance = .05;
+  const auto joint = config.arms.at(config.motion_sequences.at("left_to_right").giver).joints[0];
+  const auto detail = drifted_handover(joint);
+  EXPECT_NE(detail.find("Robot moved during "), std::string::npos) << detail;
+  EXPECT_NE(detail.find(joint + " (planned 0.000, measured 0.020, tolerance 0.010)"),
+      std::string::npos)
+      << detail;
+}
 
 TEST_F(RosFixture, BodyJointGroupUsesMoveItAndChecksMeasuredCompletion) {
   positions["head_joint1"] = 0;

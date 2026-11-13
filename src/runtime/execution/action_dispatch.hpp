@@ -39,7 +39,7 @@ void TrajectoryExecutor::dispatch(const typename rclcpp_action::Client<Action>::
         }
       };
   options.result_callback =
-      [op, error, on_success, planning_only = op->planning_only](
+      [this, op, error, on_success, planning_only = op->planning_only](
           const typename rclcpp_action::ClientGoalHandle<Action>::WrappedResult & response) {
         op->action_terminal = true;
         op->cancel_action = {};
@@ -56,9 +56,14 @@ void TrajectoryExecutor::dispatch(const typename rclcpp_action::Client<Action>::
           return;
         }
         if (!op->cancel_requested && !op->action_success) {
-          op->result = {ExecutionState::Failed,
-              "EXECUTION_FAILED",
-              detail.empty() ? "Action did not succeed" : detail};
+          std::string message = detail.empty() ? "Action did not succeed" : detail;
+          if constexpr (std::is_same_v<Action, Move>) {
+            // A joint step with a planner fallback may plan again instead of failing here.
+            if (response.result && replan_with_fallback(op, *response.result, message)) {
+              return;
+            }
+          }
+          op->result = {ExecutionState::Failed, "EXECUTION_FAILED", message};
           if constexpr (std::is_same_v<Action, Move>) {
             // Generic OMPL failures are retryable only for an explicit plan-only request.
             // Combined planning/execution errors must never be mistaken for pre-motion failure.

@@ -18,6 +18,7 @@ handover_demo:
     state_max_age: 1.0
     tf_max_age: 1.0
     require_tcp_tf: true
+    tf_spin_thread: true  # true: /tf on tf2_ros's own thread, not behind the spin_some loop
     settle_time: 0.25
     stopped_velocity: 0.03
     cancel_timeout: 5.0
@@ -33,6 +34,7 @@ handover_demo:
     path_simplification_tolerance: 0.002
     trajectory_sample_period: 0.01
     continuous_start_tolerance: 0.01
+    held_gripper_start_tolerance: 0.05  # a gripper squeezing an object creeps; arms keep 0.01
     motion_sequences:
       left_to_right:
         steps:
@@ -136,14 +138,34 @@ handover_demo:
         - receiver_close
         - giver_release
         - retreat_together
+        - giver_home_via
         - giver_home
-        # Right arm back to the initial pose (basket check later; cup handover targets assume it).
-        # OMPL like menu 1: the Pilz PTP line passes through basket_table.
+        # Right arm back to the initial pose (cup handover targets assume it): PTP via j1+j3 first,
+        # the direct PTP line crosses basket_table (ptp_path_check: 39 mm clear); OMPL if PTP fails.
+        giver_home_via:
+          type: joint
+          arm: giver
+          fallback_pipeline: ompl
+          fallback_planner: RRTConnectkConfigDefault
+          fallback_attempts: 3
+          velocity_scale: 0.35
+          acceleration_scale: 0.35
+          tolerance: 0.05
+          timeout: 45.0
+          target:
+          - 1.05
+          - -0.65717678
+          - 0.0
+          - -1.50082468
+          - -1.9681034
+          - 1.43097349
+          - 0.27834375
         giver_home:
           type: joint
           arm: giver
-          pipeline: ompl
-          planner: RRTConnectkConfigDefault
+          fallback_pipeline: ompl
+          fallback_planner: RRTConnectkConfigDefault
+          fallback_attempts: 3
           velocity_scale: 0.35
           acceleration_scale: 0.35
           tolerance: 0.01

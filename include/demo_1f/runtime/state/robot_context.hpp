@@ -45,10 +45,27 @@ public:
       const std::string & detail = {});
   void set_phase(const std::string & phase, const std::string & completed);
   void set_execution(const ExecutionResult & result);
+  // One main loop pass (spin_some + sleep) in seconds, for the periodic "tf age" log.
+  void note_loop(double seconds);
 
 private:
   void queue_cup(msg::CupObservation::ConstSharedPtr observation);
   void process_pending_cups();
+  void sample_tf_age();
+
+  // Latest TCP transform age per arm and main loop passes since started (logged every 5 s).
+  struct TfAgeWindow {
+    std::map<std::string, double> max_age;
+    int samples{0};
+    int missing{0};
+    double loop_max{0};
+    double loop_sum{0};
+    int loops{0};
+    TimePoint started{Clock::now()};
+  };
+  std::mutex tf_window_mutex_;
+  TfAgeWindow tf_window_;
+  rclcpp::TimerBase::SharedPtr tf_age_timer_;
 
   struct PendingCup {
     msg::CupObservation::ConstSharedPtr observation;

@@ -166,5 +166,28 @@ TEST_F(CupTfFixture, ExpiredPendingFramesCannotReappearAfterTfArrives) {
   spin_for(.03);
   EXPECT_FALSE(cup());
 }
+
+TEST(TfSpinThread, TransformsArriveWithoutSpinningTheNode) {
+  auto node = std::make_shared<rclcpp::Node>("tf_spin_thread_context");
+  Config config;
+  config.tf_max_age = 1;
+  config.tf_spin_thread = true;
+  auto context = std::make_unique<RobotContext>(*node, config);
+  tf2_ros::TransformBroadcaster broadcaster(node);
+  geometry_msgs::msg::TransformStamped tf;
+  tf.header.frame_id = config.planning_frame;
+  tf.child_frame_id = "tf_spin_thread_tool";
+  tf.transform.rotation.w = 1;
+  bool found = false;
+  const auto start = Clock::now();
+  while (!found && elapsed(start) < 2) { // no executor here: only the listener's thread receives
+    tf.header.stamp = node->now();
+    broadcaster.sendTransform(tf);
+    std::this_thread::sleep_for(20ms);
+    found = context->pose_of(tf.child_frame_id).has_value();
+  }
+  EXPECT_TRUE(found);
+  context.reset(); // the listener thread stops before the buffer goes
+}
 } // namespace
 } // namespace demo_1f
