@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, deque
 import math
 import threading
 import time
@@ -8,6 +8,7 @@ from ffw_grasp.grasp_planner import (
     add_time, basket_core, boxes_outside, ceiling_stats, fit_basket, GraspParams, in_boxes,
     matrix_to_quat, merge_planes, merge_targets, near_any, object_box, on_plane, pick_target,
     plan_grasp, quat_to_matrix, rank_objects, scene_points, Target)
+from ffw_grasp.frame_select import select_buffered
 from ffw_grasp.overlay import draw_basket, draw_grasp
 from ffw_vision.camera_config import declare_camera_parameters, load_camera_config
 from ffw_vision.depth_stats import color_from_msg, depth_from_msg
@@ -33,6 +34,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 BUFFER_SIZE = 30
 TF_TIMEOUT = Duration(seconds=0.5)
+BUFFERED_MAX_MOVE = 0.002  # m: a kept observation's camera this near the request's
+BUFFERED_MAX_TURN_DEG = 0.5
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 SPIN_TIMEOUT_SEC = 0.1
 # scene_objects (a record for ffw_pick and RViz; nothing plans with it)
@@ -154,12 +157,13 @@ def checks_summary(c):
             f' backup_rolls {part("backup_rolls")}]')
 
 
-def timing_summary(collect, frames, compute, timings, grasp_timings, checks=None):
+def timing_summary(collect, frames, compute, timings, grasp_timings, checks=None, buffered=0):
     """One log line: collect and compute seconds, compute split by step (summed over objects)."""
     steps = [(name, timings.get(name, 0.0)) for name in PLAN_STEPS]
     steps.append(('other', compute - sum(t for _, t in steps)))
     grasp = [(name, grasp_timings.get(name, 0.0)) for name in GRASP_STEPS]
-    return (f'plan timing: collect {collect:.2f} s ({frames} frames), compute {compute:.2f} s ['
+    return (f'plan timing: collect {collect:.2f} s ({frames} frames, {buffered} buffered),'
+            f' compute {compute:.2f} s ['
             + ', '.join(f'{name} {t:.2f}' for name, t in steps) + '], grasp ['
             + ', '.join(f'{name} {t:.2f}' for name, t in grasp) + ']'
             + ('' if checks is None else ' ' + checks_summary(checks)))
@@ -184,6 +188,7 @@ class GraspPlannerNode(Node):
         self.declare_parameter('max_camera_motion', 0.002)  # m between first and last frame
         self.declare_parameter('max_camera_turn_deg', 0.5)
         self.declare_parameter('skip_radius', 0.025)  # m: skip_last leaves out objects this near
+        self.declare_parameter('buffered_max_age', 5.0)  # s: reuse frames from before plan, 0 = off
         self.config = load_camera_config(self)
         self.params = declare_dataclass(self, GraspParams())
         observation_topic = (self.get_parameter('observation_topic').value
@@ -192,7 +197,7 @@ class GraspPlannerNode(Node):
             raise ValueError('grasp_planner needs depth_topic and camera_info_topic')
         names = ('base_frame', 'end_effector_frame', 'depth_scale', 'frames', 'min_frames',
                  'timeout_sec', 'max_center_jitter_px', 'object_radius_px', 'standing_min_height',
-                 'max_camera_motion', 'max_camera_turn_deg', 'skip_radius')
+                 'max_camera_motion', 'max_camera_turn_deg', 'skip_radius', 'buffered_max_age')
         for name in names:
             setattr(self, name, self.get_parameter(name).value)
 
@@ -200,6 +205,8 @@ class GraspPlannerNode(Node):
         self.done = threading.Event()
         self.collecting = False
         self.frames_seen = []  # (observations, depth, color or None)
+        self.recent = deque(maxlen=max(int(self.frames), 1))  # latest frames, also outside plans
+        self.last_end_ns = 0  # node clock at the end of the last plan
         self.depths = {}
         self.colors = {}
         self.camera_info = None
@@ -266,7 +273,10 @@ class GraspPlannerNode(Node):
         with self.lock:
             depth = self.depths.pop(stamp, None)
             color = self.colors.pop(stamp, None)
-            if not self.collecting or depth is None:
+            if depth is None:
+                return
+            self.recent.append((msg, depth, color))
+            if not self.collecting:
                 return
             self.frames_seen.append((msg, depth, color))
             if len(self.frames_seen) >= self.frames:
@@ -286,10 +296,13 @@ class GraspPlannerNode(Node):
         self.timings, self.grasp_timings, self.check_timings = {}, {}, {}
         self.depth_of = {}
         start = time.perf_counter()
+        buffered = self.buffered_frames()
         with self.lock:
-            self.frames_seen = []
+            self.frames_seen = list(buffered)  # a copy: buffered stays the logged count
             self.done.clear()
-            self.collecting = True
+            self.collecting = len(buffered) < self.frames
+            if not self.collecting:
+                self.done.set()
         self.done.wait(self.timeout_sec)
         collect = time.perf_counter() - start
         with self.lock:
@@ -309,8 +322,34 @@ class GraspPlannerNode(Node):
             response.message = f'{kind}: {len(frames)} frames: {error}'
             self.get_logger().warn(response.message)
         self.get_logger().info(timing_summary(collect, len(frames), compute, self.timings,
-                                              self.grasp_timings, self.check_timings))
+                                              self.grasp_timings, self.check_timings,
+                                              len(buffered)))
+        self.last_end_ns = self.get_clock().now().nanoseconds
         return response
+
+    def buffered_frames(self):
+        """Kept frames taken after the last plan, recently and from the request's camera pose."""
+        if self.buffered_max_age <= 0:
+            return []
+        request_ns = self.get_clock().now().nanoseconds
+        with self.lock:
+            kept = list(self.recent)
+        if not kept:
+            return []
+
+        def pose_at(header, stamp):
+            try:  # no wait: a missing transform only drops this frame
+                return transform_parts(self.tf_buffer.lookup_transform(
+                    self.base_frame, header.frame_id, stamp))
+            except tf2_ros.TransformException:
+                return None
+        now = pose_at(kept[-1][0].header, Time())
+        which, _ = select_buffered(
+            [stamp_to_ns(f[0].header.stamp) for f in kept], request_ns, self.last_end_ns,
+            self.buffered_max_age, lambda i: pose_at(kept[i][0].header,
+                                                     Time.from_msg(kept[i][0].header.stamp)),
+            now, self.frames, BUFFERED_MAX_MOVE, BUFFERED_MAX_TURN_DEG)
+        return [kept[i] for i in which]
 
     def on_skip_last(self, request, response):
         """Leave the object of the last plan out of the next plans (the arm found no path)."""
