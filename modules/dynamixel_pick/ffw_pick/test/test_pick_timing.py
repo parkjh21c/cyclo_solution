@@ -1,7 +1,7 @@
 """The per-request pick timing line, with a fake clock (no ROS)."""
 import pytest
 
-from ffw_pick.pick_moveit import PickTiming
+from ffw_pick.pick_moveit import command_wait, PickTiming, recent_commands
 
 
 class Clock:
@@ -62,3 +62,20 @@ def test_failure_before_any_plan_counts_all_as_init():
     timing = PickTiming(clock)
     clock.now += 4.0
     assert timing.line('stop').startswith('pick timing: init 4.0, plan 0.0 (0 calls),')
+
+
+def test_command_check_needs_no_extra_wait_after_a_long_search():
+    assert command_wait(watched_from=100.0, now=133.8) == 0.0
+    assert command_wait(watched_from=100.0, now=101.0) == 0.0
+
+
+def test_command_check_waits_only_the_missing_time():
+    assert command_wait(watched_from=100.0, now=100.3) == pytest.approx(0.7)
+    assert command_wait(watched_from=100.0, now=100.0) == pytest.approx(1.0)
+
+
+def test_only_commands_of_the_last_second_count():
+    times = [100.5, 131.0, 133.2, 133.8]
+    assert recent_commands(times, now=133.8) == 2
+    assert recent_commands([100.5], now=133.8) == 0
+    assert recent_commands([], now=133.8) == 0

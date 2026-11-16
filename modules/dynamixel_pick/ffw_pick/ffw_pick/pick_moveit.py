@@ -60,6 +60,8 @@ BAN_TRIES = 30  # colliding solutions left out of one line before it is given up
 BOUND_SLACK = 0.02  # rad: a grasp option is skipped once its least possible joint motion is
 # this much above the best found (the search grid may undercut it by about that)
 GRIPPER_KEYS = 6  # searched line points solved at a time while looking for a gripper contact
+COMMAND_WINDOW = 1.0  # s with no arm controller command before a pick moves
+COMMAND_DRAIN = 0.05  # s always spun before that check so queued commands are counted
 
 
 def pick_result_code(status, hooks=None):
@@ -187,6 +189,16 @@ def plan_kind(message):
     """What a failed ffw_grasp plan says to do (PLAN_KINDS); an older message = view."""
     word = message.split(':', 1)[0].strip()
     return word if word in PLAN_KINDS else 'view'
+
+
+def command_wait(watched_from, now, window=COMMAND_WINDOW):
+    """s still to watch the controller topic: the search time already watched counts."""
+    return max(0.0, window - (now - watched_from))
+
+
+def recent_commands(times, now, window=COMMAND_WINDOW):
+    """Commands received (monotonic times) within the last window s."""
+    return sum(1 for t in times if now - t <= window)
 
 
 def summary_line(tally, ended):
@@ -494,9 +506,9 @@ def _main(argv, hooks, resources):
     execute = resources.action(ExecuteTrajectory, '/execute_trajectory')
     follow = resources.action(FollowJointTrajectory, arm_cfg.gripper_action)
     active = {}  # goal handle of the motion running now, cancelled on Ctrl+C
-    commands = []  # other commands on the arm controller topic (movej, teleoperation)
+    commands = []  # receive times of other arm controller commands (movej, teleoperation)
     resources.subscribe(JointTrajectory, arm_cfg.controller_topic,
-                        lambda m: commands.append(m), 10)
+                        lambda m: commands.append(time.monotonic()), 10)
     scene_opening = {}  # finger boxes currently in the scene
     spent = {'checks': 0, 'check_s': 0.0, 'scene_s': 0.0}  # collision checks and scene updates
 
@@ -1148,6 +1160,11 @@ def _main(argv, hooks, resources):
     log = []
     tally = {}  # counts for the summary line
 
+    def note(text):
+        print(text)
+        if hooks is not None:
+            node.get_logger().info(text)  # Server stdout is not kept in a log file.
+
     def count(name):
         tally[name] = tally.get(name, 0) + 1
 
@@ -1170,7 +1187,7 @@ def _main(argv, hooks, resources):
             with timing.measure('plan'):
                 result = call(plan_client, Trigger.Request(), 20.0)
             message = result.message if result else 'view: no answer'
-            print(f'plan: {message} ({time.time() - asked:.1f} s)')
+            note(f'plan: {message} ({time.time() - asked:.1f} s)')
             if hooks:
                 hooks.message = message
                 hooks.error_code = 'OBJECT_NOT_FOUND'
@@ -1244,6 +1261,9 @@ def _main(argv, hooks, resources):
         floor_z = basket_position[2] + task['floor_height']
         if hooks:
             hooks.phase('PICK_PLAN', 'Selecting a collision-free analytic IK path')
+        # the controller topic is watched from here: the search time counts toward the check
+        commands.clear()
+        watched_from = time.monotonic()
         options = read_options()
 
         for client, name in ((scene_client, '/apply_planning_scene'),
@@ -1270,9 +1290,13 @@ def _main(argv, hooks, resources):
         started = time.time()
         with timing.measure('search'):
             found = search_approach(options, now, args.lift)
-        print(f'search: {len(log)} tried in {time.time() - started:.1f} s')
+        note(f'search: {len(log)} tried in {time.time() - started:.1f} s')
+        tried = [f'  {line}' for line in log]
         if args.verbose or found is None:
-            print('\n'.join(f'  {line}' for line in log))
+            print('\n'.join(tried))
+        if hooks is not None:
+            for line in tried:
+                node.get_logger().info(line)
         if found is None:
             if hooks:
                 hooks.error_code = 'PICK_PLAN_FAILED'
@@ -1280,13 +1304,14 @@ def _main(argv, hooks, resources):
             print('NO SOLUTION: every option above failed; the arm is not moved')
             return 'no path'
         option, rotation, approach, how, grasp_values, lift, outbound = found
-        print(f'chosen: {option["label"]} - {how}')
+        note(f'chosen: {option["label"]} - {how}')
         lift_end = option['position'] + np.array([0.0, 0.0, args.lift])
         lift_how = 'analytic IK line'
 
         start = state_of(now)
         display.publish(DisplayTrajectory(trajectory=approach + [lift], trajectory_start=start))
-        spin(0.5)
+        if hooks is None:
+            spin(0.5)  # command line: the node may close next; the server keeps its publisher
         samples, t0 = [], 0.0
         for seg in approach:
             part = trajectory_values(seg, now)
@@ -1301,12 +1326,12 @@ def _main(argv, hooks, resources):
             return 'ok'
 
         # bringup's cyclo_teleoperation publishes there only while teleoperating: count messages
-        commands.clear()
-        spin(1.0)
-        if commands:
+        spin(max(command_wait(watched_from, time.monotonic()), COMMAND_DRAIN))
+        arrived = recent_commands(commands, time.monotonic())
+        if arrived:
             names = ', '.join(i.node_name for i in
                               node.get_publishers_info_by_topic(arm_cfg.controller_topic))
-            print(f'{len(commands)} commands/s arrive on {arm_cfg.controller_topic} (from {names};'
+            print(f'{arrived} commands/s arrive on {arm_cfg.controller_topic} (from {names};'
                   ' movej or teleoperation?): stop it first')
             return 'stop'
         table = gripper.table
