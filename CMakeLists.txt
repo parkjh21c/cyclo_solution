@@ -228,6 +228,8 @@ if(BUILD_TESTING)
   set_tests_properties(test_cup PROPERTIES ENVIRONMENT "RMW_IMPLEMENTATION=rmw_fastrtps_cpp")
   ament_add_gtest(test_handover test/test_handover.cpp TIMEOUT 90)
   target_link_libraries(test_handover demo_tasks)
+  set_tests_properties(test_handover PROPERTIES ENVIRONMENT
+    "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=152;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
   ament_add_gtest(test_start_state_bounds test/test_start_state_bounds.cpp TIMEOUT 30)
   target_link_libraries(test_start_state_bounds demo_start_state_adapter)
   ament_add_gtest(test_trajectory_smoother test/test_trajectory_smoother.cpp

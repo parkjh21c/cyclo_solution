@@ -33,3 +33,18 @@ def joints_moved(before, now, names, tolerance):
         if not change <= tolerance:  # NaN (missing) counts as moved
             out.append(f'{name} {change:+.3f}')
     return out
+
+
+STALE_JOINT_AGE = 1.0  # s: an older joint value counts as unreadable
+
+
+def fresh_joints(values, times, names, now, max_age=STALE_JOINT_AGE):
+    """{name: value} of the names received within max_age s of now (monotonic)."""
+    return {n: values[n] for n in names
+            if n in values and now - times.get(n, -math.inf) <= max_age}
+
+
+def path_recheck_needed(before, after, names, tolerance):
+    """False only when every name is in both (fresh) snapshots and moved at most tolerance."""
+    return any(n not in before or n not in after or not abs(after[n] - before[n]) <= tolerance
+               for n in names)
