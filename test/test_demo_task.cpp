@@ -1,7 +1,9 @@
 #include "demo_1f/tasks/task_manager.hpp"
 #include "demo_1f/tasks/demo_recovery.hpp"
 #include <algorithm>
+#include <functional>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -61,6 +63,7 @@ public:
   std::string failure = "CUP_NOT_FOUND";
   std::string requested_arm;
   bool stall = false;
+  std::function<bool()> may_finish; // Unset: finishes on its first tick.
   bool start(const std::string & arm, const std::string & cup_id,
       std::string & reason, bool execute = true) override {
     requested_arm = arm;
@@ -68,7 +71,7 @@ public:
   }
   void tick() override {
     if (result_.state == "CANCELLING") { result_.state = "CANCELLED"; return; }
-    if (!running() || stall) return;
+    if (!running() || stall || (may_finish && !may_finish())) return;
     if (runs >= first_failure && runs < first_failure + failures) {
       fail(failure, "test failure");
       return;
@@ -105,10 +108,20 @@ protected:
   bool basket_seen = true;  // Wrist observer pose fed on every pump.
   double basket_age = 0;    // s
   int max_rounds = 0;       // 0 keeps the demo.max_cell_rounds default.
+  bool prepare = false;     // demo.prepare_pick_during_refine; also serves /dynamixel_pick/release.
+  double initial_target = .1; // Right arm initial pose target (pump reports 0).
+  bool manual_cancel = false, refuse_release = false;
+  int early_picks = 0;      // Requests with hold_before_motion.
+  int pumps = 0;
+  std::vector<std::string> events; // Pick requests and releases in order.
+  std::shared_ptr<rclcpp_action::ServerGoalHandle<Pick>> held_pick;
+  std::shared_ptr<Pick::Result> held_result;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_service;
 
   void SetUp() override {
     std::vector<rclcpp::Parameter> overrides = {rclcpp::Parameter("demo.retry_delay", .01),
-        rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled)};
+        rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled),
+        rclcpp::Parameter("demo.prepare_pick_during_refine", prepare)};
     if (max_rounds > 0) overrides.emplace_back("demo.max_cell_rounds", max_rounds);
     node = std::make_shared<rclcpp::Node>("demo_task_test",
         rclcpp::NodeOptions().parameter_overrides(overrides));
@@ -129,7 +142,7 @@ protected:
     step.name = "handover_test";
     step.type = "joint";
     step.arm = "right";
-    step.target = {.1};
+    step.target = {initial_target};
     step.timeout = 1;
     step.duration = 1;
     sequence.steps = {step};
@@ -160,6 +173,8 @@ protected:
         [this](auto handle) {
           ++picks;
           EXPECT_FALSE(handle->get_goal()->move_to_observe);
+          const bool hold = handle->get_goal()->hold_before_motion;
+          early_picks += hold;
           if (stall_pick || picks == stall_pick_at) { pending_pick = handle; return; }
           auto result = std::make_shared<Pick::Result>();
           result->holding = false; // No physical grasp verdict; motion success is sufficient.
@@ -178,8 +193,29 @@ protected:
             result->error_code = "BASKET_EMPTY"; // As ffw_pick: not retryable, nothing moved.
             result->message = "Basket empty in consecutive observations";
           }
+          if (hold && result->success) { // As ffw_pick: holds once a path is chosen.
+            events.push_back(refine->running() ? "held_pick_during_refine" : "held_pick");
+            held_pick = handle;
+            held_result = result;
+            return;
+          }
+          if (hold) events.push_back(refine->running() ? "early_result_during_refine" : "early_result");
+          else events.push_back("pick");
           if (result->success) handle->succeed(result); else handle->abort(result);
         });
+    if (prepare) {
+      release_service = node->create_service<std_srvs::srv::Trigger>("/dynamixel_pick/release",
+          [this](std_srvs::srv::Trigger::Request::ConstSharedPtr,
+              std_srvs::srv::Trigger::Response::SharedPtr response) {
+            events.push_back(refine->running() ? "release_during_refine" : "release");
+            response->success = held_pick && !refuse_release;
+            if (!response->success) return;
+            held_pick->succeed(held_result);
+            held_pick.reset();
+          });
+      auto probe = node->create_client<std_srvs::srv::Trigger>("/dynamixel_pick/release");
+      ASSERT_TRUE(probe->wait_for_service(2s));
+    }
     client = rclcpp_action::create_client<Demo>(node, "/run_demo");
     loop.add_node(node);
     ASSERT_TRUE(client->wait_for_action_server(2s));
@@ -206,12 +242,30 @@ protected:
       pending_pick->canceled(result);
       pending_pick.reset();
     }
+    if (held_pick && held_pick->is_canceling() && !manual_cancel) finish_held_cancel();
+    // Repeated (one sent before the goal response is dropped) but sparse: feedback is taken first and
+    // a message every spin would starve the client's goal response (rclcpp_action is_ready order).
+    if (held_pick && !held_pick->is_canceling() && ++pumps % 25 == 0) {
+      auto feedback = std::make_shared<Pick::Feedback>();
+      feedback->phase = "PICK_HOLD";
+      held_pick->publish_feedback(feedback);
+    }
     std::this_thread::sleep_for(2ms);
+  }
+  void finish_held_cancel() {
+    auto result = std::make_shared<Pick::Result>();
+    result->stop_confirmed = true;
+    result->error_code = "CANCELLED";
+    held_pick->canceled(result);
+    held_pick.reset();
   }
   template<class Future> void wait(Future & future) {
     auto end = std::chrono::steady_clock::now() + 5s;
     while (future.wait_for(0s) != std::future_status::ready && std::chrono::steady_clock::now() < end) pump();
-    ASSERT_EQ(future.wait_for(0s), std::future_status::ready);
+    if (future.wait_for(0s) != std::future_status::ready) {
+      ADD_FAILURE() << "timed out after 5 s";
+      throw std::runtime_error("timed out"); // A later get() would block the test process.
+    }
   }
   rclcpp_action::ClientGoalHandle<Demo>::SharedPtr send(const std::string & command = "start") {
     pump();
@@ -224,6 +278,15 @@ protected:
   }
   void TearDown() override {
     loop.remove_node(node);
+    for (auto * goal : {&held_pick, &pending_pick}) { // Unfinished goals end here, not in a destructor.
+      if (*goal && (*goal)->is_active()) {
+        auto result = std::make_shared<Pick::Result>();
+        result->stop_confirmed = true;
+        if ((*goal)->is_canceling()) (*goal)->canceled(result); else (*goal)->abort(result);
+      }
+      goal->reset();
+    }
+    release_service.reset();
     client.reset(); backend.reset(); manager.reset();
     place.reset(); handover_back.reset(); pour.reset(); handover_cup.reset();
     pick_cup.reset(); withdraw.reset(); refine.reset(); approach.reset(); initial.reset(); handover.reset(); context.reset(); node.reset();
@@ -698,6 +761,74 @@ TEST_F(DemoTest, ResumeAfterSecondRoundFailureContinuesWithoutRepicking) {
   EXPECT_EQ(approach->runs, 5);
   EXPECT_EQ(refine->runs, 2);
   EXPECT_EQ(pick_cup->runs, 1);
+}
+
+// demo.prepare_pick_during_refine on; REFINE_CUP ends only after its early pick request arrived.
+class DemoPrepareTest : public DemoTest {
+protected:
+  void SetUp() override {
+    prepare = true;
+    initial_target = 0; // The right arm reports the initial pose.
+    DemoTest::SetUp();
+    refine->may_finish = [this] { return early_picks >= refine->runs; };
+  }
+};
+
+TEST_F(DemoPrepareTest, PickRequestedDuringRefineMovesOnlyAfterReleaseAndEarlyEmptyIsUsed) {
+  cells = 2;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  // Round 2's pick holds until PICK_DYNAMIXEL releases it; round 3's finds the basket empty early.
+  EXPECT_EQ(events, (std::vector<std::string>{
+      "pick", "held_pick_during_refine", "release", "early_result_during_refine"}));
+  EXPECT_EQ(picks, 3);
+  EXPECT_EQ(handovers(executor), 2);
+  EXPECT_EQ(refine->runs, 2);
+  EXPECT_EQ(pick_cup->runs, 1);
+  EXPECT_EQ(result.get().result->last_completed_stage, "RETURN_INITIAL");
+}
+
+TEST_F(DemoPrepareTest, RefineFailureCancelsHeldPickAndWaitsForItsResult) {
+  cells = 2;
+  manual_cancel = true;
+  refine->failures = 1;
+  refine->failure = "EXECUTION_FAILED"; // Not retryable.
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal);
+  for (int i = 0; i < 1000 && !(held_pick && held_pick->is_canceling()); ++i) pump();
+  ASSERT_TRUE(held_pick && held_pick->is_canceling());
+  for (int i = 0; i < 50; ++i) pump();
+  EXPECT_NE(result.wait_for(0s), std::future_status::ready); // No demo result before the pick's.
+  EXPECT_FALSE(manager->can_shutdown());
+  finish_held_cancel();
+  wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "EXECUTION_FAILED");
+  EXPECT_EQ(events, (std::vector<std::string>{"pick", "held_pick_during_refine"}));
+  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_TRUE(manager->can_shutdown());
+}
+
+TEST_F(DemoPrepareTest, RefusedReleaseCancelsThePickBeforeAnyMotion) {
+  cells = 3;
+  refuse_release = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "PICK_RELEASE_FAILED");
+  EXPECT_EQ(events, (std::vector<std::string>{"pick", "held_pick_during_refine", "release"}));
+  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_TRUE(manager->can_shutdown());
+}
+
+TEST_F(DemoTest, WithoutPrepareEveryPickStartsAtItsOwnStage) {
+  cells = 2;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(events, (std::vector<std::string>{"pick", "pick", "pick"}));
+  EXPECT_EQ(early_picks, 0);
 }
 } // namespace
 } // namespace demo_1f

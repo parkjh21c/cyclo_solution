@@ -8,6 +8,7 @@
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/msg/demo_status.hpp"
 #include <map>
+#include <optional>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
@@ -39,6 +40,12 @@ private:
   void cancel_demo_motion();
   void finish_demo(bool success, const std::string & code, const std::string & detail,
       bool resumable = false);
+  void finish_demo_now(bool success, const std::string & code, const std::string & detail,
+      bool resumable);
+  std::string send_pick_goal(bool hold); // '' when sent, else why (demo faulted).
+  void cancel_pick();
+  void prepare_pick();
+  void tick_pick_release();
   void fail_demo_stage(const std::string & code, const std::string & detail, bool retryable);
   CupMotion * demo_cup_module(const std::string & action);
   bool demo_busy() const;
@@ -57,6 +64,25 @@ private:
   int demo_retries_{0}, demo_max_retries_{2};
   double demo_retry_delay_{1.0}, demo_pick_timeout_{180.0};
   TimePoint demo_deadline_{}, demo_stage_started_{};
+
+  // PICK_DYNAMIXEL requested at REFINE_CUP start; held before motion until released.
+  bool demo_prepare_pick_{false};
+  bool pick_owned_{false};          // The live pick request belongs to PICK_DYNAMIXEL.
+  bool pick_early_{false};          // Sent during REFINE_CUP; PICK_DYNAMIXEL has not taken it.
+  bool pick_holding_{false};        // PICK_HOLD feedback received.
+  bool pick_held_at_entry_{false};  // Already holding when PICK_DYNAMIXEL began.
+  bool pick_release_wanted_{false}, pick_cancel_wanted_{false};
+  std::string pick_release_error_;
+  TimePoint pick_sent_at_{}, pick_release_sent_at_{};
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pick_release_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture pick_release_future_;
+  struct DemoFinish {
+    bool success;
+    std::string code, detail;
+    bool resumable;
+  };
+  std::optional<DemoFinish> demo_finish_; // Sent once an unowned pick request has ended.
+  TimePoint demo_finish_deadline_{};
 
   // Cell rounds PICK_DYNAMIXEL -> HANDOVER -> APPROACH_CUP -> REFINE_CUP until the basket is empty.
   enum class BasketVerdict { Unknown, HasCell, EmptyConfirmed };

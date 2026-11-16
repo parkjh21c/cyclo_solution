@@ -37,6 +37,7 @@ from ffw_pick.clearance import (
 from ffw_pick.config import (
     ArmConfig, COMMAND_LINE, from_file, PickConfig, require, ros_parameters)
 from ffw_pick.gripper import joint_for, load_gripper
+from ffw_pick.hold import HOLD_MAX_AGE, HOLD_TIMEOUT, joints_moved, wait_for_release
 from ffw_pick.kinematics import Chain, FLIP, pose_parts, tip, urdf_links
 from ffw_pick.resources import PickResources
 import numpy as np
@@ -210,7 +211,7 @@ def summary_line(tally, ended):
 
 class PickTiming:
     """Seconds per phase of one pick request, closed by line() (no ROS here)."""
-    PHASES = ('wait', 'search', 'open', 'approach', 'close', 'lift')
+    PHASES = ('wait', 'search', 'hold', 'open', 'approach', 'close', 'lift')
 
     def __init__(self, clock=time.monotonic):
         self.clock = clock
@@ -616,7 +617,7 @@ def _main(argv, hooks, resources):
 
     def finger_walls(allowed):
         """Finger-wall contacts allowed or not in move_group's collision matrix, written both
-        ways each time (move_group keeps what an earlier run set). Checked by default again
+        ways when they differ (move_group keeps what an earlier run set). Checked by default again
         (user 2026-11-02, after fingers hit the basket). The whole matrix is sent back (a diff
         replaces it)."""
         request = GetPlanningScene.Request()
@@ -625,6 +626,7 @@ def _main(argv, hooks, resources):
         if result is None:
             return False
         acm = result.scene.allowed_collision_matrix
+        known = len(acm.entry_names)
         walls = [f'basket_{n}' for n, *_ in basket_boxes(task) if n.startswith('wall')]
         for name in finger_parts + walls:
             if name not in acm.entry_names:
@@ -634,10 +636,14 @@ def _main(argv, hooks, resources):
                 acm.entry_values.append(AllowedCollisionEntry(
                     enabled=[False] * len(acm.entry_names)))
         index = {n: i for i, n in enumerate(acm.entry_names)}
+        changed = len(acm.entry_names) != known  # names added above
         for f in finger_parts:
             for w in walls:
-                acm.entry_values[index[f]].enabled[index[w]] = allowed
-                acm.entry_values[index[w]].enabled[index[f]] = allowed
+                for a, b in ((f, w), (w, f)):
+                    changed |= acm.entry_values[index[a]].enabled[index[b]] != allowed
+                    acm.entry_values[index[a]].enabled[index[b]] = allowed
+        if not changed:  # no write: a stale whole-matrix write could undo another node's entries
+            return True
         scene = PlanningScene(is_diff=True, allowed_collision_matrix=acm)
         scene.robot_state.is_diff = True
         result = call(scene_client, ApplyPlanningScene.Request(scene=scene))
@@ -1219,6 +1225,48 @@ def _main(argv, hooks, resources):
                 return 'stop'
         return 'stop'
 
+    hold_state = {'done': False}  # hold_before_motion: held once in this request
+
+    def hold_and_recheck(option, approach, lift, now):
+        """Hold until released, then recheck: '' (move on), 'again' or 'stop'."""
+        hooks.begin_hold()  # before PICK_HOLD: a release sent on that feedback must find it holding
+        try:
+            hooks.phase('PICK_HOLD', f'Path ready ({option["label"]}); waiting for release')
+            with timing.measure('hold'):
+                verdict, waited = wait_for_release(hooks.released.is_set, hooks.check_cancel,
+                                                   time.monotonic, lambda: spin(0.05))
+        finally:
+            hooks.end_hold()
+        note(f'hold: {verdict} after {waited:.1f} s')
+        if verdict == 'timeout':
+            hooks.error_code = 'HOLD_TIMEOUT'
+            hooks.message = f'No release within {HOLD_TIMEOUT:.0f} s; the arm was not moved'
+            return 'stop'
+        if verdict == 'replan':
+            note(f'hold: released after more than {HOLD_MAX_AGE:.0f} s: observing again')
+            return 'again'
+        hooks.phase('PICK_RECHECK', 'Checking the held path in the current scene')
+        moved = joints_moved(now, current(), chain.moving(), pick_cfg.state_tolerance)
+        if moved:
+            note('hold: the arm moved while held (' + ', '.join(moved) + '): observing again')
+            return 'again'
+        fingers_for(option['opening'])
+        for seg in [s for s in approach + [lift] if s is not None]:
+            bad = bad_states(traj_states(seg, now))
+            if bad:
+                note(f'hold: the held path collides now ({bad}): observing again')
+                return 'again'
+        note('hold: arm and path unchanged; moving')
+        return ''
+
+    def pick_held():
+        """pick_once, observed again once when the held path no longer holds."""
+        status = pick_once()
+        if status == 'again':
+            count('reobserve')
+            status = pick_once()
+        return 'stop' if status == 'again' else status
+
     def pick_once():
         """One plan -> search -> (with --run) pick. 'ok' = planned (and with --run held),
         'empty hand', 'no path' (NO SOLUTION), 'basket empty', 'stuck' or 'stop'."""
@@ -1325,6 +1373,12 @@ def _main(argv, hooks, resources):
             print('plan ok: shown in RViz (Planned Path); the arm was not moved (--run to move)')
             return 'ok'
 
+        if hooks is not None and getattr(hooks, 'hold', False) and not hold_state['done']:
+            hold_state['done'] = True  # one hold per request: later passes move on
+            # commands during the hold are recorded (spin): the watch keeps its search start
+            verdict = hold_and_recheck(option, approach, lift, now)
+            if verdict:
+                return verdict
         # bringup's cyclo_teleoperation publishes there only while teleoperating: count messages
         spin(max(command_wait(watched_from, time.monotonic()), COMMAND_DRAIN))
         arrived = recent_commands(commands, time.monotonic())
@@ -1498,7 +1552,7 @@ def _main(argv, hooks, resources):
             count('cycle')
             if cycles != 1:
                 print(f'=== cycle {tally["cycle"]}' + (f'/{cycles}' if cycles else '') + ' ===')
-            status = pick_once()
+            status = pick_held()
             switches = 0
             while status == 'no path' and not args.no_plan:
                 if hooks:
@@ -1516,7 +1570,7 @@ def _main(argv, hooks, resources):
                     break
                 count('switch')
                 print(f'other object ({skipped.message})')
-                status = pick_once()
+                status = pick_held()
             if status == 'ok':
                 if args.run:
                     count('picked')

@@ -1,6 +1,8 @@
 # Internal backend. TaskManager arbitrates all demo motions.
 bool execute
 bool move_to_observe
+# Stop before the first motion until /dynamixel_pick/release (feedback PICK_HOLD).
+bool hold_before_motion
 ---
 bool success
 bool holding

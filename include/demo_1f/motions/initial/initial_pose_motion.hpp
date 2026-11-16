@@ -10,6 +10,8 @@ public:
       ApproachScenePort * scene = nullptr)
       : SequenceMotion(config, context, executor), context_(context), scene_(scene) {}
   bool is_ready_to_start(std::string & reason) const;
+  // One arm (and the lift) within the initial pose's tolerance and stationary.
+  bool at_initial_pose(const std::string & arm, std::string & reason) const;
   bool start(std::string & reason);
   void tick();
   void cancel();

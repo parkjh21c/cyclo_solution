@@ -137,6 +137,50 @@ class TestPickAction(unittest.TestCase):
             self.assertTrue(next_goal.accepted)
             self.assertTrue(self.wait(next_goal.get_result_async()).result.success)
 
+    def test_held_pick_moves_only_after_release(self):
+        release = self.client_node.create_client(Trigger, '/dynamixel_pick/release')
+        self.assertTrue(release.wait_for_service(timeout_sec=3))
+        holding, moved = threading.Event(), []
+
+        def engine(args, hooks):
+            self.assertTrue(hooks.hold)
+            hooks.phase('PICK_HOLD', 'test')
+            hooks.begin_hold()
+            holding.set()
+            while not hooks.released.wait(.01):
+                hooks.check_cancel()
+                self.assertFalse(hooks.motion_started)
+            hooks.end_hold()
+            hooks.motion_started = True
+            moved.append(True)
+            return 0
+        with patch('ffw_pick.pick_moveit.main', engine):
+            self.assertFalse(self.wait(release.call_async(Trigger.Request())).success)
+            goal = self.wait(self.client.send_goal_async(PickDynamixel.Goal(
+                execute=True, move_to_observe=False, hold_before_motion=True)))
+            self.assertTrue(goal.accepted)
+            self.assertTrue(holding.wait(2))
+            self.assertEqual(moved, [])
+            self.assertTrue(self.wait(release.call_async(Trigger.Request())).success)
+            self.assertTrue(self.wait(goal.get_result_async()).result.success)
+            self.assertEqual(moved, [True])
+            self.assertFalse(self.wait(release.call_async(Trigger.Request())).success)
+
+    def test_held_pick_never_moves_to_observe_and_hold_timeout_can_retry(self):
+        rejected = self.wait(self.client.send_goal_async(PickDynamixel.Goal(
+            execute=True, move_to_observe=True, hold_before_motion=True)))
+        self.assertFalse(rejected.accepted)
+
+        def engine(args, hooks):
+            hooks.error_code = 'HOLD_TIMEOUT'
+            return 1
+        with patch('ffw_pick.pick_moveit.main', engine):
+            goal = self.wait(self.client.send_goal_async(PickDynamixel.Goal(
+                execute=True, hold_before_motion=True)))
+            result = self.wait(goal.get_result_async()).result
+            self.assertTrue(result.retryable)
+            self.assertFalse(result.motion_started)
+
     def test_existing_client_can_request_again_after_backend_restart(self):
         with patch('ffw_pick.pick_moveit.main', return_value=0):
             first = self.send()

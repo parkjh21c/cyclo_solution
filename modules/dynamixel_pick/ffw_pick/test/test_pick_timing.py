@@ -25,7 +25,7 @@ def test_successful_pick_line():
         with timing.measure(phase):
             clock.now += seconds
     assert timing.line('ok') == (
-        'pick timing: init 2.1, plan 3.4 (1 call), wait 0.0, search 1.2, open 0.9,'
+        'pick timing: init 2.1, plan 3.4 (1 call), wait 0.0, search 1.2, hold 0.0, open 0.9,'
         ' approach 6.0, close 2.5, lift 3.1, other 0.5, total 19.7 s, result ok')
 
 
