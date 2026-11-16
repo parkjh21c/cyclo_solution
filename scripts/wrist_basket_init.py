@@ -11,6 +11,7 @@ from dataclasses import fields, replace
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from basket_observer_state import BasketObserverState, pose_change
 from ffw_grasp.grasp_planner import GraspParams, fit_basket, matrix_to_quat, merge_planes
 from ffw_pick.config import ros_parameters
 from ffw_pick.pick_moveit import basket_boxes
@@ -84,8 +85,12 @@ class WristBasketInit(Node):
             "observation_topic", "/ffw_vision/right_wrist/object_observations").value
         self.depth_scale = self.declare_parameter("depth_scale", 0.001).value
         self.frames = self.declare_parameter("frames", 5).value
-        self.min_move = self.declare_parameter("min_scene_move", 0.005).value  # m
-        self.min_turn = math.radians(self.declare_parameter("min_scene_turn_deg", 1.0).value)
+        min_move = self.declare_parameter("min_scene_move", 0.005).value  # m
+        min_turn = math.radians(self.declare_parameter("min_scene_turn_deg", 1.0).value)
+        jump_move = self.declare_parameter("jump_move", 0.010).value  # m
+        jump_turn = math.radians(self.declare_parameter("jump_turn_deg", 3.0).value)
+        # Log, jump confirmation and scene resend decisions.
+        self.state = BasketObserverState(min_move, min_turn, jump_move, jump_turn)
         files = [config_file("ffw_vision", "blue_basket.yaml"),
                  config_file("ffw_grasp", "dynamixel_top_grasp.yaml"),
                  config_file("ffw_grasp", "robot_calibration.yaml")]  # Same order as the planner.
@@ -101,23 +106,20 @@ class WristBasketInit(Node):
         self.colors, self.depths = {}, {}
         self.info, self.rays = None, None
         self.window = []  # (observation, color, depth)
-        self.applied = None  # (position, rotation) last sent to MoveIt
         self.scene_future = None
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.pose_pub = self.create_publisher(PoseStamped, "/demo/basket_pose", LATCHED)
         self.status = self.create_publisher(String, "/wrist_basket_init/status", 1)
         self.scene = self.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        # First: rclpy runs ready subscriptions in creation order (joints before observations).
+        self.create_subscription(JointState, "/joint_states", self.joint_state, 10)
         self.create_subscription(Image, color_topic, lambda m: self.store(self.colors, m),
                                  qos_profile_sensor_data)
         self.create_subscription(Image, depth_topic, lambda m: self.store(self.depths, m),
                                  qos_profile_sensor_data)
         self.create_subscription(CameraInfo, info_topic, self.camera_info, qos_profile_sensor_data)
         self.create_subscription(ObjectObservationArray, observation_topic, self.observation, 10)
-        self.create_subscription(JointState, "/joint_states", self.joint_state, 10)
-
-    def now(self):
-        return self.get_clock().now().nanoseconds / 1e9
 
     def store(self, buffer, message):
         buffer[stamp_to_ns(message.header.stamp)] = message
@@ -128,18 +130,26 @@ class WristBasketInit(Node):
         self.info = message
 
     def joint_state(self, message):
-        self.check.observe(self.now(), message.name, message.position)
+        # Message time, not callback time: same clock as the image stamps TF is looked up at.
+        self.check.observe(stamp_to_ns(message.header.stamp) / 1e9, message.name,
+                           message.position)
 
     def report(self, text):
         self.status.publish(String(data=text))
+        if self.state.status(text):
+            self.get_logger().info(f"status {text}")
 
     def observation(self, message):
-        reason = self.check.reason(self.now())
+        stamp = stamp_to_ns(message.header.stamp)
+        reason = self.check.reason(stamp / 1e9)  # Arm state when the image was taken.
+        held = self.state.candidate is not None
+        self.state.pose(reason is None)  # A return clears the applied scene so it is resent.
+        if held and self.state.candidate is None:
+            self.get_logger().info("basket candidate dropped: right arm left the initial pose")
         if reason is not None:
             self.window.clear()
             self.report(reason)
             return
-        stamp = stamp_to_ns(message.header.stamp)
         color, depth = self.colors.pop(stamp, None), self.depths.pop(stamp, None)
         if not message.has_support_plane or color is None or depth is None or self.info is None:
             return  # No table plane or no matching images for this frame.
@@ -181,22 +191,43 @@ class WristBasketInit(Node):
         # along the robot's y stays at +90) so the scene and the pour see one direction.
         if not -45.0 <= math.degrees(math.atan2(frame[1, 0], frame[0, 0])) < 135.0:
             frame[:, :2] *= -1.0  # 180 deg about the plane normal.
+        yaw = math.degrees(math.atan2(frame[1, 0], frame[0, 0]))
+        cut = f" cut {basket.cut}" if basket.cut else ""
+        applied = self.state.accepted
+        apply, dropped = self.state.screen(position, frame)
+        if dropped:
+            self.get_logger().info("basket candidate dropped: back near the applied value")
+        if not apply:
+            change = "n/a"
+            if applied is not None:
+                moved, turned = pose_change(applied, (position, frame))
+                change = f"{moved * 1000:.1f} mm {math.degrees(turned):.1f} deg"
+            self.get_logger().info(
+                f"basket candidate {position[0]:.3f} {position[1]:.3f} {position[2]:.3f}"
+                f" yaw {yaw:.1f} deg cut {basket.cut if basket.cut else 'no'}"
+                f" from applied {change}; not applied until a matching measurement")
+            return
         message = PoseStamped()
         message.header.frame_id = self.frame
         message.header.stamp = header.stamp
         message.pose = pose(position, frame)
         self.pose_pub.publish(message)
-        yaw = math.degrees(math.atan2(frame[1, 0], frame[0, 0]))
-        cut = f" cut {basket.cut}" if basket.cut else ""
-        self.report(f"BASKET {position[0]:.3f} {position[1]:.3f} {position[2]:.3f} yaw {yaw:.1f}{cut}")
+        self.status.publish(String(data=f"BASKET {position[0]:.3f} {position[1]:.3f} "
+                                        f"{position[2]:.3f} yaw {yaw:.1f}{cut}"))
+        first = self.state.first_after_return
+        log, moved = self.state.measured(position, frame)
+        if log:
+            self.get_logger().info(
+                f"basket {position[0]:.3f} {position[1]:.3f} {position[2]:.3f} yaw {yaw:.1f} deg"
+                f" stamp {header.stamp.sec}.{header.stamp.nanosec:09d}"
+                f" cut {basket.cut if basket.cut else 'no'}"
+                f" moved {'n/a' if moved is None else f'{moved:.1f}'} mm"
+                f"{' (first after return)' if first else ''}")
         self.update_scene(position, frame)
 
     def update_scene(self, position, frame):
-        if self.applied is not None:
-            moved = np.linalg.norm(position - self.applied[0])
-            turned = math.acos(np.clip((np.trace(self.applied[1].T @ frame) - 1) / 2, -1, 1))
-            if moved < self.min_move and turned < self.min_turn:
-                return
+        if not self.state.needs_scene(position, frame):
+            return
         if (self.scene_future is not None and not self.scene_future.done()) or \
                 not self.scene.service_is_ready():
             return  # The next measurement retries.
@@ -210,15 +241,19 @@ class WristBasketInit(Node):
                                              dimensions=[float(d) for d in dims])]
             obj.primitive_poses = [pose(np.zeros(3), np.eye(3))]
             scene.world.collision_objects.append(obj)
+        token = self.state.returns  # A return after sending makes this reply stale.
         self.scene_future = self.scene.call_async(ApplyPlanningScene.Request(scene=scene))
-        self.scene_future.add_done_callback(lambda f: self.scene_done(f, position, frame))
+        self.scene_future.add_done_callback(lambda f: self.scene_done(f, token, position, frame))
 
-    def scene_done(self, future, position, frame):
+    def scene_done(self, future, token, position, frame):
         result = future.result()
+        text = f"({position[0]:.3f} {position[1]:.3f} {position[2]:.3f})"
         if result is not None and result.success:
-            self.applied = (position, frame)  # Only a confirmed update stops the retries.
+            self.state.scene_applied(token, position, frame)  # Confirmed updates stop retries.
+            self.get_logger().info(f"scene: basket_* boxes applied at {text}")
         else:
-            self.report("SCENE_UPDATE_FAILED")
+            self.status.publish(String(data="SCENE_UPDATE_FAILED"))
+            self.get_logger().info(f"scene: basket_* update FAILED at {text}; next window retries")
 
 
 def main():

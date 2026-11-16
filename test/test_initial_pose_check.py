@@ -63,6 +63,22 @@ class InitialPoseCheckTest(unittest.TestCase):
         self.assertEqual(check.reason(now + 1.0), "JOINT_STATES_STALE")
         self.assertEqual(InitialPoseCheck("left").reason(0.0), "NO_JOINT_STATES")
 
+    def test_judged_at_image_stamp(self):
+        # The basket observer passes joint header stamps and the image stamp.
+        check = InitialPoseCheck("right")
+        last = self.feed(check, state(), start=0.0, end=2.0, step=0.01)
+        self.assertIsNone(check.reason(last - 0.15))  # Image older than the newest joint state.
+        self.assertIsNone(check.reason(last + 0.45))  # Within max_age of the image.
+        self.assertEqual(check.reason(last + 0.6), "JOINT_STATES_STALE")  # Real gap.
+
+    def test_moving_seen_at_image_stamp(self):
+        check = InitialPoseCheck("right")
+        moving = list(INITIAL_ARM)
+        moving[1] += 0.01
+        self.feed(check, state(), start=0.0, end=1.0, step=0.01)
+        check.observe(1.01, NAMES, state(right=moving))
+        self.assertEqual(check.reason(0.95), "MOVING: arm_r_joint2")  # Newest state still counts.
+
 
 if __name__ == "__main__":
     unittest.main()
