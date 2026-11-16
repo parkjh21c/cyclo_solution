@@ -25,6 +25,7 @@ object is skipped (ffw_grasp skip_last) and another one planned; empty fingers =
 Needs bringup (robot_description), pick_demo (grasp planner) and move_group; movej must not run.
 """
 import argparse
+import contextlib
 import math
 import os
 import sys
@@ -37,6 +38,7 @@ from ffw_pick.config import (
     ArmConfig, COMMAND_LINE, from_file, PickConfig, require, ros_parameters)
 from ffw_pick.gripper import joint_for, load_gripper
 from ffw_pick.kinematics import Chain, FLIP, pose_parts, tip, urdf_links
+from ffw_pick.resources import PickResources
 import numpy as np
 
 FINGER_OBJECT = 'finger_extension'  # id of the attached finger extension boxes
@@ -68,7 +70,7 @@ def pick_result_code(status, hooks=None):
             hooks.message = ''
             return 0
         if status == 'basket empty':
-            hooks.error_code = 'OBJECT_NOT_FOUND'
+            hooks.error_code = 'BASKET_EMPTY'  # Not retryable; the demo checks the basket view.
             hooks.message = 'Basket empty in consecutive observations'
         elif status == 'stuck':
             hooks.error_code = 'PICK_PLAN_FAILED'
@@ -194,6 +196,48 @@ def summary_line(tally, ended):
             f' objects after NO SOLUTION, {tally.get("replan", 0)} plans again; ended: {ended}')
 
 
+class PickTiming:
+    """Seconds per phase of one pick request, closed by line() (no ROS here)."""
+    PHASES = ('wait', 'search', 'open', 'approach', 'close', 'lift')
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.started = clock()
+        self.init = None  # s from main entry to the first plan request
+        self.plans = []  # s per plan call, frame collection included
+        self.spent = dict.fromkeys(self.PHASES, 0.0)
+
+    def mark_init(self):
+        if self.init is None:
+            self.init = self.clock() - self.started
+
+    @contextlib.contextmanager
+    def measure(self, phase):
+        """Adds the block's seconds to phase ('plan' = one more plan call), even on errors."""
+        begun = self.clock()
+        try:
+            yield
+        finally:
+            seconds = self.clock() - begun
+            if phase == 'plan':
+                self.plans.append(seconds)
+            else:
+                self.spent[phase] += seconds
+
+    def line(self, result):
+        total = self.clock() - self.started
+        init = total if self.init is None else self.init
+        plan = sum(self.plans)
+        calls = f'{len(self.plans)} call' + ('' if len(self.plans) == 1 else 's')
+        if len(self.plans) > 1:
+            calls += ': ' + ' + '.join(f'{s:.1f}' for s in self.plans)
+        other = total - init - plan - sum(self.spent.values())
+        parts = [f'init {init:.1f}', f'plan {plan:.1f} ({calls})']
+        parts += [f'{name} {self.spent[name]:.1f}' for name in self.PHASES]
+        parts.append(f'other {max(other, 0.0):.1f}')  # pose wait, scene, checks, spins
+        return f'pick timing: {", ".join(parts)}, total {total:.1f} s, result {result}'
+
+
 def first_gripper_hit(line, contacts, chunk=GRIPPER_KEYS):
     """(searched point, contacts(q[0])) at the first point not '', else None (or line.why)."""
     checked = 0
@@ -264,6 +308,20 @@ def time_path(chain, joints, states, tip_below, speed, accel, limits, dt=SAMPLE_
 
 
 def main(argv=None, hooks=None):
+    resources = getattr(hooks, 'resources', None)
+    owned = resources is None
+    if owned:
+        resources = PickResources()
+    try:
+        return _main(argv, hooks, resources)
+    finally:
+        resources.end_request()
+        if owned:
+            resources.close()
+
+
+def _main(argv, hooks, resources):
+    timing = PickTiming()  # One 'pick timing' line per request (server) or plan (command line).
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--urdf', default='',
                         help='URDF file (default: the robot_description topic)')
@@ -323,7 +381,6 @@ def main(argv=None, hooks=None):
         parser.error('--cycles needs --release-home and a new plan each cycle (no --no-plan)')
 
     import rclpy
-    from rclpy.action import ActionClient
     from control_msgs.action import FollowJointTrajectory
     from geometry_msgs.msg import Pose, PoseArray, PoseStamped
     from moveit_msgs.action import ExecuteTrajectory, MoveGroup, MoveGroupSequence
@@ -375,22 +432,16 @@ def main(argv=None, hooks=None):
     arm_joints, home_pose = list(arm_cfg.arm_joints), list(arm_cfg.home)
     finger_parts = [FINGER_OBJECT] + list(arm_cfg.finger_links)
 
-    from rclpy.context import Context
-    from rclpy.signals import SignalHandlerOptions
-    ros_context = Context()
-    rclpy.init(context=ros_context, signal_handler_options=SignalHandlerOptions.NO if hooks else None)
-    node = rclpy.create_node('pick_moveit', context=ros_context)
-    from rclpy.executors import SingleThreadedExecutor
-    worker_executor = SingleThreadedExecutor(context=ros_context)
-    worker_executor.add_node(node)
+    resources.start(signal_handlers=hooks is None)
+    ros_context, node, worker_executor = resources.context, resources.node, resources.executor
     got, poses = {}, {}
     latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
     if args.urdf:
         with open(args.urdf) as f:
             urdf = f.read()
     else:  # what robot_state_publisher (bringup) holds now
-        node.create_subscription(String, DESCRIPTION_TOPIC,
-                                 lambda m: got.update(urdf=m.data), latched)
+        resources.subscribe(String, DESCRIPTION_TOPIC,
+                            lambda m: got.update(urdf=m.data), latched)
         end = time.time() + 5.0
         while 'urdf' not in got and time.time() < end:
             worker_executor.spin_once(timeout_sec=0.1)
@@ -399,9 +450,6 @@ def main(argv=None, hooks=None):
                 hooks.error_code = 'ROBOT_DESCRIPTION_UNAVAILABLE'
                 hooks.message = f'No {DESCRIPTION_TOPIC}; bringup must publish the robot model'
             print(f'no {DESCRIPTION_TOPIC}: is bringup running? (or give --urdf)')
-            worker_executor.shutdown()
-            node.destroy_node()
-            ros_context.try_shutdown()
             return 1
         urdf = got.pop('urdf')
     chain = Chain(urdf, arm_cfg.base_frame, arm_cfg.end_effector_link)
@@ -421,34 +469,34 @@ def main(argv=None, hooks=None):
         got.setdefault('joints', {}).update(zip(message.name, message.position))
         for name in message.name:
             got.setdefault('joint_times', {})[name] = time.monotonic()
-    node.create_subscription(JointState, '/joint_states', receive_joints, qos_profile_sensor_data)
+    resources.subscribe(JointState, '/joint_states', receive_joints, qos_profile_sensor_data)
     for name in ('grasp', 'hover', 'basket'):
-        node.create_subscription(PoseStamped, f'{args.ns}/{name}_pose',
-                                 (lambda key: lambda m: poses.update({key: m}))(name), latched)
-    node.create_subscription(Float64, f'{args.ns}/gripper_opening',
-                             lambda m: got.update(opening=m.data), latched)
-    node.create_subscription(PoseArray, f'{args.ns}/grasp_candidates',
-                             lambda m: got.update(candidates=m), latched)
-    node.create_subscription(Float64MultiArray, f'{args.ns}/grasp_candidate_info',
-                             lambda m: got.update(info=list(m.data)), latched)
+        resources.subscribe(PoseStamped, f'{args.ns}/{name}_pose',
+                            (lambda key: lambda m: poses.update({key: m}))(name), latched)
+    resources.subscribe(Float64, f'{args.ns}/gripper_opening',
+                        lambda m: got.update(opening=m.data), latched)
+    resources.subscribe(PoseArray, f'{args.ns}/grasp_candidates',
+                        lambda m: got.update(candidates=m), latched)
+    resources.subscribe(Float64MultiArray, f'{args.ns}/grasp_candidate_info',
+                        lambda m: got.update(info=list(m.data)), latched)
     # object boxes and the basket ceiling: only logged against the chosen path (clearance_line)
-    node.create_subscription(MarkerArray, f'{args.ns}/scene_objects',
-                             lambda m: got.update(scene=m), latched)
-    plan_client = node.create_client(Trigger, f'{args.ns}/plan')
-    skip_client = node.create_client(Trigger, f'{args.ns}/skip_last')
-    clear_client = node.create_client(Trigger, f'{args.ns}/clear_skips')
-    scene_client = node.create_client(ApplyPlanningScene, '/apply_planning_scene')
-    get_scene_client = node.create_client(GetPlanningScene, '/get_planning_scene')
-    valid_client = node.create_client(GetStateValidity, '/check_state_validity')
-    sequence = ActionClient(node, MoveGroupSequence, '/sequence_move_group')
-    move_group = ActionClient(node, MoveGroup, '/move_action')
-    display = node.create_publisher(DisplayTrajectory, '/display_planned_path', 1)
-    execute = ActionClient(node, ExecuteTrajectory, '/execute_trajectory')
-    follow = ActionClient(node, FollowJointTrajectory, arm_cfg.gripper_action)
+    resources.subscribe(MarkerArray, f'{args.ns}/scene_objects',
+                        lambda m: got.update(scene=m), latched)
+    plan_client = resources.client(Trigger, f'{args.ns}/plan')
+    skip_client = resources.client(Trigger, f'{args.ns}/skip_last')
+    clear_client = resources.client(Trigger, f'{args.ns}/clear_skips')
+    scene_client = resources.client(ApplyPlanningScene, '/apply_planning_scene')
+    get_scene_client = resources.client(GetPlanningScene, '/get_planning_scene')
+    valid_client = resources.client(GetStateValidity, '/check_state_validity')
+    sequence = resources.action(MoveGroupSequence, '/sequence_move_group')
+    move_group = resources.action(MoveGroup, '/move_action')
+    display = resources.publisher(DisplayTrajectory, '/display_planned_path', 1)
+    execute = resources.action(ExecuteTrajectory, '/execute_trajectory')
+    follow = resources.action(FollowJointTrajectory, arm_cfg.gripper_action)
     active = {}  # goal handle of the motion running now, cancelled on Ctrl+C
     commands = []  # other commands on the arm controller topic (movej, teleoperation)
-    node.create_subscription(JointTrajectory, arm_cfg.controller_topic,
-                             lambda m: commands.append(m), 10)
+    resources.subscribe(JointTrajectory, arm_cfg.controller_topic,
+                        lambda m: commands.append(m), 10)
     scene_opening = {}  # finger boxes currently in the scene
     spent = {'checks': 0, 'check_s': 0.0, 'scene_s': 0.0}  # collision checks and scene updates
 
@@ -479,6 +527,8 @@ def main(argv=None, hooks=None):
             if hooks and client is scene_client and not future.done():
                 hooks.error_code = 'SCENE_UNCONFIRMED'
                 hooks.message = 'Planning-scene update outcome is unknown'
+            if not future.done():
+                client.remove_pending_request(future)
         return future.result()
 
     def current():
@@ -1110,12 +1160,15 @@ def main(argv=None, hooks=None):
                 count('replan')
                 print(f'  plan again in {pick_cfg.retry_wait:.0f} s'
                       f' ({attempt - 1}/{pick_cfg.plan_tries - 1})')
-                spin(pick_cfg.retry_wait)
+                with timing.measure('wait'):
+                    spin(pick_cfg.retry_wait)
             poses.clear()
             for key in ('opening', 'candidates', 'info'):
                 got.pop(key, None)
+            timing.mark_init()
             asked = time.time()
-            result = call(plan_client, Trigger.Request(), 20.0)
+            with timing.measure('plan'):
+                result = call(plan_client, Trigger.Request(), 20.0)
             message = result.message if result else 'view: no answer'
             print(f'plan: {message} ({time.time() - asked:.1f} s)')
             if hooks:
@@ -1170,6 +1223,7 @@ def main(argv=None, hooks=None):
             if stopped:
                 return stopped
         else:
+            timing.mark_init()
             spin(3.0, lambda: all(k in poses for k in ('grasp', 'hover', 'basket'))
                  and 'opening' in got and 'joints' in got and 'candidates' in got
                  and 'info' in got)
@@ -1214,7 +1268,8 @@ def main(argv=None, hooks=None):
             return 'stop'
 
         started = time.time()
-        found = search_approach(options, now, args.lift)
+        with timing.measure('search'):
+            found = search_approach(options, now, args.lift)
         print(f'search: {len(log)} tried in {time.time() - started:.1f} s')
         if args.verbose or found is None:
             print('\n'.join(f'  {line}' for line in log))
@@ -1264,12 +1319,15 @@ def main(argv=None, hooks=None):
               f' {close_joint:.3f} rad ({verification}), speed scaling {args.speed:.2f}')
 
         ask('open the gripper?')
-        run_gripper(open_joint, 'open')
+        with timing.measure('open'):
+            run_gripper(open_joint, 'open')
         for i, seg in enumerate(approach, 1):
             ask(f'approach {i}/{len(approach)}?')
-            run_trajectory(seg, f'approach {i}/{len(approach)}')
+            with timing.measure('approach'):
+                run_trajectory(seg, f'approach {i}/{len(approach)}')
         ask('close the gripper?')
-        run_gripper(close_joint, 'close')
+        with timing.measure('close'):
+            run_gripper(close_joint, 'close')
 
         def holding(label):
             # a box between the fingers stops them short of the command; empty = closed fully
@@ -1283,9 +1341,11 @@ def main(argv=None, hooks=None):
             return yes
         held = holding('closed') if hooks is None else False
         # from where the arm really stopped: MoveIt refuses a start 0.01 rad off the plan
-        lift, lift_how = plan_line(current(), lift_end, rotation, 'lift')
+        with timing.measure('lift'):
+            lift, lift_how = plan_line(current(), lift_end, rotation, 'lift')
         ask(f'lift {args.lift * 100:.0f} cm ({lift_how})?')
-        run_trajectory(lift, 'lift')
+        with timing.measure('lift'):
+            run_trajectory(lift, 'lift')
         if hooks is not None:
             # Demo completion is controller completion, not a joint-position grasp estimate.
             # Physical grasp verification will be provided by perception separately.
@@ -1368,6 +1428,7 @@ def main(argv=None, hooks=None):
         print('done')
         return 'ok'
 
+    outcome = {'result': 'stop'}  # pick_once status once the run loop ends
     try:
         if args.gripper is not None:  # no movej needed: the arm controller's action
             spin(1.0, lambda: 'joints' in got)
@@ -1452,8 +1513,10 @@ def main(argv=None, hooks=None):
         if status == 'basket empty':
             print('basket empty')
         print(summary_line(tally, ended))
+        outcome['result'] = status
         return pick_result_code(status, hooks)
     except RuntimeError as error:
+        outcome['result'] = 'error'
         if hooks:
             hooks.message = str(error)
             hooks.stop_confirmed = cancel_active()
@@ -1462,6 +1525,7 @@ def main(argv=None, hooks=None):
             print(summary_line(tally, 'stopped (motion or HOME path)'))
         return 1
     except KeyboardInterrupt:
+        outcome['result'] = 'cancelled'
         confirmed = cancel_active()
         if hooks:
             hooks.stop_confirmed = confirmed
@@ -1471,9 +1535,13 @@ def main(argv=None, hooks=None):
         print(f'interrupted: stop confirmed={confirmed}')
         return 1
     finally:
-        worker_executor.shutdown()
-        node.destroy_node()
-        ros_context.try_shutdown()
+        if hooks is not None or timing.init is not None:
+            code = f', code {hooks.error_code}' if hooks and hooks.error_code else ''
+            line = timing.line(outcome['result'] + code)
+            if hooks is not None:
+                node.get_logger().info(line)  # Server stdout is not kept in a log file.
+            else:
+                print(line)
 
 
 if __name__ == '__main__':

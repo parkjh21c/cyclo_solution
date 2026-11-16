@@ -11,7 +11,7 @@ def test_demo_failure_never_succeeds_in_preview_or_execution(status):
     hooks = SimpleNamespace(error_code='', message='')
     assert pick_result_code(status, hooks) == 1
     if status == 'basket empty':
-        assert hooks.error_code == 'OBJECT_NOT_FOUND'
+        assert hooks.error_code == 'BASKET_EMPTY'
     if status == 'stuck':
         assert hooks.error_code == 'PICK_PLAN_FAILED'
 

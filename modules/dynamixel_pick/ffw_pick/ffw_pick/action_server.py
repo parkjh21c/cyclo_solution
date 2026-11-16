@@ -10,11 +10,13 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from ffw_pick import pick_moveit
+from ffw_pick.resources import PickResources
 
 
 class PickRun:
-    def __init__(self, handle, stopping=None):
+    def __init__(self, handle, stopping=None, resources=None):
         self.handle = handle
+        self.resources = resources
         self.stopping = stopping or threading.Event()
         self.move_to_observe = handle.request.move_to_observe
         self.motion_started = False
@@ -37,6 +39,7 @@ class PickServer(Node):
         self.stopping = threading.Event()
         self.busy = False
         self.faulted = False
+        self.resources = PickResources()
         for name in ('arm', 'config', 'task', 'calibration', 'table', 'urdf'):
             self.declare_parameter(name + '_file', '')
         self.server = ActionServer(
@@ -53,7 +56,7 @@ class PickServer(Node):
         return GoalResponse.ACCEPT
 
     def execute(self, handle):
-        run = PickRun(handle, self.stopping)
+        run = PickRun(handle, self.stopping, self.resources)
         # The shared demo URDF owns both TCP extension and finger collisions.
         args = ['--home-lift', '0', '--no-finger-boxes']
         if handle.request.execute:
@@ -95,6 +98,10 @@ class PickServer(Node):
         else:
             handle.abort(result)
         return result
+
+    def destroy_node(self):
+        self.resources.close()
+        return super().destroy_node()
 
 
 def main():
