@@ -1,10 +1,13 @@
 #include "demo_1f/runtime/config.hpp"
 #include "demo_1f/runtime/execution/trajectory_executor.hpp"
+#include "demo_1f/runtime/execution/round_trip_path.hpp"
 #include "demo_1f/tasks/task_manager.hpp"
+#include <chrono>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 #include <sstream>
+#include <shape_msgs/msg/solid_primitive.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <thread>
@@ -571,6 +574,7 @@ protected:
     }
     timer = mock->create_wall_timer(5ms, [this]() {
       auto feedback = sample();
+      if (transform_feedback) transform_feedback(feedback);
       if (++feedback_count % 2) {
         for (size_t i = 0; i < feedback.name.size(); ++i) {
           for (const auto & [side, arm] : config.arms) {
@@ -628,6 +632,7 @@ protected:
                 target.time_from_start = rclcpp::Duration::from_seconds(.2);
               }
               path.points = {initial, target};
+              if (transform_plan) transform_plan(*result);
             } else {
               for (const auto & constraint : goal.request.goal_constraints) {
                 for (const auto & joint : constraint.joint_constraints) {
@@ -655,10 +660,13 @@ protected:
           if (execute_error == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
             const auto & path = (*it)->get_goal()->trajectory.joint_trajectory;
             for (size_t i = 0; i < path.joint_names.size(); ++i) {
-              positions.at(path.joint_names[i]) = path.points.back().positions[i];
+              if (path.joint_names[i] != omitted_joint) {
+                positions.at(path.joint_names[i]) = path.points.back().positions[i];
+              }
             }
           }
           (*it)->succeed(result);
+          ++completed_executions;
           it = executions.erase(it);
         } else {
           ++it;
@@ -749,6 +757,8 @@ protected:
           response->scene.name = "mock_scene";
           response->scene.robot_model_name = "smoothing_mock";
           response->scene.robot_state.joint_state = sample();
+          ++scene_requests;
+          if (transform_scene) transform_scene(response->scene);
         });
     execution_server = rclcpp_action::create_server<moveit_msgs::action::ExecuteTrajectory>(
         mock,
@@ -806,6 +816,11 @@ protected:
   int execute_error{moveit_msgs::msg::MoveItErrorCodes::SUCCESS};
   bool auto_execute{true};
   double plan_start_offset{0};
+  std::function<void(Move::Result &)> transform_plan;
+  std::function<void(sensor_msgs::msg::JointState &)> transform_feedback;
+  std::function<void(moveit_msgs::msg::PlanningScene &)> transform_scene;
+  size_t scene_requests{0};
+  size_t completed_executions{0};
   std::shared_ptr<rclcpp::Node> mock;
   rclcpp::executors::SingleThreadedExecutor ros;
   rclcpp_action::Server<Move>::SharedPtr move_server;
@@ -1007,6 +1022,97 @@ TEST_F(RosFixture, PlanFailureAfterTheArmMovedIsNotReplanned) {
   EXPECT_EQ(move_goals.size(), 1u);
   EXPECT_NE(executor.result().detail.find("(no fallback: the arm moved)"), std::string::npos)
       << executor.result().detail;
+}
+
+Step paired_pose() {
+  Step pose;
+  pose.name = "MOVE_TO_OBSERVE";
+  pose.type = "pose";
+  pose.arm = "left";
+  pose.position_only = true;
+  pose.frame = "base_link";
+  pose.target = {0.3, 0.2, 0.8, 0, 0, 0, 1};
+  pose.timeout = 5;
+  return pose;
+}
+
+std::vector<Step> right_home_steps() {
+  Step via, home;
+  via.name = "giver_home_via";
+  home.name = "giver_home";
+  for (auto * step : {&via, &home}) {
+    step->type = "joint";
+    step->arm = "right";
+    step->timeout = 5;
+  }
+  via.target = std::vector<double>(7, 0.2);
+  via.tolerance = .05;
+  home.target = std::vector<double>(7, 0.3);
+  home.tolerance = .01;
+  return {via, home};
+}
+
+TEST_F(RosFixture, PairedApproachPlansThePoseOnceAndExecutesBothArmsTogether) {
+  enable_smoothing();
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_paired(paired_pose(), right_home_steps()))
+      << executor.result().detail;
+  ASSERT_TRUE(until([&] {
+    executor.tick();
+    return executor.result().state != ExecutionState::Running;
+  }, 5.0));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  ASSERT_EQ(move_goals.size(), 1u); // the left pose only, plan-only
+  EXPECT_TRUE(move_goals[0].planning_options.plan_only);
+  ASSERT_EQ(execution_goals.size(), 1u);
+  const auto & names = execution_goals[0].trajectory.joint_trajectory.joint_names;
+  EXPECT_EQ(names.size(), 14u);
+  EXPECT_EQ(names.front(), "left_joint0");
+  EXPECT_EQ(names.back(), "right_joint6");
+  EXPECT_NEAR(positions.at("right_joint3"), 0.3, 1e-6);
+  EXPECT_NEAR(positions.at("left_joint3"), 0.1, 1e-6);
+}
+
+TEST_F(RosFixture, PairedPlanFailureIsReportedAsBeforeMotion) {
+  enable_smoothing();
+  move_error = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_paired(paired_pose(), right_home_steps()));
+  ASSERT_TRUE(until([&] {
+    executor.tick();
+    return executor.result().state != ExecutionState::Running;
+  }, 5.0));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "PAIRED_BEFORE_MOTION") << executor.result().detail;
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RosFixture, PairedExecutionFailureKeepsItsCode) {
+  enable_smoothing();
+  execute_error = moveit_msgs::msg::MoveItErrorCodes::CONTROL_FAILED;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_paired(paired_pose(), right_home_steps()));
+  ASSERT_TRUE(until([&] {
+    executor.tick();
+    return executor.result().state != ExecutionState::Running;
+  }, 5.0));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "EXECUTION_FAILED") << executor.result().detail;
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RosFixture, PairedNeedsSmoothMotionAndTheOtherArmsJointSteps) {
+  TrajectoryExecutor executor(*node, config, *context); // smooth_motion off
+  warmup(executor);
+  EXPECT_FALSE(executor.start_paired(paired_pose(), right_home_steps()));
+  EXPECT_EQ(executor.result().code, "PAIRED_BEFORE_MOTION");
+  auto same_arm = right_home_steps();
+  for (auto & step : same_arm) step.arm = "left";
+  EXPECT_FALSE(executor.start_paired(paired_pose(), same_arm));
+  EXPECT_TRUE(move_goals.empty());
 }
 
 TEST_F(RosFixture, HeldGripperDriftFailsAtTheDefaultToleranceWithNumbers) {
@@ -2113,6 +2219,913 @@ TEST_F(RosFixture, CorrectionRejectsUnexpectedExecutionEvenOnPlanSuccess) {
   ASSERT_TRUE(until([&]() { return executor.result().state != ExecutionState::Running; }, 2., [&]() { executor.tick(); }));
   EXPECT_EQ(executor.result().code, "PATH_PREPARATION_FAILED");
   EXPECT_TRUE(execution_goals.empty());
+}
+
+class RoundTripFixture : public RosFixture {
+protected:
+  void SetUp() override {
+    RosFixture::SetUp();
+    for (const auto * name : {"left_wheel_drive", "right_wheel_drive", "rear_wheel_drive"}) {
+      positions[name] = 0;
+    }
+    enable_smoothing();
+    config.arms.at("right").tcp = "right_joint0_link";
+    transform_plan = [this](Move::Result & result) {
+      auto & path = result.planned_trajectory.joint_trajectory;
+      path.joint_names = config.arms.at("right").joints;
+      std::reverse(path.joint_names.begin(), path.joint_names.end());
+      path.header.stamp.sec = 321;
+      path.points.clear();
+      const std::vector<int64_t> times = {0, 700000001, 2300000007};
+      for (size_t i = 0; i < times.size(); ++i) {
+        trajectory_msgs::msg::JointTrajectoryPoint point;
+        point.time_from_start = rclcpp::Duration(std::chrono::nanoseconds(times[i]));
+        for (const auto & name : path.joint_names) {
+          point.positions.push_back(positions.at(name) + (i == 0 ? 0 : i == 1 ? .012 : .04));
+          point.velocities.push_back(i == 1 ? .025 : 0);
+          point.accelerations.push_back(i == 1 ? .006 : 0);
+        }
+        path.points.push_back(point);
+      }
+      planned = result.planned_trajectory;
+    };
+    tilt.name = "pour_tilt";
+    tilt.type = "linear";
+    tilt.arm = "right";
+    tilt.frame = config.planning_frame;
+    tilt.target = {0, 0, 0, 0, 0, std::sin(.04 / 2), std::cos(.04 / 2)};
+    tilt.timeout = 4;
+    tilt.velocity_scale = tilt.acceleration_scale = .5;
+    hold.name = "pour_hold";
+    hold.type = "wait";
+    hold.arm = "right";
+    hold.duration = .05;
+    hold.timeout = 1;
+    untilt = tilt;
+    untilt.name = "pour_untilt";
+    untilt.target = {0, 0, 0, 0, 0, 0, 1};
+  }
+
+  bool finish(TrajectoryExecutor & executor) {
+    return until([&]() {
+      const auto state = executor.result().state;
+      return state != ExecutionState::Running && state != ExecutionState::Cancelling;
+    }, 3., [&]() { executor.tick(); });
+  }
+
+  bool reach(TrajectoryExecutor & executor, const std::string & phase) {
+    return until([&]() { return executor.result().phase == phase; }, 3.,
+        [&]() { executor.tick(); });
+  }
+
+  void attached_cup(bool obstacle) {
+    shape_msgs::msg::SolidPrimitive sphere;
+    sphere.type = sphere.SPHERE;
+    sphere.dimensions = {.03};
+    geometry_msgs::msg::Pose pose;
+    pose.orientation.w = 1;
+    moveit_msgs::msg::AttachedCollisionObject cup;
+    cup.link_name = "right_joint0_link";
+    cup.object.header.frame_id = cup.link_name;
+    cup.object.id = "round_trip_cup";
+    cup.object.primitives = {sphere};
+    cup.object.primitive_poses = {pose};
+    cup.touch_links = {cup.link_name};
+    scene_response.robot_state.attached_collision_objects = {cup};
+    if (obstacle) {
+      moveit_msgs::msg::CollisionObject wall;
+      wall.header.frame_id = "base_link";
+      wall.id = "round_trip_wall";
+      wall.primitives = {sphere};
+      wall.primitive_poses = {pose};
+      scene_response.world.collision_objects = {wall};
+    }
+  }
+
+  Step tilt, hold, untilt;
+  moveit_msgs::msg::RobotTrajectory planned;
+};
+
+class RoundTripWheelFixture : public RoundTripFixture {
+protected:
+  void SetUp() override {
+    RoundTripFixture::SetUp();
+    auto_execute = false;
+  }
+
+  bool complete_with_wheel_speed(
+      TrajectoryExecutor & executor, size_t count, double velocity = .034558) {
+    if (!until([&]() { return execution_goals.size() == count; }, 3.,
+            [&]() { executor.tick(); })) return false;
+    auto_execute = true;
+    // Pump action callbacks without advancing the phase while the result arrives.
+    if (!until([&]() { return completed_executions == count; })) return false;
+    auto_execute = false;
+    velocities["left_wheel_drive"] = velocity;
+    if (!until([&]() {
+          return context->snapshot().joints.at("left_wheel_drive").velocity == velocity;
+        })) return false;
+    executor.tick();
+    return true;
+  }
+
+  void stop_wheel() {
+    velocities["left_wheel_drive"] = 0;
+    refresh();
+  }
+};
+
+TEST_F(RoundTripWheelFixture, TransientWheelSpeedAfterEachSuccessWaitsBeforeAdvancing) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  EXPECT_EQ(execution_goals.size(), 1u);
+  stop_wheel();
+  executor.tick();
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 2));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  stop_wheel();
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded);
+  EXPECT_EQ(execution_goals.size(), 2u);
+  EXPECT_EQ(move_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, PersistentWheelSpeedTimesOutWithoutExecutingReturn) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  const auto waiting = Clock::now();
+  ASSERT_TRUE(until([&]() { return executor.result().state == ExecutionState::Cancelling; },
+      2., [&]() { executor.tick(); }));
+  EXPECT_GE(elapsed(waiting), .95);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_NE(executor.result().detail.find("Wheel stabilization timed out"), std::string::npos);
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  EXPECT_EQ(execution_goals.size(), 1u);
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, RepeatedWheelSpeedResetsTheContinuousStableWindow) {
+  config.settle_time = .12;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    stop_wheel();
+    const auto stable_started = Clock::now();
+    ASSERT_TRUE(until([&]() { return elapsed(stable_started) >= .04; }, .5,
+        [&]() { executor.tick(); }));
+    EXPECT_EQ(executor.result().phase, "pour_tilt");
+    velocities["left_wheel_drive"] = .034558;
+    refresh();
+    executor.tick();
+    EXPECT_EQ(executor.result().state, ExecutionState::Running);
+    EXPECT_TRUE(executor.result().last_completed_step.empty());
+  }
+  stop_wheel();
+  executor.tick();
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, PersistentReturnWheelSpeedNeverReportsSuccess) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  stop_wheel();
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 2));
+  ASSERT_TRUE(until([&]() { return executor.result().state == ExecutionState::Cancelling; },
+      2., [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelMotionStillBlocksStopConfirmationAfterGraceExpires) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::StopUnconfirmed);
+  EXPECT_EQ(executor.result().code, "STOP_UNCONFIRMED");
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelSpeedDuringExecutionWaitsForResultThenSettles) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 3.,
+      [&]() { executor.tick(); }));
+  velocities["left_wheel_drive"] = .034558;
+  ASSERT_TRUE(until([&]() {
+    return context->snapshot().joints.at("left_wheel_drive").velocity == .034558;
+  }));
+  // Speed over the limit before the result keeps the tilt running.
+  const auto kicked = Clock::now();
+  ASSERT_TRUE(until([&]() { return elapsed(kicked) >= .1; }, .5, [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_EQ(completed_executions, 0u);
+  auto_execute = true;
+  ASSERT_TRUE(until([&]() { return completed_executions == 1; }));
+  auto_execute = false;
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  stop_wheel();
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().last_completed_step, "pour_tilt");
+  EXPECT_EQ(execution_goals.size(), 1u);
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelPositionDuringExecutionStillCancelsImmediately) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 3.,
+      [&]() { executor.tick(); }));
+  positions["left_wheel_drive"] += 2 * config.continuous_start_tolerance;
+  refresh();
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_NE(executor.result().detail.find("start/state mismatch"), std::string::npos);
+  EXPECT_EQ(completed_executions, 0u);
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelSpeedFromExecutionPersistingAfterResultTimesOut) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 3.,
+      [&]() { executor.tick(); }));
+  velocities["left_wheel_drive"] = .034558;
+  ASSERT_TRUE(until([&]() {
+    return context->snapshot().joints.at("left_wheel_drive").velocity == .034558;
+  }));
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  auto_execute = true;
+  ASSERT_TRUE(until([&]() { return completed_executions == 1; }));
+  auto_execute = false;
+  const auto waiting = Clock::now();
+  ASSERT_TRUE(until([&]() { return executor.result().state == ExecutionState::Cancelling; },
+      2., [&]() { executor.tick(); }));
+  EXPECT_GE(elapsed(waiting), .95);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_NE(executor.result().detail.find("Wheel stabilization timed out"), std::string::npos);
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, StaleWheelFeedbackDuringStabilizationCancelsBeforeGraceExpires) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  positions.erase("left_wheel_drive");
+  ASSERT_TRUE(until([&]() { return executor.result().state == ExecutionState::Cancelling; },
+      .8, [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_NE(executor.result().detail.find("Missing fresh round-trip feedback"), std::string::npos);
+  positions["left_wheel_drive"] = 0;
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, UnknownWheelVelocityAfterSuccessIsFeedbackFailure) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  positions.erase("left_wheel_drive");
+  const auto interrupted = Clock::now();
+  ASSERT_TRUE(until([&]() { return elapsed(interrupted) > config.state_max_age + .02; }));
+  positions["left_wheel_drive"] = 0;
+  auto feedback = sample();
+  feedback.velocity.clear();
+  context->observe_joints(feedback);
+  ASSERT_FALSE(context->snapshot().joints.at("left_wheel_drive").velocity);
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  EXPECT_NE(executor.result().detail.find("Missing finite wheel velocity"), std::string::npos);
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelSpeedDoesNotMaskAnotherJointsPositionMismatch) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  positions["right_gripper"] += 2 * config.continuous_start_tolerance;
+  refresh();
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  EXPECT_NE(executor.result().detail.find("right_gripper"), std::string::npos);
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, NonWheelVelocityAfterSuccessStillCancelsImmediately) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  velocities["left_joint0"] = .034558;
+  refresh();
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  EXPECT_NE(executor.result().detail.find("left_joint0"), std::string::npos);
+  velocities["left_joint0"] = 0;
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, WheelPositionMismatchIsNotEligibleForStabilization) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  positions["left_wheel_drive"] += 2 * config.continuous_start_tolerance;
+  refresh();
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_NE(executor.result().detail.find("start/state mismatch"), std::string::npos);
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripWheelFixture, CancellationDuringWheelStabilizationNeverAdvances) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(complete_with_wheel_speed(executor, 1));
+  executor.cancel();
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelling);
+  stop_wheel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, PlansOnceAndExecutesExactTimeReversalTwice) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(executor.result().last_completed_step, "pour_untilt");
+  ASSERT_EQ(move_goals.size(), 1u);
+  EXPECT_TRUE(move_goals[0].planning_options.plan_only);
+  EXPECT_EQ(move_goals[0].request.group_name, "right");
+  EXPECT_EQ(move_goals[0].request.planner_id, "LIN");
+  EXPECT_FALSE(move_goals[0].request.start_state.is_diff);
+  ASSERT_EQ(execution_goals.size(), 2u);
+  auto original = planned;
+  original.joint_trajectory.header.stamp = builtin_interfaces::msg::Time{};
+  EXPECT_EQ(execution_goals[0].trajectory, original);
+  EXPECT_EQ(execution_goals[0].trajectory.joint_trajectory.points,
+      planned.joint_trajectory.points);
+  const auto reversed = reverse_round_trip_path(execution_goals[0].trajectory,
+      config.arms.at("right").joints);
+  EXPECT_EQ(execution_goals[1].trajectory, reversed);
+  EXPECT_EQ(execution_goals[0].trajectory.joint_trajectory.points.back().time_from_start,
+      execution_goals[1].trajectory.joint_trajectory.points.back().time_from_start);
+  EXPECT_EQ(scene_requests, 3u);
+  for (const auto & goal : execution_goals) {
+    EXPECT_EQ(goal.trajectory.joint_trajectory.joint_names, planned.joint_trajectory.joint_names);
+    EXPECT_EQ(goal.trajectory.joint_trajectory.header.stamp.sec, 0);
+  }
+}
+
+TEST_F(RoundTripFixture, WorksWithoutEnablingSmoothing) {
+  config.smooth_motion = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+}
+
+TEST_F(RoundTripFixture, DoesNotRevalidatePilzDynamicsWithReturnScaling) {
+  untilt.velocity_scale = .0001;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(executor.result().last_completed_step, "pour_untilt");
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripFixture, PlanFailureIsRetryableButStateAndServiceErrorsAreNot) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  for (const int code : {moveit_msgs::msg::MoveItErrorCodes::NO_IK_SOLUTION,
+           moveit_msgs::msg::MoveItErrorCodes::ROBOT_STATE_STALE,
+           moveit_msgs::msg::MoveItErrorCodes::COMMUNICATION_FAILURE}) {
+    move_error = code;
+    ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+    ASSERT_TRUE(finish(executor));
+    EXPECT_EQ(executor.result().retryable_before_motion,
+        code == moveit_msgs::msg::MoveItErrorCodes::NO_IK_SOLUTION);
+    EXPECT_TRUE(execution_goals.empty());
+  }
+}
+
+TEST_F(RoundTripFixture, GenericPlanFailureIsRetryableBeforeMotion) {
+  move_error = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  ASSERT_EQ(move_goals.size(), 1u);
+  EXPECT_TRUE(move_goals.front().planning_options.plan_only);
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "ROUND_TRIP_PLAN_FAILED");
+  EXPECT_TRUE(executor.result().retryable_before_motion);
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, GenericPlanFailureWithExecutionTraceIsNotRetryable) {
+  move_error = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
+  move_result_has_execution = true;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  ASSERT_EQ(move_goals.size(), 1u);
+  EXPECT_TRUE(move_goals.front().planning_options.plan_only);
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, TiltExecutionFailureIsNeverRetryableEvenIfArmIsUnmoved) {
+  execute_error = moveit_msgs::msg::MoveItErrorCodes::CONTROL_FAILED;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_EQ(execution_goals.size(), 1u);
+  EXPECT_EQ(move_goals.size(), 1u);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+}
+
+TEST_F(RoundTripFixture, HoldStartsAfterTheTiltStopsAndReturnStaysRunningUntilSettled) {
+  auto_execute = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  auto_execute = true;
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  EXPECT_EQ(executor.result().last_completed_step, "pour_tilt");
+  auto_execute = false;
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 2; }, 2.,
+      [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  auto_execute = true;
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded);
+}
+
+TEST_F(RoundTripFixture, StartMismatchAfterHoldPreventsReturnExecution) {
+  transform_scene = [this](moveit_msgs::msg::PlanningScene &) {
+    if (scene_requests == 3) {
+      positions.at(config.arms.at("right").joints[0]) += .1;
+      context->observe_joints(sample());
+    }
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, LatestSceneCollisionAfterHoldPreventsReturnExecution) {
+  attached_cup(false);
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  attached_cup(true);
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().code, "ROUND_TRIP_INVALID") << executor.result().detail;
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, AttachedCupAndAllowedContactsAreUsedDuringValidation) {
+  attached_cup(true);
+  scene_response.allowed_collision_matrix.entry_names = {"round_trip_cup", "round_trip_wall"};
+  moveit_msgs::msg::AllowedCollisionEntry entry;
+  entry.enabled = {true, true};
+  scene_response.allowed_collision_matrix.entry_values = {entry, entry};
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripFixture, ReturnExecutionFailureReportsHoldAsLastCompleted) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  execute_error = moveit_msgs::msg::MoveItErrorCodes::CONTROL_FAILED;
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_EQ(execution_goals.size(), 2u);
+  EXPECT_EQ(move_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, CancelDuringPlanningIgnoresLateCallbacksAndNextRunPlansAgain) {
+  auto_complete = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return move_goals.size() == 1; }, 2., [&]() { executor.tick(); }));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_TRUE(execution_goals.empty());
+  auto_complete = true;
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(move_goals.size(), 2u);
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripFixture, CancelDuringValidationNeverExecutesTilt) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() {
+    return executor.result().detail.find("Validating tilt") != std::string::npos;
+  }, 2.));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, CancelDuringTiltNeverHoldsOrReturns) {
+  auto_execute = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, CancelDuringHoldNeverReturns) {
+  hold.duration = .5;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_EQ(executor.result().last_completed_step, "pour_tilt");
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, CancelDuringReturnValidationNeverExecutesReturn) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_untilt"));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, CancelDuringReturnNeverReportsSuccess) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  auto_execute = false;
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 2; }, 2.,
+      [&]() { executor.tick(); }));
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripFixture, HoldStateChangeFailsWithoutReturning) {
+  hold.duration = .5;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  positions.at(config.arms.at("left").joints[0]) += .1;
+  context->observe_joints(sample());
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_EQ(executor.result().phase, "pour_hold");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_tilt");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, HeldGripperDriftUsesTheOriginalPlanningStart) {
+  config.require_passive_gripper_stationary = false;
+  config.held_gripper_start_tolerance = .05;
+  const auto grip = config.arms.at("right").gripper_joint;
+  const double original = positions.at(grip);
+  transform_scene = [this, grip, original](moveit_msgs::msg::PlanningScene &) {
+    if (scene_requests >= 2) {
+      positions.at(grip) = original + (scene_requests == 2 ? .03 : .06);
+      context->observe_joints(sample());
+    }
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().code, "ROBOT_STATE_INVALID");
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  ASSERT_EQ(execution_goals.size(), 1u);
+  const auto & names = execution_goals[0].trajectory.joint_trajectory.joint_names;
+  EXPECT_EQ(std::find(names.begin(), names.end(), grip), names.end());
+}
+
+TEST_F(RoundTripFixture, MissingSceneServiceNeverAllowsAngleFallback) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  scene_server.reset();
+  ASSERT_TRUE(until([&]() {
+    std::string reason;
+    return !executor.ready(config.motion_sequences.at("left_to_right"), reason);
+  }));
+  EXPECT_FALSE(executor.start_round_trip(tilt, hold, untilt));
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, PlanningTimeoutCancelsAndNeverExecutes) {
+  auto_complete = false;
+  tilt.timeout = .2;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "TIMEOUT");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, ExecutionTimeoutCannotFallBackToAnotherAngle) {
+  auto_execute = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  ASSERT_TRUE(until([&]() {
+    return executor.result().state != ExecutionState::Running &&
+        executor.result().state != ExecutionState::Cancelling;
+  }, 5., [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_EQ(executor.result().code, "TIMEOUT");
+  EXPECT_FALSE(executor.result().retryable_before_motion);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, UnconfirmedStopRemainsLatchedAgainstLateActionResults) {
+  auto_execute = false;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return execution_goals.size() == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  timer->cancel();
+  executor.cancel();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::StopUnconfirmed);
+  EXPECT_FALSE(executor.start_round_trip(tilt, hold, untilt));
+  timer->reset();
+  auto_execute = true;
+  ASSERT_TRUE(until([&]() { return executions.empty(); }));
+  executor.tick();
+  EXPECT_EQ(executor.result().state, ExecutionState::StopUnconfirmed);
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, EveryNewRoundTripPlansFromItsOwnMeasuredStart) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  ASSERT_EQ(executor.result().state, ExecutionState::Succeeded);
+  for (const auto & name : config.arms.at("right").joints) positions.at(name) += .2;
+  context->observe_joints(sample());
+  tilt.target[5] = std::sin(.24 / 2);
+  tilt.target[6] = std::cos(.24 / 2);
+  untilt.target[5] = std::sin(.2 / 2);
+  untilt.target[6] = std::cos(.2 / 2);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(move_goals.size(), 2u);
+  ASSERT_EQ(execution_goals.size(), 4u);
+  EXPECT_NE(execution_goals[0].trajectory.joint_trajectory.points.front().positions,
+      execution_goals[2].trajectory.joint_trajectory.points.front().positions);
+  EXPECT_EQ(execution_goals[3].trajectory,
+      reverse_round_trip_path(execution_goals[2].trajectory, config.arms.at("right").joints));
+}
+
+TEST_F(RoundTripFixture, ActionSuccessStillRequiresEndpointStopForTiltAndReturn) {
+  size_t moving_goal = 1;
+  transform_feedback = [this, &moving_goal](sensor_msgs::msg::JointState & feedback) {
+    if (moving_goal == 0 || execution_goals.size() != moving_goal) return;
+    const auto & arm = config.arms.at("right").joints;
+    for (size_t i = 0; i < feedback.name.size(); ++i) {
+      if (std::find(arm.begin(), arm.end(), feedback.name[i]) != arm.end()) {
+        feedback.velocity[i] = .2;
+      }
+    }
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return completed_executions == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  moving_goal = 0;
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  moving_goal = 2;
+  ASSERT_TRUE(until([&]() { return completed_executions == 2; }, 2.,
+      [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_untilt");
+  EXPECT_EQ(executor.result().last_completed_step, "pour_hold");
+  moving_goal = 0;
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded);
+}
+
+TEST_F(RoundTripFixture, ActionSuccessWithoutTiltEndpointDoesNotStartHold) {
+  omitted_joint = config.arms.at("right").joints[0];
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(until([&]() { return completed_executions == 1; }, 2.,
+      [&]() { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Running);
+  EXPECT_EQ(executor.result().phase, "pour_tilt");
+  EXPECT_TRUE(executor.result().last_completed_step.empty());
+  positions.at(omitted_joint) += .04;
+  ASSERT_TRUE(reach(executor, "pour_hold"));
+  omitted_joint.clear();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded);
+}
+
+TEST_F(RoundTripFixture, AttachedCupCollisionBeforeTiltNeverExecutes) {
+  attached_cup(true);
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().code, "ROUND_TRIP_INVALID") << executor.result().detail;
+  EXPECT_TRUE(executor.result().retryable_before_motion);
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(RoundTripFixture, ExecutesOriginalJerkViolationWithoutRetiming) {
+  const auto normal_plan = transform_plan;
+  transform_plan = [this, normal_plan](Move::Result & result) {
+    normal_plan(result);
+    auto & trajectory = result.planned_trajectory.joint_trajectory;
+    for (size_t i = 0; i < trajectory.points.size(); ++i) {
+      trajectory.points[i].time_from_start = rclcpp::Duration::from_seconds(i * .01);
+    }
+    planned = result.planned_trajectory;
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  ASSERT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  ASSERT_EQ(execution_goals.size(), 2u);
+  EXPECT_NO_THROW(validate_round_trip_path(planned, config.arms.at("right").joints));
+  EXPECT_EQ(execution_goals[0].trajectory.joint_trajectory.points,
+      planned.joint_trajectory.points);
+  EXPECT_EQ(execution_goals[1].trajectory,
+      reverse_round_trip_path(execution_goals[0].trajectory, config.arms.at("right").joints));
+  ASSERT_EQ(move_goals.size(), 1u);
+  EXPECT_DOUBLE_EQ(move_goals[0].request.max_velocity_scaling_factor, tilt.velocity_scale);
+  EXPECT_DOUBLE_EQ(move_goals[0].request.max_acceleration_scaling_factor, tilt.acceleration_scale);
+}
+
+TEST_F(RoundTripFixture, DoesNotAddTcpGeometryChecksToThePilzResponse) {
+  tilt.target[0] = .01;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(execution_goals.size(), 2u);
+}
+
+TEST_F(RoundTripFixture, FinalJointBoundViolationPreventsAnyExecutionRequest) {
+  tilt.timeout = untilt.timeout = 15;
+  const auto normal_plan = transform_plan;
+  transform_plan = [normal_plan](Move::Result & result) {
+    normal_plan(result);
+    for (auto & position : result.planned_trajectory.joint_trajectory.points.back().positions) {
+      position = 3.2;
+    }
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt));
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().code, "ROUND_TRIP_INVALID");
+  EXPECT_TRUE(execution_goals.empty());
+  EXPECT_TRUE(executor.result().retryable_before_motion);
 }
 
 } // namespace

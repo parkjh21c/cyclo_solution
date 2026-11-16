@@ -28,6 +28,7 @@ rclcpp_action::Server<TaskManager::ApproachAction>::SharedPtr TaskManager::make_
           return rclcpp_action::GoalResponse::REJECT;
         }
         goal_start_pending_ = true;
+        module.request_accepted(Clock::now());
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
       [this, &module](const std::shared_ptr<ApproachGoalHandle> handle) {

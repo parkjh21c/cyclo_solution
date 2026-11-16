@@ -21,6 +21,8 @@ public:
       std::string & reason,
       bool execute = true);
   virtual ~CupMotion() = default;
+  // Optional action acceptance timestamp; other cup motions keep the default no-op.
+  virtual void request_accepted(TimePoint) {}
   virtual void tick() = 0;
   virtual void cancel();
   bool running() const;

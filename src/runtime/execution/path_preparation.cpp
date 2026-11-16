@@ -1,4 +1,5 @@
 #include "demo_1f/runtime/config.hpp"
+#include "demo_1f/runtime/execution/paired_path.hpp"
 #include "demo_1f/runtime/execution/trajectory_executor.hpp"
 #include <algorithm>
 #include <cmath>
@@ -68,6 +69,103 @@ bool TrajectoryExecutor::start_sequence(const std::vector<Step> & steps) {
   return op->result.state == ExecutionState::Running;
 }
 
+bool TrajectoryExecutor::start_paired(const Step & pose, const std::vector<Step> & other_arm) {
+  const auto previous = result().state;
+  if (previous == ExecutionState::Running || previous == ExecutionState::Cancelling ||
+      previous == ExecutionState::StopUnconfirmed) {
+    return false;
+  }
+  auto op = std::make_shared<Operation>();
+  set_operation(op);
+  MotionSequence sequence;
+  sequence.steps = {pose};
+  sequence.steps.insert(sequence.steps.end(), other_arm.begin(), other_arm.end());
+  std::string reason = validate_motion_sequence(sequence, config_);
+  const bool shape = pose.type == "pose" && !other_arm.empty() &&
+                     std::all_of(other_arm.begin(), other_arm.end(), [&](const Step & step) {
+                       return step.type == "joint" && step.arm == other_arm.front().arm &&
+                              step.arm != pose.arm;
+                     });
+  if (reason.empty() && !shape) {
+    reason = "Paired motion needs a pose step and the other arm's joint steps";
+  }
+  // The combined step: both arms at the pose step's speed; grippers held as in dual_joint.
+  Step combined;
+  combined.name = pose.name;
+  combined.type = "dual_joint";
+  combined.arm = pose.arm;
+  combined.timeout = pose.timeout;
+  combined.tolerance = pose.tolerance;
+  combined.velocity_scale = pose.velocity_scale;
+  combined.acceleration_scale = pose.acceleration_scale;
+  op->step = combined;
+  op->steps = {pose};
+  op->paired_steps = other_arm;
+  if (!config_.smooth_motion || !robot_model_ || !reason.empty() || !context_.ready(reason)) {
+    op->result = {ExecutionState::Failed, "INVALID_COMMAND",
+        reason.empty() ? "Continuous motion is not configured" : reason};
+    publish_state();
+    return false;
+  }
+  op->result.phase = pose.name;
+  try {
+    request_scene(op, false);
+  } catch (const std::exception & error) {
+    op->result = {ExecutionState::Failed, "SCENE_UNAVAILABLE", error.what()};
+  }
+  publish_state();
+  return op->result.state == ExecutionState::Running;
+}
+
+void TrajectoryExecutor::pair_with_other_arm(Operation & op) {
+  const auto & planned = op.planned_segments.front().joint_trajectory;
+  const auto & other = config_.arms.at(op.paired_steps.front().arm);
+  for (const auto & name : other.joints) {
+    if (std::find(planned.joint_names.begin(), planned.joint_names.end(), name) !=
+        planned.joint_names.end()) {
+      throw std::runtime_error("Paired pose plan already moves " + name);
+    }
+  }
+  JointPath first, second;
+  for (const auto & point : planned.points) first.push_back(point.positions);
+  // The other arm starts where the pose plan assumed it (planned start = scene + measured).
+  const auto & start = op.planned_start.joint_state;
+  std::vector<double> from;
+  for (const auto & name : other.joints) {
+    const auto it = std::find(start.name.begin(), start.name.end(), name);
+    if (it == start.name.end()) throw std::runtime_error("Paired start lacks " + name);
+    from.push_back(start.position.at(it - start.name.begin()));
+  }
+  second.push_back(from);
+  for (const auto & step : op.paired_steps) second.push_back(step.target);
+  moveit_msgs::msg::RobotTrajectory segment;
+  auto & joints = segment.joint_trajectory;
+  joints.joint_names = planned.joint_names;
+  joints.joint_names.insert(joints.joint_names.end(), other.joints.begin(), other.joints.end());
+  for (auto & row : pair_paths(first, second)) {
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions = std::move(row);
+    joints.points.push_back(std::move(point));
+  }
+  // Completion: the pose plan's last joints, the other arm's last target, grippers held.
+  op.joint_targets.clear();
+  for (size_t i = 0; i < joints.joint_names.size(); ++i) {
+    op.joint_targets[joints.joint_names[i]] = joints.points.back().positions[i];
+  }
+  for (const auto & [side, arm] : config_.arms) {
+    (void)side;
+    const auto it = std::find(start.name.begin(), start.name.end(), arm.gripper_joint);
+    if (it != start.name.end()) {
+      op.joint_targets[arm.gripper_joint] = start.position.at(it - start.name.begin());
+    }
+  }
+  op.paired_log = "paired approach: " + op.step.arm + " " + std::to_string(first.size()) +
+                  " pts, " + op.paired_steps.front().arm + " " + std::to_string(second.size()) +
+                  " pts";
+  op.planned_segments = {segment};
+  op.steps = {op.step};
+}
+
 void TrajectoryExecutor::request_scene(
     const std::shared_ptr<Operation> & op, bool prepare_execution) {
   if (!scene_client_->service_is_ready()) {
@@ -82,11 +180,16 @@ void TrajectoryExecutor::request_scene(
   scene_client_->async_send_request(request,
       [this, op, prepare_execution](
           rclcpp::Client<moveit_msgs::srv::GetPlanningScene>::SharedFuture future) {
-        if (op->cancel_requested || op->result.state != ExecutionState::Running) {
+        if (operation_ != op || op->cancel_requested ||
+            op->result.state != ExecutionState::Running) {
           return;
         }
         try {
           const auto scene = future.get()->scene;
+          if (op->round_trip) {
+            round_trip_scene(op, scene, prepare_execution);
+            return;
+          }
           if (op->steps.empty() && op->step.type == "gripper") {
             prepare_path(op, scene);
             return;
@@ -123,7 +226,11 @@ void TrajectoryExecutor::request_scene(
           op->planned_start.is_diff = false;
           send_move(op, true);
         } catch (const std::exception & error) {
-          op->result = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", error.what()};
+          if (op->round_trip) {
+            fail_round_trip(op, "SCENE_UNAVAILABLE", error.what());
+          } else {
+            op->result = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", error.what()};
+          }
         }
       });
 }

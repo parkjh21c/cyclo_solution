@@ -24,7 +24,8 @@ struct PourConfig {
   double axis_behind_tcp{.04};  // Cup axis behind the TCP along the hand heading.
   double grasp_height{.12};     // TCP above the cup bottom.
   double hold_duration{2.0};
-  double lin_speed{.08}, ptp_speed{.2};
+  double lin_speed{.08}, ptp_speed{.4};
+  double tilt_speed{.6}, tilt_acceleration{.3};
   double hold_tolerance{.02};   // TCP distance from the transfer hold pose allowed at start.
   double inner_length{.295}, inner_width{.21}; // Basket inside at the rim (ffw_grasp task).
   double inner_margin{.03};     // Lip target kept this far inside the rim, any basket yaw.

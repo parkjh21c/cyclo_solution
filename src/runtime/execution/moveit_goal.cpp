@@ -116,7 +116,7 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
   request.max_acceleration_scaling_factor =
       step.acceleration_scale > 0 ? step.acceleration_scale : config_.acceleration_scale;
   request.start_state.is_diff = true;
-  if (plan_only && !op->steps.empty()) {
+  if (plan_only && (!op->steps.empty() || op->round_trip)) {
     request.start_state = op->planned_start;
     request.start_state.is_diff = false;
   }
@@ -326,6 +326,10 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
       },
       plan_only ? std::function<void(const Move::Result &)>([this, op](
                                                                 const Move::Result & result) {
+        if (op->round_trip) {
+          accept_round_trip_plan(op, result);
+          return;
+        }
         const auto & trajectory = result.planned_trajectory.joint_trajectory;
         if (trajectory.points.empty() || trajectory.joint_names.empty() ||
             trajectory.points.back().positions.size() != trajectory.joint_names.size() ||
@@ -353,6 +357,7 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
         if (op->planned_segments.size() < op->steps.size()) {
           send_move(op, true);
         } else {
+          if (!op->paired_steps.empty()) pair_with_other_arm(*op); // start_paired
           request_scene(op, true);
         }
       })

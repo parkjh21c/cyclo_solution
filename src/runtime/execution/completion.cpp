@@ -28,6 +28,13 @@ bool TrajectoryExecutor::settled(const std::shared_ptr<Operation> & op, bool che
       joints.push_back(name);
     }
   }
+  if (op->round_trip && op->cancel_requested) {
+    joints.clear();
+    for (const auto & [name, position] : op->round_trip->initial_positions) {
+      (void)position;
+      joints.push_back(name);
+    }
+  }
   const auto after = op->cancel_requested ? op->cancelling : op->started;
   bool valid = true;
   std::string reason;
@@ -54,7 +61,8 @@ bool TrajectoryExecutor::settled(const std::shared_ptr<Operation> & op, bool che
       valid = false;
       break;
     }
-    if (check_target && op->step.type != "linear" && op->step.type != "pose") {
+    if (check_target && (op->round_trip ||
+                           (op->step.type != "linear" && op->step.type != "pose"))) {
       const double target =
           op->joint_targets.empty() ? op->step.target[i] : op->joint_targets.at(joints[i]);
       const double error = std::abs(it->second.position - target);
@@ -69,7 +77,8 @@ bool TrajectoryExecutor::settled(const std::shared_ptr<Operation> & op, bool che
       }
     }
   }
-  if (valid && check_target && (op->step.type == "linear" || op->step.type == "pose")) {
+  if (valid && check_target && !op->round_trip &&
+      (op->step.type == "linear" || op->step.type == "pose")) {
     const auto current = context_.pose_of(arm.tcp);
     if (!current) {
       reason = "Waiting for fresh TCP transform: " + arm.tcp;

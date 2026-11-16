@@ -1,5 +1,6 @@
 #include "demo_1f/tasks/task_manager.hpp"
 #include "demo_1f/tasks/demo_recovery.hpp"
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -56,6 +57,7 @@ public:
   using CupMotion::CupMotion;
   int runs = 0;
   int failures = 0;
+  int first_failure = 1; // Runs first_failure .. first_failure + failures - 1 fail.
   std::string failure = "CUP_NOT_FOUND";
   std::string requested_arm;
   bool stall = false;
@@ -67,7 +69,10 @@ public:
   void tick() override {
     if (result_.state == "CANCELLING") { result_.state = "CANCELLED"; return; }
     if (!running() || stall) return;
-    if (runs <= failures) { fail(failure, "test failure"); return; }
+    if (runs >= first_failure && runs < first_failure + failures) {
+      fail(failure, "test failure");
+      return;
+    }
     result_.state = "SUCCEEDED";
     result_.sequence_completed = true;
   }
@@ -93,13 +98,20 @@ protected:
   rclcpp_action::Client<Demo>::SharedPtr client;
   std::shared_ptr<rclcpp_action::ServerGoalHandle<Pick>> pending_pick;
   int picks = 0, pick_failures = 0;
+  int cells = 1, cell_picks = 0;   // Picks after the cells are gone report BASKET_EMPTY.
+  int moved_failure_at = 0, stall_pick_at = 0;
   bool stall_pick = false, moved_failure = false, uncertain_stop = false;
   bool withdraw_enabled = false;
+  bool basket_seen = true;  // Wrist observer pose fed on every pump.
+  double basket_age = 0;    // s
+  int max_rounds = 0;       // 0 keeps the demo.max_cell_rounds default.
 
   void SetUp() override {
+    std::vector<rclcpp::Parameter> overrides = {rclcpp::Parameter("demo.retry_delay", .01),
+        rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled)};
+    if (max_rounds > 0) overrides.emplace_back("demo.max_cell_rounds", max_rounds);
     node = std::make_shared<rclcpp::Node>("demo_task_test",
-        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("demo.retry_delay", .01),
-            rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled)}));
+        rclcpp::NodeOptions().parameter_overrides(overrides));
     config.require_tcp_tf = false;
     config.state_max_age = 5;
     for (const std::string name : {"left", "right"}) {
@@ -148,14 +160,24 @@ protected:
         [this](auto handle) {
           ++picks;
           EXPECT_FALSE(handle->get_goal()->move_to_observe);
-          if (stall_pick) { pending_pick = handle; return; }
+          if (stall_pick || picks == stall_pick_at) { pending_pick = handle; return; }
           auto result = std::make_shared<Pick::Result>();
-          result->success = picks > pick_failures;
           result->holding = false; // No physical grasp verdict; motion success is sufficient.
           result->stop_confirmed = !uncertain_stop;
-          result->retryable = !result->success;
-          result->motion_started = moved_failure;
-          if (!result->success) result->error_code = "OBJECT_NOT_FOUND";
+          if (picks <= pick_failures) {
+            result->error_code = "OBJECT_NOT_FOUND";
+            result->retryable = true;
+            result->motion_started = moved_failure;
+          } else if (picks == moved_failure_at) {
+            result->error_code = "EXECUTION_FAILED";
+            result->motion_started = true;
+          } else if (cell_picks < cells) {
+            ++cell_picks;
+            result->success = true;
+          } else {
+            result->error_code = "BASKET_EMPTY"; // As ffw_pick: not retryable, nothing moved.
+            result->message = "Basket empty in consecutive observations";
+          }
           if (result->success) handle->succeed(result); else handle->abort(result);
         });
     client = rclcpp_action::create_client<Demo>(node, "/run_demo");
@@ -169,6 +191,13 @@ protected:
     joints.position = {0, 0, 0, 0};
     joints.velocity = {0, 0, 0, 0};
     context->observe_joints(joints);
+    if (basket_seen) {
+      geometry_msgs::msg::PoseStamped basket;
+      basket.header.frame_id = config.planning_frame;
+      basket.header.stamp = node->now() - rclcpp::Duration::from_seconds(basket_age);
+      basket.pose.orientation.w = 1;
+      context->observe_basket(basket);
+    }
     loop.spin_some();
     if (pending_pick && pending_pick->is_canceling()) {
       auto result = std::make_shared<Pick::Result>();
@@ -274,7 +303,7 @@ TEST_F(DemoTest, SequencesAllMotionsAndRetriesOnlyFailedStage) {
   auto goal = send(); ASSERT_TRUE(goal);
   auto result = client->async_get_result(goal); wait(result);
   EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::SUCCEEDED);
-  EXPECT_EQ(picks, 2);
+  EXPECT_EQ(picks, 3); // Failed, cell, then the empty-basket check.
   EXPECT_EQ(executor.executed,
       (std::vector<std::string>{"initial_test", "handover_test", "initial_test"}));
   EXPECT_EQ(approach->runs, 2);
@@ -322,7 +351,7 @@ TEST_F(DemoTest, CupPickExecutionFailureStopsWithoutResume) {
   EXPECT_FALSE(result.get().result->can_resume);
   EXPECT_EQ(result.get().result->last_completed_stage, "REFINE_CUP");
   EXPECT_EQ(pick_cup->runs, 1);
-  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(picks, 2); // Cell and empty-basket check.
   EXPECT_EQ(refine->runs, 1);
 }
 TEST_F(DemoTest, ExhaustedObservationRetriesResumeWithoutRepicking) {
@@ -334,7 +363,7 @@ TEST_F(DemoTest, ExhaustedObservationRetriesResumeWithoutRepicking) {
   auto resumed = send("resume"); ASSERT_TRUE(resumed);
   auto finished = client->async_get_result(resumed); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
-  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(picks, 2); // No repick; only the empty-basket check after the round.
   EXPECT_EQ(executor.executed.size(), 3u);
 }
 TEST_F(DemoTest, PickOnlyCanContinueWithHandover) {
@@ -348,7 +377,7 @@ TEST_F(DemoTest, PickOnlyCanContinueWithHandover) {
   auto resumed = send("resume"); ASSERT_TRUE(resumed);
   auto finished = client->async_get_result(resumed); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
-  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(picks, 2); // The resumed round ends with the empty-basket check.
   EXPECT_EQ(executor.executed, (std::vector<std::string>{"handover_test", "initial_test"}));
 }
 
@@ -428,7 +457,7 @@ TEST_F(DemoTest, CupPickCanBeCancelledWithoutRepeatingRelease) {
   auto cancel = client->async_cancel_goal(goal); wait(cancel);
   auto result = client->async_get_result(goal); wait(result);
   EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
-  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(picks, 2); // Cell and empty-basket check.
   EXPECT_EQ(refine->runs, 1);
   EXPECT_EQ(executor.executed.size(), 2u);
   EXPECT_TRUE(manager->can_shutdown());
@@ -520,6 +549,155 @@ TEST_F(DemoTest, NewStartAndInitialAllowedAfterCompletedPickFailure) {
   auto start_goal = send(); ASSERT_TRUE(start_goal);
   auto finished = client->async_get_result(start_goal); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
+}
+
+// Same fixture with demo.max_cell_rounds = 2.
+class DemoRoundLimitTest : public DemoTest {
+protected:
+  void SetUp() override {
+    max_rounds = 2;
+    DemoTest::SetUp();
+  }
+};
+
+long handovers(const Executor & executor) {
+  return std::count(executor.executed.begin(), executor.executed.end(), "handover_test");
+}
+
+TEST_F(DemoTest, TwoCellRoundsThenCupSectionOnce) {
+  cells = 2;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(picks, 3);
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{
+      "initial_test", "handover_test", "handover_test", "initial_test"}));
+  EXPECT_EQ(approach->runs, 2);
+  EXPECT_EQ(refine->runs, 2);
+  for (const auto * cup : {pick_cup.get(), handover_cup.get(), pour.get(), handover_back.get(),
+           place.get()}) {
+    EXPECT_EQ(cup->runs, 1);
+  }
+  EXPECT_EQ(result.get().result->last_completed_stage, "RETURN_INITIAL");
+}
+
+TEST_F(DemoTest, EmptyBasketAtFirstPickGoesStraightToCupSection) {
+  cells = 0;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test", "initial_test"}));
+  EXPECT_EQ(approach->runs, 0);
+  EXPECT_EQ(refine->runs, 0);
+  EXPECT_EQ(pick_cup->runs, 1);
+  EXPECT_EQ(place->runs, 1);
+  EXPECT_EQ(result.get().result->last_completed_stage, "RETURN_INITIAL");
+}
+
+TEST_F(DemoTest, EmptyPickWithoutBasketViewRetriesThenStopsBeforeCupSection) {
+  cells = 0;
+  basket_seen = false;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "BASKET_UNKNOWN");
+  EXPECT_TRUE(result.get().result->can_resume);
+  EXPECT_EQ(picks, 3); // demo.max_retries = 2.
+  EXPECT_EQ(pick_cup->runs, 0);
+  EXPECT_EQ(executor.executed, (std::vector<std::string>{"initial_test"}));
+}
+
+TEST_F(DemoTest, EmptyPickWithStaleBasketViewStopsBeforeCupSection) {
+  cells = 0;
+  basket_age = 10; // Over the 5 s demo.basket_empty_max_age default.
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "BASKET_UNKNOWN");
+  EXPECT_TRUE(result.get().result->can_resume);
+  EXPECT_EQ(picks, 3);
+  EXPECT_EQ(pick_cup->runs, 0);
+}
+
+TEST_F(DemoTest, PickOnlyEmptyBasketFailsWithItsCode) {
+  cells = 0;
+  auto goal = send("pick"); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "BASKET_EMPTY");
+  EXPECT_FALSE(result.get().result->can_resume);
+  EXPECT_EQ(picks, 1);
+  EXPECT_EQ(pick_cup->runs, 0);
+}
+
+TEST_F(DemoTest, MovedPickFailureInSecondRoundStopsWithoutRepeating) {
+  cells = 3;
+  moved_failure_at = 2;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_FALSE(result.get().result->can_resume);
+  EXPECT_EQ(result.get().result->last_completed_stage, "REFINE_CUP");
+  EXPECT_EQ(picks, 2);
+  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_EQ(refine->runs, 1);
+  EXPECT_EQ(pick_cup->runs, 0);
+}
+
+TEST_F(DemoRoundLimitTest, RoundLimitStopsResumableAndResumeCountsAgain) {
+  cells = 3;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "CELL_ROUND_LIMIT");
+  EXPECT_TRUE(result.get().result->can_resume);
+  EXPECT_EQ(result.get().result->last_completed_stage, "REFINE_CUP");
+  EXPECT_EQ(picks, 2);
+  EXPECT_EQ(refine->runs, 2);
+  EXPECT_EQ(pick_cup->runs, 0);
+  auto resumed = send("resume"); ASSERT_TRUE(resumed);
+  auto finished = client->async_get_result(resumed); wait(finished);
+  EXPECT_TRUE(finished.get().result->success); // Round 3 is the first of the new count.
+  EXPECT_EQ(picks, 4);
+  EXPECT_EQ(refine->runs, 3);
+  EXPECT_EQ(pick_cup->runs, 1);
+}
+
+TEST_F(DemoTest, CancelInSecondRoundDoesNotRepeatTheFinishedRound) {
+  cells = 2;
+  stall_pick_at = 2;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 500 && !pending_pick; ++i) pump();
+  ASSERT_TRUE(pending_pick);
+  auto cancel = client->async_cancel_goal(goal); wait(cancel);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_EQ(picks, 2);
+  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_EQ(approach->runs, 1);
+  EXPECT_EQ(refine->runs, 1);
+  EXPECT_EQ(pick_cup->runs, 0);
+  EXPECT_TRUE(manager->can_shutdown());
+}
+
+TEST_F(DemoTest, ResumeAfterSecondRoundFailureContinuesWithoutRepicking) {
+  cells = 2;
+  approach->first_failure = 2; // Second round's approach fails past demo.max_retries.
+  approach->failures = 3;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  ASSERT_TRUE(result.get().result->can_resume);
+  EXPECT_EQ(result.get().result->last_completed_stage, "HANDOVER");
+  EXPECT_EQ(picks, 2);
+  EXPECT_EQ(handovers(executor), 2);
+  auto resumed = send("resume"); ASSERT_TRUE(resumed);
+  auto finished = client->async_get_result(resumed); wait(finished);
+  EXPECT_TRUE(finished.get().result->success);
+  EXPECT_EQ(picks, 3); // Only the empty-basket check.
+  EXPECT_EQ(handovers(executor), 2);
+  EXPECT_EQ(approach->runs, 5);
+  EXPECT_EQ(refine->runs, 2);
+  EXPECT_EQ(pick_cup->runs, 1);
 }
 } // namespace
 } // namespace demo_1f

@@ -4,12 +4,7 @@
 #include "demo_1f/motions/pour/pour_geometry.hpp"
 
 namespace demo_1f {
-// Held cup is poured over the latest measured basket (/demo/basket_pose): PTP over the basket
-// with the hand turned about the cup axis (LIN lower if needed), LIN tilt about the TCP, wait,
-// untilt (LIN raise), PTP back to the start joints. Targets are computed at start from the
-// right TCP at the transfer hold. A tilt that fails before the arm moved is retried at the
-// smaller pour.fallback_angles_deg. The cup model stays attached; cancel stops in place.
-// Preview never moves.
+// Pour over the measured basket using an executor-owned tilt/hold/reversed-path round trip.
 class CupPourMotion final : public CupMotion {
 public:
   CupPourMotion(const Config & robot,
@@ -28,6 +23,13 @@ public:
       bool execute = true) override;
   void tick() override;
   void cancel() override;
+  void request_accepted(TimePoint time) override {
+    accepted_at_ = time;
+  }
+
+  std::optional<double> total_duration() const {
+    return total_seconds_;
+  }
 
 private:
   const char * initial_phase() const override {
@@ -39,16 +41,21 @@ private:
   }
 
   struct Parts {
-    MotionSequence before, after;  // Over the basket; hold, untilt and return.
+    MotionSequence before, after; // Approach; optional raise and final return.
     std::vector<MotionSequence> tilts; // pour_tilt at angle_deg, then each fallback angle.
     std::vector<double> angles;
+    Step hold, untilt;
+    geometry_msgs::msg::PoseStamped basket; // Basket value the targets were built from.
   };
 
   void reset() override;
   std::optional<Parts> build(const std::string & arm, std::string & reason) const;
   bool run(const MotionSequence & part);
+  bool run_round_trip();
   bool arm_unmoved() const;
   void finish_cancelled();
+  void tick_pour();
+  void finish_timing();
   const PourConfig & pour_;
   SequenceMotion sequence_;
   Parts parts_;
@@ -56,5 +63,7 @@ private:
   size_t tilt_{0};
   std::vector<double> tilt_start_joints_;
   std::string retries_;
+  std::optional<TimePoint> accepted_at_, started_;
+  std::optional<double> total_seconds_;
 };
 } // namespace demo_1f

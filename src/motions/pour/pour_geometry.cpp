@@ -1,6 +1,7 @@
 #include "demo_1f/motions/pour/pour_geometry.hpp"
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -9,7 +10,8 @@ namespace demo_1f {
 std::string PourConfig::validate() const {
   for (double v : {angle_deg, design_angle_deg, hand_yaw_deg, direction_deg, shift, clearance,
            approach_margin, wall_height, lip_radius, axis_behind_tcp, grasp_height,
-           hold_duration, lin_speed, ptp_speed, hold_tolerance, inner_length, inner_width,
+           hold_duration, lin_speed, ptp_speed, tilt_speed, tilt_acceleration,
+           hold_tolerance, inner_length, inner_width,
            inner_margin}) {
     if (!std::isfinite(v)) return "Pour settings must be finite";
   }
@@ -27,6 +29,7 @@ std::string PourConfig::validate() const {
       approach_margin < 0 || wall_height <= 0 || lip_radius <= 0 || axis_behind_tcp < 0 ||
       grasp_height <= 0 || hold_duration < 0 || hold_duration > 30 || lin_speed <= 0 ||
       lin_speed > .3 || ptp_speed <= 0 || ptp_speed > .5 || hold_tolerance <= 0 ||
+      tilt_speed <= 0 || tilt_speed > 1 || tilt_acceleration <= 0 || tilt_acceleration > 1 ||
       inner_margin < 0 || inner_length <= 2 * inner_margin || inner_width <= 2 * inner_margin) {
     return "Invalid pour geometry, timing or speed";
   }
@@ -55,11 +58,15 @@ PourConfig load_pour_config(rclcpp::Node & node) {
   number("grasp_height", c.grasp_height);
   number("hold_duration", c.hold_duration);
   number("lin_speed", c.lin_speed);
+  number("tilt_speed", c.tilt_speed);
+  number("tilt_acceleration", c.tilt_acceleration);
   number("ptp_speed", c.ptp_speed);
   number("hold_tolerance", c.hold_tolerance);
   number("inner_length", c.inner_length);
   number("inner_width", c.inner_width);
   number("inner_margin", c.inner_margin);
+  const auto reason = c.validate();
+  if (!reason.empty()) throw std::invalid_argument(reason);
   return c;
 }
 

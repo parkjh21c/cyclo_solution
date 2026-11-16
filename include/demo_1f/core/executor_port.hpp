@@ -8,7 +8,16 @@ public:
   virtual bool ready(const MotionSequence & sequence, std::string & reason) const = 0;
   virtual bool start(const Step & step) = 0;
 
+  virtual bool start_round_trip(const Step &, const Step &, const Step &) {
+    return false;
+  }
+
   virtual bool start_sequence(const std::vector<Step> &) {
+    return false;
+  }
+
+  // One arm's pose step with the other arm's joint steps as one combined path (false: none).
+  virtual bool start_paired(const Step &, const std::vector<Step> &) {
     return false;
   }
 

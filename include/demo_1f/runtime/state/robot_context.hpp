@@ -37,6 +37,8 @@ public:
   // Latest /demo/basket_pose (wrist_basket_init): outer bottom center, base frame.
   void observe_basket(const geometry_msgs::msg::PoseStamped & pose);
   std::optional<geometry_msgs::msg::PoseStamped> basket() const;
+  rclcpp::Time now() const { return node_.now(); } // Node clock, for observation ages.
+  const std::string & planning_frame() const { return config_.planning_frame; }
   std::optional<geometry_msgs::msg::PoseStamped> transform_pose(
       const geometry_msgs::msg::PoseStamped & input) const;
   void set_task(const std::string & state,

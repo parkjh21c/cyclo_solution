@@ -1,4 +1,7 @@
+#include "demo_1f/runtime/execution/paired_path.hpp"
+#include "demo_1f/runtime/execution/round_trip_path.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <limits>
 #include <rclcpp/duration.hpp>
@@ -191,5 +194,140 @@ TEST_F(SmootherTest, GripperDurationIsAMinimumAndLimitedProfileIsValidated) {
       first.duration);
   EXPECT_NO_THROW(validate_smooth_path(stationary, {first}, config, *scene));
 }
+
+TEST(PairedPath, EndpointsMatchAndFirstArmComesFirst) {
+  const JointPath left{{0.0, 0.0}, {1.0, 0.0}};
+  const JointPath right{{5.0}, {6.0}, {8.0}};
+  const auto rows = pair_paths(left, right);
+  ASSERT_GE(rows.size(), 2u);
+  EXPECT_EQ(rows.front(), (std::vector<double>{0.0, 0.0, 5.0}));
+  EXPECT_EQ(rows.back(), (std::vector<double>{1.0, 0.0, 8.0}));
+  for (const auto & row : rows) EXPECT_EQ(row.size(), 3u); // left's 2 joints, then right's 1
+}
+
+TEST(PairedPath, EveryCornerKeptAndProgressMonotonic) {
+  // right turns at a third of its length: that row exists, left a third along at the same row
+  const JointPath left{{0.0}, {3.0}};
+  const JointPath right{{0.0, 0.0}, {1.0, 0.0}, {1.0, 2.0}};
+  const auto rows = pair_paths(left, right);
+  ASSERT_EQ(rows.size(), 3u);
+  EXPECT_NEAR(rows[1][0], 1.0, 1e-12);
+  EXPECT_NEAR(rows[1][1], 1.0, 1e-12);
+  EXPECT_NEAR(rows[1][2], 0.0, 1e-12);
+  for (size_t i = 1; i < rows.size(); ++i) {
+    EXPECT_GE(rows[i][0], rows[i - 1][0]);
+    EXPECT_GE(rows[i][1] + rows[i][2], rows[i - 1][1] + rows[i - 1][2]);
+  }
+}
+
+TEST(PairedPath, ZeroLengthPathStaysPut) {
+  const JointPath left{{0.0}, {1.0}, {2.0}};
+  const JointPath still{{4.0, 4.0}, {4.0, 4.0}};
+  const auto rows = pair_paths(left, still);
+  ASSERT_EQ(rows.size(), 3u);
+  for (const auto & row : rows) {
+    EXPECT_EQ(row[1], 4.0);
+    EXPECT_EQ(row[2], 4.0);
+  }
+  EXPECT_EQ(pair_paths(still, left).back(), (std::vector<double>{4.0, 4.0, 2.0}));
+  EXPECT_THROW(pair_paths({}, left), std::invalid_argument);
+  EXPECT_THROW(pair_paths({{1.0}, {1.0, 2.0}}, left), std::invalid_argument);
+}
+moveit_msgs::msg::RobotTrajectory round_trip_knots() {
+  auto trajectory = segment({{0, .1}, {.2, .3}, {.4, .5}, {.6, .7}});
+  auto & joints = trajectory.joint_trajectory;
+  joints.header.stamp.sec = 123;
+  const std::vector<int64_t> times = {0, 300000001, 1100000007, 2400000011};
+  for (size_t i = 0; i < joints.points.size(); ++i) {
+    auto & point = joints.points[i];
+    point.time_from_start = rclcpp::Duration(std::chrono::nanoseconds(times[i]));
+    point.velocities = i == 0 || i == 3 ? std::vector<double>{0, 0} :
+        std::vector<double>{.2, -.3};
+    point.accelerations = i == 0 || i == 3 ? std::vector<double>{0, 0} :
+        std::vector<double>{-.4, .5};
+  }
+  return trajectory;
+}
+
+TEST(RoundTripPath, ReversesNonuniformNanosecondTimesAndDerivatives) {
+  const auto forward = round_trip_knots();
+  const auto backward = reverse_round_trip_path(forward, {"j2", "j1"});
+  const auto & a = forward.joint_trajectory;
+  const auto & b = backward.joint_trajectory;
+  EXPECT_EQ(b.joint_names, a.joint_names);
+  EXPECT_EQ(b.header.stamp.sec, 0);
+  EXPECT_EQ(b.header.stamp.nanosec, 0u);
+  ASSERT_EQ(b.points.size(), a.points.size());
+  const auto total = rclcpp::Duration(a.points.back().time_from_start).nanoseconds();
+  for (size_t i = 0; i < a.points.size(); ++i) {
+    const auto & original = a.points[a.points.size() - 1 - i];
+    EXPECT_EQ(b.points[i].positions, original.positions);
+    EXPECT_EQ(b.points[i].accelerations, original.accelerations);
+    EXPECT_TRUE(b.points[i].effort.empty());
+    EXPECT_EQ(rclcpp::Duration(b.points[i].time_from_start).nanoseconds(),
+        total - rclcpp::Duration(original.time_from_start).nanoseconds());
+    for (size_t j = 0; j < a.joint_names.size(); ++j) {
+      EXPECT_EQ(b.points[i].velocities[j], -original.velocities[j]);
+    }
+    if (i > 0) {
+      EXPECT_GT(rclcpp::Duration(b.points[i].time_from_start).nanoseconds(),
+          rclcpp::Duration(b.points[i - 1].time_from_start).nanoseconds());
+    }
+  }
+  EXPECT_EQ(rclcpp::Duration(b.points.front().time_from_start).nanoseconds(), 0);
+  EXPECT_EQ(rclcpp::Duration(b.points.back().time_from_start).nanoseconds(), total);
+  EXPECT_EQ(b.points.back().positions, a.points.front().positions);
+}
+
+TEST(RoundTripPath, ReversingTwiceRestoresEveryKnot) {
+  const auto original = round_trip_knots();
+  const auto back = reverse_round_trip_path(original, {"j1", "j2"});
+  const auto restored = reverse_round_trip_path(back, {"j1", "j2"});
+  EXPECT_EQ(restored.joint_trajectory.points, original.joint_trajectory.points);
+}
+
+TEST(RoundTripPath, RejectsUnsupportedOrMalformedResponses) {
+  for (int defect = 0; defect < 18; ++defect) {
+    auto invalid = round_trip_knots();
+    auto & joints = invalid.joint_trajectory;
+    switch (defect) {
+      case 0: joints.joint_names[1] = "j1"; break;
+      case 1: joints.joint_names[1] = "other"; break;
+      case 2: joints.points.resize(1); break;
+      case 3: joints.points[1].positions.pop_back(); break;
+      case 4: joints.points[1].velocities.clear(); break;
+      case 5: joints.points[1].accelerations.clear(); break;
+      case 6: joints.points[1].positions[0] = std::numeric_limits<double>::infinity(); break;
+      case 7: joints.points[1].time_from_start = joints.points[0].time_from_start; break;
+      case 8: joints.points[0].time_from_start.nanosec = 1; break;
+      case 9: joints.points.back().velocities[0] = .01; break;
+      case 10: joints.points.front().accelerations[0] = .01; break;
+      case 11: joints.points[1].effort = {0, 0}; break;
+      case 12: invalid.multi_dof_joint_trajectory.points.resize(1); break;
+      case 13: joints.points[1].velocities[0] = std::numeric_limits<double>::infinity(); break;
+      case 14: joints.points[1].accelerations[0] = std::numeric_limits<double>::quiet_NaN(); break;
+      case 15: joints.points[1].time_from_start.sec = -1; break;
+      case 16: joints.points[1].time_from_start.nanosec = 1000000000u; break;
+      case 17: invalid.multi_dof_joint_trajectory.joint_names = {"floating"}; break;
+    }
+    EXPECT_THROW(reverse_round_trip_path(invalid, {"j1", "j2"}), std::runtime_error) << defect;
+  }
+}
+TEST_F(SmootherTest, DenseSingleArmLinUsesTheSameTimingAsItsCollinearEndpoints) {
+  first.type = "linear";
+  first.arm = "right";
+  config.arms["right"].joints = {"j1", "j2"};
+  std::vector<std::vector<double>> dense;
+  for (int i = 0; i <= 100; ++i) dense.push_back({.004 * i, .002 * i});
+  const auto sparse = smooth_segments({segment({{0, 0}, {.4, .2}})}, {first}, config, model);
+  const auto sampled = smooth_segments({segment(dense)}, {first}, config, model);
+  const auto & a = sparse.trajectory.joint_trajectory.points;
+  const auto & b = sampled.trajectory.joint_trajectory.points;
+  EXPECT_EQ(a, b);
+  EXPECT_GT(rclcpp::Duration(b.back().time_from_start).nanoseconds(), 0);
+  for (size_t i = 1; i + 1 < b.size(); ++i) EXPECT_GT(b[i].velocities[0], 0);
+  EXPECT_NO_THROW(validate_smooth_path(sampled, {first}, config, *scene));
+}
+
 } // namespace
 } // namespace demo_1f

@@ -168,8 +168,27 @@ public:
 
   bool start(const Step & s) override {
     steps.push_back(s);
-    current = {ExecutionState::Running, {}, {}};
+    current = {ExecutionState::Running, {}, {}, s.name};
     return true;
+  }
+
+  bool start_round_trip(const Step & tilt, const Step & hold, const Step & untilt) override {
+    round_steps = {tilt, hold, untilt};
+    round_trips.push_back(round_steps);
+    round_index = 0;
+    round_active = true;
+    return start(tilt);
+  }
+
+  void succeed_step() {
+    const auto completed = steps.back().name;
+    if (round_active && ++round_index < round_steps.size()) {
+      start(round_steps[round_index]);
+      current.last_completed_step = completed;
+    } else {
+      round_active = false;
+      current = {ExecutionState::Succeeded, {}, {}, completed, completed};
+    }
   }
 
   void tick() override {}
@@ -185,6 +204,10 @@ public:
   bool stationary = true;
   ExecutionResult current;
   std::vector<Step> steps;
+  std::vector<Step> round_steps;
+  std::vector<std::vector<Step>> round_trips;
+  size_t round_index{0};
+  bool round_active{false};
 };
 
 class Scene : public ApproachScenePort {
@@ -327,7 +350,7 @@ protected:
           std::this_thread::sleep_for(2ms);
         }
       }
-      executor.current = {ExecutionState::Succeeded, {}, {}};
+      executor.succeed_step();
     }
   }
 
@@ -2136,6 +2159,8 @@ TEST_F(CupPourFixture, PoursOverTheMeasuredBasketWithoutSceneChanges) {
   ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
   run(pour);
   ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  ASSERT_EQ(executor.round_trips.size(), 1u);
+  EXPECT_EQ(executor.round_trips.front().size(), 3u);
   EXPECT_EQ(context->snapshot().phase, "CUP_POUR_COMPLETE");
   // 9 cm above the walls: the hand goes straight to the pour height, no lower/raise.
   const std::vector<std::string> expected = {
@@ -2175,7 +2200,8 @@ TEST_F(CupPourFixture, TiltPlanFailureRetriesSmallerAngles) {
     const bool tilting = executor.current.state == ExecutionState::Running &&
                          executor.steps.back().name == "pour_tilt";
     if (tilting && ++tilts == 1) {
-      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "MoveIt error -31"};
+      executor.current = {ExecutionState::Failed, "ROUND_TRIP_PLAN_FAILED", "MoveIt error 99999",
+          "pour_tilt", {}, true};
     } else {
       complete();
     }
@@ -2195,11 +2221,15 @@ TEST_F(CupPourFixture, TiltStopsWhenEveryAngleFails) {
   CupPourMotion pour(robot, config, pc, *context, executor, scene);
   std::string reason;
   ASSERT_TRUE(pour.start("right", "cup", reason, true)) << reason;
+  std::vector<std::string> failures;
   for (int i = 0; i < 80 && pour.running(); ++i) {
     feedback();
     if (executor.current.state == ExecutionState::Running &&
         executor.steps.back().name == "pour_tilt") {
-      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "MoveIt error -31"};
+      failures.push_back("candidate " + std::to_string(failures.size() + 1) +
+                         ": MoveIt error 99999");
+      executor.current = {ExecutionState::Failed, "ROUND_TRIP_PLAN_FAILED", failures.back(),
+          "pour_tilt", {}, true};
     } else {
       complete();
     }
@@ -2208,6 +2238,13 @@ TEST_F(CupPourFixture, TiltStopsWhenEveryAngleFails) {
   EXPECT_EQ(pour.result().state, "FAILED");
   ASSERT_EQ(executor.steps.size(), 1u + 1u + pc.fallback_angles_deg.size());
   EXPECT_EQ(executor.steps.back().name, "pour_tilt"); // Never holds or returns.
+  ASSERT_EQ(failures.size(), 1u + pc.fallback_angles_deg.size());
+  size_t next = 0;
+  for (const auto & failure : failures) {
+    const auto position = pour.result().detail.find(failure, next);
+    ASSERT_NE(position, std::string::npos) << pour.result().detail;
+    next = position + failure.size();
+  }
 }
 
 TEST_F(CupPourFixture, TiltFailureAfterTheArmMovedIsNotRetried) {
@@ -2225,7 +2262,8 @@ TEST_F(CupPourFixture, TiltFailureAfterTheArmMovedIsNotRetried) {
       moved.position = {.2};
       moved.velocity = {0};
       context->observe_joints(moved);
-      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "trajectory aborted"};
+      executor.current = {ExecutionState::Failed, "ROUND_TRIP_PLAN_FAILED", "candidate failed",
+          "pour_tilt", {}, true};
       pour.tick();
       break;
     }
@@ -2247,6 +2285,229 @@ TEST_F(CupPourFixture, RejectsWithoutBasketAwayFromHoldOrWithTheLeftHand) {
   EXPECT_FALSE(pour.start("right", "cup", reason, true));
   EXPECT_NE(reason.find("transfer hold"), std::string::npos) << reason;
   EXPECT_TRUE(executor.steps.empty());
+}
+
+TEST(PourConfig, IndependentTiltScalesHaveDefaultsAndLoadReadOnlyOverrides) {
+  PourConfig defaults;
+  EXPECT_DOUBLE_EQ(defaults.tilt_speed, .60);
+  EXPECT_DOUBLE_EQ(defaults.tilt_acceleration, .30);
+  EXPECT_DOUBLE_EQ(defaults.ptp_speed, .40);
+  EXPECT_DOUBLE_EQ(defaults.lin_speed, .08);
+  EXPECT_DOUBLE_EQ(defaults.hold_duration, 2.0);
+  auto default_node = std::make_shared<rclcpp::Node>("pour_tilt_defaults");
+  const auto loaded = load_pour_config(*default_node);
+  EXPECT_DOUBLE_EQ(loaded.tilt_speed, defaults.tilt_speed);
+  EXPECT_DOUBLE_EQ(loaded.tilt_acceleration, defaults.tilt_acceleration);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("pour.tilt_speed", .23),
+      rclcpp::Parameter("pour.tilt_acceleration", .11),
+      rclcpp::Parameter("pour.ptp_speed", .35)});
+  auto node = std::make_shared<rclcpp::Node>("pour_tilt_override", options);
+  const auto configured = load_pour_config(*node);
+  EXPECT_DOUBLE_EQ(configured.tilt_speed, .23);
+  EXPECT_DOUBLE_EQ(configured.tilt_acceleration, .11);
+  EXPECT_DOUBLE_EQ(configured.lin_speed, defaults.lin_speed);
+  EXPECT_DOUBLE_EQ(configured.ptp_speed, .35);
+  EXPECT_TRUE(node->describe_parameter("pour.tilt_speed").read_only);
+  EXPECT_TRUE(node->describe_parameter("pour.tilt_acceleration").read_only);
+}
+
+TEST(PourConfig, RejectsInvalidTiltScalesDuringValidationAndLoading) {
+  for (const std::string field : {"tilt_speed", "tilt_acceleration"}) {
+    for (double value : {0., -.1, 1.01, std::numeric_limits<double>::infinity(),
+             std::numeric_limits<double>::quiet_NaN()}) {
+      PourConfig config;
+      (field == "tilt_speed" ? config.tilt_speed : config.tilt_acceleration) = value;
+      EXPECT_FALSE(config.validate().empty()) << field << "=" << value;
+      rclcpp::NodeOptions options;
+      options.parameter_overrides({rclcpp::Parameter("pour." + field, value)});
+      auto node = std::make_shared<rclcpp::Node>("pour_tilt_invalid", options);
+      EXPECT_THROW(load_pour_config(*node), std::invalid_argument);
+    }
+  }
+}
+
+TEST_F(CupPourFixture, TiltScalesAreIndependentAndLowerRaiseAndPtpAreUnchanged) {
+  basket();
+  pc.clearance = .05;
+  pc.tilt_speed = .23;
+  pc.tilt_acceleration = .11;
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  run(pour);
+  ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  ASSERT_EQ(executor.round_trips.size(), 1u);
+  for (const auto & step : executor.steps) {
+    if (step.name == "pour_tilt" || step.name == "pour_untilt") {
+      EXPECT_DOUBLE_EQ(step.velocity_scale, pc.tilt_speed);
+      EXPECT_DOUBLE_EQ(step.acceleration_scale, pc.tilt_acceleration);
+    } else if (step.name == "pour_lower" || step.name == "pour_raise") {
+      EXPECT_DOUBLE_EQ(step.velocity_scale, pc.lin_speed);
+      EXPECT_DOUBLE_EQ(step.acceleration_scale, pc.lin_speed / 4);
+    } else if (step.name == "pour_above" || step.name == "pour_return") {
+      EXPECT_DOUBLE_EQ(step.velocity_scale, pc.ptp_speed);
+      EXPECT_DOUBLE_EQ(step.acceleration_scale, pc.ptp_speed);
+    }
+  }
+  const std::vector<std::string> expected = {"pour_above", "pour_lower", "pour_tilt",
+      "pour_hold", "pour_untilt", "pour_raise", "pour_return"};
+  std::vector<std::string> names;
+  for (const auto & step : executor.steps) names.push_back(step.name);
+  EXPECT_EQ(names, expected);
+  EXPECT_DOUBLE_EQ(executor.round_trips.front()[1].duration, pc.hold_duration);
+}
+
+TEST_F(CupPourFixture, WholeDurationIncludesAcceptanceApproachAndFinalReturnWithoutA15sTimer) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  pour.request_accepted(Clock::now() - std::chrono::seconds(20));
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.steps.empty(); ++i) {
+    feedback();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.steps.back().name, "pour_above");
+  EXPECT_FALSE(pour.total_duration().has_value());
+  for (int i = 0; i < 60 && executor.steps.back().name != "pour_return"; ++i) {
+    feedback();
+    complete();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.steps.back().name, "pour_return");
+  EXPECT_TRUE(pour.running());
+  EXPECT_FALSE(pour.total_duration().has_value());
+  run(pour);
+  ASSERT_TRUE(pour.result().sequence_completed) << pour.result().detail;
+  ASSERT_TRUE(pour.total_duration().has_value());
+  EXPECT_GE(*pour.total_duration(), 20.0);
+  const auto completed = pour.total_duration();
+  pour.tick();
+  pour.cancel();
+  EXPECT_EQ(pour.total_duration(), completed);
+}
+
+TEST_F(CupPourFixture, WholeDurationIsRecordedOnceForCancellation) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  pour.request_accepted(Clock::now() - std::chrono::seconds(20));
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  pour.cancel();
+  EXPECT_EQ(pour.result().state, "CANCELLED");
+  ASSERT_TRUE(pour.total_duration().has_value());
+  EXPECT_GE(*pour.total_duration(), 20.0);
+  const auto completed = pour.total_duration();
+  pour.tick();
+  pour.cancel();
+  EXPECT_EQ(pour.total_duration(), completed);
+}
+
+TEST_F(CupPourFixture, WholeDurationIsRecordedOnceForApproachFailure) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  pour.request_accepted(Clock::now() - std::chrono::seconds(20));
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.steps.empty(); ++i) {
+    feedback();
+    pour.tick();
+  }
+  executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "approach failed"};
+  pour.tick();
+  EXPECT_EQ(pour.result().state, "FAILED");
+  ASSERT_TRUE(pour.total_duration().has_value());
+  EXPECT_GE(*pour.total_duration(), 20.0);
+  const auto completed = pour.total_duration();
+  pour.tick();
+  EXPECT_EQ(pour.total_duration(), completed);
+}
+
+TEST_F(CupPourFixture, ExecutionFailureWithoutArmDisplacementDoesNotRetry) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.round_trips.empty(); ++i) {
+    feedback();
+    complete();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.round_trips.size(), 1u);
+  executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "tilt execution failed",
+      "pour_tilt"};
+  pour.tick();
+  EXPECT_EQ(pour.result().state, "FAILED");
+  EXPECT_FALSE(pour.result().sequence_completed);
+  EXPECT_EQ(executor.round_trips.size(), 1u);
+  EXPECT_EQ(executor.steps.size(), 2u);
+  EXPECT_EQ(pour.result().last_completed_step, "pour_above");
+}
+
+TEST_F(CupPourFixture, ReturnFailurePreservesHoldAndDoesNotRaiseOrReturn) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.steps.empty(); ++i) pour.tick();
+  for (int i = 0; i < 60 && executor.steps.back().name != "pour_untilt"; ++i) {
+    feedback();
+    complete();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.steps.back().name, "pour_untilt");
+  EXPECT_TRUE(pour.running());
+  EXPECT_FALSE(pour.result().sequence_completed);
+  executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "return execution failed",
+      "pour_untilt", "pour_hold"};
+  pour.tick();
+  EXPECT_EQ(pour.result().state, "FAILED");
+  EXPECT_FALSE(pour.result().sequence_completed);
+  EXPECT_EQ(pour.result().last_completed_step, "pour_hold");
+  EXPECT_EQ(context->snapshot().phase, "pour_untilt");
+  EXPECT_EQ(executor.round_trips.size(), 1u);
+  EXPECT_EQ(executor.steps.back().name, "pour_untilt");
+}
+
+TEST_F(CupPourFixture, StopUnconfirmedDuringRoundTripStaysLatched) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.round_trips.empty(); ++i) {
+    feedback();
+    complete();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.round_trips.size(), 1u);
+  pour.cancel();
+  executor.current = {ExecutionState::StopUnconfirmed, "STOP_UNCONFIRMED", "stop not confirmed",
+      "pour_tilt"};
+  pour.tick();
+  EXPECT_EQ(pour.result().state, "FAULT");
+  EXPECT_EQ(pour.result().code, "STOP_UNCONFIRMED");
+  EXPECT_TRUE(pour.blocks_other_motion());
+  EXPECT_FALSE(pour.start("right", "cup", reason));
+  EXPECT_EQ(executor.round_trips.size(), 1u);
+}
+
+TEST_F(CupPourFixture, CancelDuringRoundTripNeverStartsTheAfterSequence) {
+  basket();
+  CupPourMotion pour(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pour.start("right", "cup", reason));
+  for (int i = 0; i < 60 && executor.round_trips.empty(); ++i) {
+    feedback();
+    complete();
+    pour.tick();
+  }
+  ASSERT_EQ(executor.round_trips.size(), 1u);
+  pour.cancel();
+  pour.tick();
+  EXPECT_EQ(pour.result().state, "CANCELLED");
+  EXPECT_FALSE(pour.result().sequence_completed);
+  EXPECT_EQ(executor.steps.size(), 2u);
 }
 
 TEST_F(ApproachFixture, PickCancelledDuringObservationDoesNotOpenGripper) {

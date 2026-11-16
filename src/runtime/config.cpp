@@ -238,6 +238,11 @@ Config load_config(rclcpp::Node & node) {
   c.pose_position_tolerance = number("pose_position_tolerance", c.pose_position_tolerance);
   c.pose_orientation_tolerance = number("pose_orientation_tolerance", c.pose_orientation_tolerance);
   c.stopped_velocity = number("stopped_velocity", c.stopped_velocity);
+  c.round_trip_wheel_velocity = node.declare_parameter<double>(
+      "round_trip_wheel_velocity", c.round_trip_wheel_velocity, descriptor);
+  if (!std::isfinite(c.round_trip_wheel_velocity) || c.round_trip_wheel_velocity < 0) {
+    throw std::invalid_argument("round_trip_wheel_velocity must be finite and not negative");
+  }
   c.gripper_stop_mode = text("gripper_stop_mode", c.gripper_stop_mode);
   c.require_passive_gripper_stationary = node.declare_parameter<bool>(
       "require_passive_gripper_stationary", c.require_passive_gripper_stationary, descriptor);
@@ -318,7 +323,7 @@ Config load_config(rclcpp::Node & node) {
   for (const std::string direction : {"left_to_right", "right_to_left", "initial_pose",
            "cup_left_to_right", "cup_left_to_right_grasp", "cup_left_to_right_release",
            "cup_right_to_left", "cup_right_to_left_grasp",
-           "cup_right_to_left_release"}) {
+           "cup_right_to_left_release", "right_return"}) {
     MotionSequence sequence;
     sequence.direction = direction;
     const bool from_left = direction.find("left_to_right") != std::string::npos;

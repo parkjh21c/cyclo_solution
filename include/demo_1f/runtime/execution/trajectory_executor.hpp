@@ -18,6 +18,8 @@ public:
   bool ready(const MotionSequence & sequence, std::string & reason) const override;
   bool start(const Step & step) override;
   bool start_sequence(const std::vector<Step> & steps) override;
+  bool start_paired(const Step & pose, const std::vector<Step> & other_arm) override;
+  bool start_round_trip(const Step & tilt, const Step & hold, const Step & untilt) override;
   void tick() override;
   void cancel(
       const std::string & code = "CANCELLED", const std::string & reason = "Cancelled") override;
@@ -27,6 +29,27 @@ private:
   using Move = moveit_msgs::action::MoveGroup;
   using Joint = control_msgs::action::FollowJointTrajectory;
   using Execute = moveit_msgs::action::ExecuteTrajectory;
+
+  enum class RoundPhase { Planning, Validating, Tilt, Hold, ReturnValidating, Untilt };
+  enum class RoundStateIssue { None, Feedback, Position, JointState, WheelVelocity };
+  struct RoundTrip {
+    Step tilt, hold, untilt;
+    RoundPhase phase{RoundPhase::Planning};
+    TimePoint started{Clock::now()}, phase_started{Clock::now()};
+    double timeout{0};
+    bool execution_requested{false};
+    bool retryable{false};
+    std::string last_completed;
+    moveit_msgs::msg::RobotTrajectory forward, backward;
+    std::optional<TimePoint> execution_result_at;
+    std::optional<TimePoint> wheel_settle_started, wheel_stable_since;
+    // Largest wheel |velocity| and |position - initial| seen during one tilt/untilt execution.
+    double wheel_peak_velocity{0}, wheel_peak_offset{0};
+    std::string wheel_peak_velocity_joint, wheel_peak_offset_joint;
+    bool wheel_peaks_pending{false};
+    bool total_logged{false};
+    std::map<std::string, double> initial_positions, scene_positions;
+  };
 
   struct Operation {
     Step step;
@@ -62,7 +85,25 @@ private:
     int fallback_tries{0};                        // fallback plans sent so far
     std::vector<std::string> plan_attempts;       // "pipeline/planner: MoveIt error N" per failure
     std::map<std::string, double> fallback_start; // arm joints when the step was first sent
+    // start_paired: the other arm's joint steps joined to the planned pose path before smoothing.
+    std::vector<Step> paired_steps;
+    std::string paired_log; // "paired approach: left N pts, right M pts"
+    std::optional<RoundTrip> round_trip;
+    size_t action_generation{0};
   };
+
+  void round_trip_scene(const std::shared_ptr<Operation> & op,
+      const moveit_msgs::msg::PlanningScene & message, bool prepare_execution);
+  void accept_round_trip_plan(const std::shared_ptr<Operation> & op, const Move::Result & result);
+  void tick_round_trip(const std::shared_ptr<Operation> & op);
+  bool round_trip_timed_out(const std::shared_ptr<Operation> & op);
+  void send_round_trip_path(const std::shared_ptr<Operation> & op, SmoothPath path);
+  bool round_trip_start_matches(const Operation & op, bool check_active,
+      bool returning, std::string & reason, RoundStateIssue * issue = nullptr) const;
+  void fail_round_trip(const std::shared_ptr<Operation> & op, const std::string & code,
+      const std::string & detail, bool retryable = false);
+  void sample_wheel_peaks(Operation & op) const;
+  void log_wheel_peaks(Operation & op) const;
 
   void send_move(const std::shared_ptr<Operation> & op, bool plan_only = false);
   // True: replanned with the step's fallback planner; false: failure stands (history in detail).
@@ -71,6 +112,8 @@ private:
   void execute_planned_pose(const std::shared_ptr<Operation> & op,
       const moveit_msgs::msg::RobotTrajectory & trajectory);
   void request_scene(const std::shared_ptr<Operation> & op, bool prepare_execution);
+  // Planned pose path + the other arm's straight joint path -> one two-arm segment and step.
+  void pair_with_other_arm(Operation & op);
   void prepare_path(
       const std::shared_ptr<Operation> & op, const moveit_msgs::msg::PlanningScene & scene);
   void update_path_phase(const std::shared_ptr<Operation> & op);

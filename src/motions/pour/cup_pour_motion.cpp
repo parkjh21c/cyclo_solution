@@ -18,18 +18,21 @@ void CupPourMotion::reset() {
   tilt_ = 0;
   tilt_start_joints_.clear();
   retries_.clear();
+  started_.reset();
+  total_seconds_.reset();
 }
 
 namespace {
 Step lin(const std::string & name, const std::string & arm, const std::string & frame,
-    const geometry_msgs::msg::Pose & pose, double speed, const std::string & type = "linear") {
+    const geometry_msgs::msg::Pose & pose, double speed, const std::string & type = "linear",
+    double acceleration = 0) {
   Step s;
   s.name = name;
   s.type = type;
   s.arm = arm;
   s.frame = frame;
   s.velocity_scale = speed;
-  s.acceleration_scale = type == "linear" ? speed / 4 : speed;
+  s.acceleration_scale = acceleration > 0 ? acceleration : type == "linear" ? speed / 4 : speed;
   s.timeout = 60;
   const auto & p = pose.position;
   const auto & q = pose.orientation;
@@ -95,17 +98,20 @@ std::optional<CupPourMotion::Parts> CupPourMotion::build(
   }
   const auto & frame = robot_.planning_frame;
   Parts parts;
+  parts.basket = *basket;
   std::vector<Step> before = {lin("pour_above", arm, frame, plan->above, pour_.ptp_speed, "pose")};
   if (plan->raise > 0) {
     before.push_back(lin("pour_lower", arm, frame, plan->lowered, pour_.lin_speed));
   }
   parts.before = part(arm, before);
   parts.angles.push_back(pour_.angle_deg);
-  parts.tilts.push_back(part(arm, {lin("pour_tilt", arm, frame, plan->tilted, pour_.lin_speed)}));
+  parts.tilts.push_back(part(arm, {lin("pour_tilt", arm, frame, plan->tilted,
+      pour_.tilt_speed, "linear", pour_.tilt_acceleration)}));
   for (size_t i = 0; i < plan->fallbacks.size(); ++i) {
     parts.angles.push_back(pour_.fallback_angles_deg[i]);
     parts.tilts.push_back(
-        part(arm, {lin("pour_tilt", arm, frame, plan->fallbacks[i], pour_.lin_speed)}));
+        part(arm, {lin("pour_tilt", arm, frame, plan->fallbacks[i],
+            pour_.tilt_speed, "linear", pour_.tilt_acceleration)}));
   }
   Step hold;
   hold.name = "pour_hold";
@@ -113,7 +119,10 @@ std::optional<CupPourMotion::Parts> CupPourMotion::build(
   hold.arm = arm;
   hold.duration = pour_.hold_duration;
   hold.timeout = pour_.hold_duration + 5;
-  std::vector<Step> after = {hold, lin("pour_untilt", arm, frame, plan->lowered, pour_.lin_speed)};
+  parts.hold = hold;
+  parts.untilt = lin("pour_untilt", arm, frame, plan->lowered,
+      pour_.tilt_speed, "linear", pour_.tilt_acceleration);
+  std::vector<Step> after;
   if (plan->raise > 0) {
     after.push_back(lin("pour_raise", arm, frame, plan->above, pour_.lin_speed));
   }
@@ -133,7 +142,10 @@ std::optional<CupPourMotion::Parts> CupPourMotion::build(
     if (!reason.empty()) return std::nullopt;
   }
   for (const auto & tilt : parts.tilts) {
-    reason = validate_motion_sequence(tilt, robot_);
+    auto round_trip = tilt;
+    round_trip.steps.push_back(parts.hold);
+    round_trip.steps.push_back(parts.untilt);
+    reason = validate_motion_sequence(round_trip, robot_);
     if (!reason.empty()) return std::nullopt;
   }
   return parts;
@@ -154,15 +166,47 @@ bool CupPourMotion::start(const std::string & arm,
     const std::string & cup_id,
     std::string & reason,
     bool execute) {
-  if (!is_ready_to_start(arm, cup_id, reason, execute)) {
+  const auto started = accepted_at_.value_or(Clock::now());
+  const bool accepted = accepted_at_.has_value();
+  accepted_at_.reset();
+  const auto rejected = [&]() {
+    if (accepted) {
+      started_ = started;
+      total_seconds_ = elapsed(started);
+      RCLCPP_INFO(rclcpp::get_logger("handover_demo"),
+          "cup pour: total %.3f s, result=FAILED, code=NOT_READY, detail=%s",
+          *total_seconds_, reason.c_str());
+    }
     return false;
+  };
+  if (!is_ready_to_start(arm, cup_id, reason, execute)) {
+    return rejected();
   }
   auto parts = build(arm, reason); // Frozen at start: the basket may update while pouring.
   if (!parts || !CupMotion::start(arm, cup_id, reason, execute)) {
-    return false;
+    return rejected();
   }
   parts_ = *parts;
+  started_ = started;
+  const auto & b = parts_.basket;
+  const auto & q = b.pose.orientation;
+  const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+  RCLCPP_INFO(rclcpp::get_logger("handover_demo"),
+      "cup pour: basket %.3f %.3f %.3f yaw %.1f deg, age %.1f s, execute=%s",
+      b.pose.position.x, b.pose.position.y, b.pose.position.z, yaw * 180 / M_PI,
+      (context_.now() - rclcpp::Time(b.header.stamp)).seconds(),
+      execute ? "true" : "false");
   return true;
+}
+
+void CupPourMotion::finish_timing() {
+  if (!started_ || running() || total_seconds_) return;
+  total_seconds_ = elapsed(*started_);
+  RCLCPP_INFO(rclcpp::get_logger("handover_demo"),
+      "cup pour: total %.3f s, result=%s, code=%s, last=%s, phase=%s, execute=%s",
+      *total_seconds_, result_.state.c_str(), result_.code.c_str(),
+      result_.last_completed_step.c_str(), context_.snapshot().phase.c_str(),
+      execute_ ? "true" : "false");
 }
 
 bool CupPourMotion::run(const MotionSequence & sequence) {
@@ -189,6 +233,16 @@ bool CupPourMotion::arm_unmoved() const {
   return true;
 }
 
+bool CupPourMotion::run_round_trip() {
+  phase(parts_.tilts[tilt_].steps.front().name);
+  if (executor_.start_round_trip(parts_.tilts[tilt_].steps.front(), parts_.hold, parts_.untilt)) {
+    return true;
+  }
+  const auto outcome = executor_.result();
+  fail(outcome.code.empty() ? "COMMAND_REJECTED" : outcome.code, retries_ + outcome.detail);
+  return false;
+}
+
 void CupPourMotion::finish_cancelled() {
   result_.state = "CANCELLED";
   result_.code = "CANCELLED";
@@ -200,14 +254,23 @@ void CupPourMotion::cancel() {
     return;
   }
   result_.state = "CANCELLING";
-  if (sequence_.running()) {
+  if (stage_ == Stage::Tilt) {
+    executor_.cancel();
+  } else if (sequence_.running()) {
     sequence_.cancel();
   } else {
     finish_cancelled();
   }
+  finish_timing();
 }
 
 void CupPourMotion::tick() {
+  if (!running()) return;
+  tick_pour();
+  finish_timing();
+}
+
+void CupPourMotion::tick_pour() {
   if (!running()) {
     return;
   }
@@ -232,29 +295,73 @@ void CupPourMotion::tick() {
     if (run(parts_.before)) stage_ = Stage::Before;
     return;
   }
+  if (stage_ == Stage::Tilt) {
+    executor_.tick();
+    const auto outcome = executor_.result();
+    if (!outcome.last_completed_step.empty()) {
+      result_.last_completed_step = outcome.last_completed_step;
+    }
+    if (!outcome.phase.empty()) {
+      context_.set_phase(outcome.phase, result_.last_completed_step);
+    }
+    result_.detail = outcome.detail;
+    if (outcome.state == ExecutionState::Running || outcome.state == ExecutionState::Cancelling) {
+      return;
+    }
+    if (outcome.state == ExecutionState::StopUnconfirmed) {
+      fail(outcome.code, retries_ + outcome.detail);
+      return;
+    }
+    if (outcome.state == ExecutionState::Cancelled) {
+      finish_cancelled();
+      return;
+    }
+    if (outcome.state != ExecutionState::Succeeded) {
+      std::string reason;
+      if (result_.state != "CANCELLING" && outcome.state == ExecutionState::Failed &&
+          outcome.retryable_before_motion && tilt_ + 1 < parts_.tilts.size() &&
+          context_.ready(reason) && arm_unmoved()) {
+        std::ostringstream note;
+        note << parts_.angles[tilt_] << " deg failed (" << outcome.detail << "); ";
+        retries_ += note.str();
+        ++tilt_;
+        run_round_trip();
+        return;
+      }
+      fail(outcome.code.empty() ? "EXECUTION_FAILED" : outcome.code, retries_ + outcome.detail);
+      return;
+    }
+    if (result_.state == "CANCELLING") {
+      finish_cancelled();
+      return;
+    }
+    stage_ = Stage::After;
+    run(parts_.after);
+    return;
+  }
   sequence_.tick();
   if (sequence_.running()) {
     result_.detail = sequence_.result().detail;
     return;
   }
   const auto & outcome = sequence_.result();
-  result_.last_completed_step = outcome.last_completed_step;
-  if (outcome.state == "CANCELLED" || (result_.state == "CANCELLING" && outcome.state != "SUCCEEDED")) {
+  if (!outcome.last_completed_step.empty()) {
+    result_.last_completed_step = outcome.last_completed_step;
+  }
+  if (outcome.code == "STOP_UNCONFIRMED") {
+    fail(outcome.code, retries_ + outcome.detail);
+    return;
+  }
+  if (outcome.state == "CANCELLED") {
     finish_cancelled();
     return;
   }
   if (outcome.state != "SUCCEEDED") {
-    // A tilt that failed before the arm moved (e.g. a wrist limit) is retried less steeply.
-    if (stage_ == Stage::Tilt && outcome.state == "FAILED" && tilt_ + 1 < parts_.tilts.size() &&
-        arm_unmoved()) {
-      std::ostringstream note;
-      note << parts_.angles[tilt_] << " deg failed (" << outcome.detail << "); ";
-      retries_ += note.str();
-      ++tilt_;
-      run(parts_.tilts[tilt_]);
-      return;
-    }
     fail(outcome.code.empty() ? "EXECUTION_FAILED" : outcome.code, retries_ + outcome.detail);
+    return;
+  }
+  if (result_.state == "CANCELLING") {
+    finish_cancelled();
     return;
   }
   if (stage_ == Stage::Before) {
@@ -265,12 +372,7 @@ void CupPourMotion::tick() {
       if (joint != snapshot.joints.end()) tilt_start_joints_.push_back(joint->second.position);
     }
     stage_ = Stage::Tilt;
-    run(parts_.tilts[tilt_]);
-    return;
-  }
-  if (stage_ == Stage::Tilt) {
-    stage_ = Stage::After;
-    run(parts_.after);
+    run_round_trip();
     return;
   }
   std::ostringstream detail;

@@ -7,6 +7,7 @@
 #include "demo_1f/motions/handover/handover_motion.hpp"
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/msg/demo_status.hpp"
+#include <map>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
@@ -56,6 +57,21 @@ private:
   int demo_retries_{0}, demo_max_retries_{2};
   double demo_retry_delay_{1.0}, demo_pick_timeout_{180.0};
   TimePoint demo_deadline_{}, demo_stage_started_{};
+
+  // Cell rounds PICK_DYNAMIXEL -> HANDOVER -> APPROACH_CUP -> REFINE_CUP until the basket is empty.
+  enum class BasketVerdict { Unknown, HasCell, EmptyConfirmed };
+  void enter_demo_stage(const std::string & stage);
+  void finish_cell_round();
+  void decide_empty_basket(const std::string & pick_message);
+  int demo_max_cell_rounds_{10};
+  double demo_basket_empty_max_age_{5.0};
+  int demo_rounds_{0};       // Toward demo.max_cell_rounds; a resume after the limit restarts it.
+  int demo_total_rounds_{0}; // Since the last start command.
+  bool demo_round_limit_hit_{false};
+  BasketVerdict demo_basket_{BasketVerdict::Unknown};
+  std::map<std::string, double> demo_round_stage_seconds_;
+  double demo_cell_seconds_{0}, demo_cup_seconds_{0};
+  TimePoint demo_started_{}, demo_stage_entered_{};
 
   using Action = demo_1f::action::Handover;
   using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;

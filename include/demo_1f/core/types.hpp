@@ -31,6 +31,8 @@ struct ExecutionResult {
   std::string code;
   std::string detail;
   std::string phase{};
+  std::string last_completed_step{};
+  bool retryable_before_motion{false};
 };
 
 struct MotionLimits {
@@ -124,6 +126,7 @@ struct Config {
   double pose_position_tolerance{0.005};
   double pose_orientation_tolerance{0.03};
   double stopped_velocity{0.03};
+  double round_trip_wheel_velocity{0}; // Zero inherits stopped_velocity.
   std::string gripper_stop_mode{"position_window"};
   bool require_passive_gripper_stationary{true};
   double gripper_stop_window{0.5};

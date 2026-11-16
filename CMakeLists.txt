@@ -66,6 +66,8 @@ add_library(
   src/runtime/state/joint_feedback.cpp
   src/runtime/state/transforms.cpp
   src/runtime/execution/trajectory_executor.cpp
+  src/runtime/execution/round_trip.cpp
+  src/runtime/execution/round_trip_collision.cpp
   src/runtime/execution/path_preparation.cpp
   src/runtime/execution/moveit_goal.cpp
   src/runtime/execution/gripper.cpp
@@ -199,6 +201,7 @@ install(PROGRAMS scripts/perception_viewer.py scripts/action_runner.py scripts/w
 )
 
 install(FILES scripts/wrist_cup_geometry.py scripts/table_geometry.py scripts/initial_pose_check.py
+              scripts/basket_observer_state.py
         DESTINATION lib/${PROJECT_NAME})
 install(
   DIRECTORY scripts/demo_perception
@@ -212,6 +215,8 @@ if(BUILD_TESTING)
   add_test(NAME test_gripper_model COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_gripper_model.py")
   add_test(NAME test_initial_pose_check
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_initial_pose_check.py")
+  add_test(NAME test_basket_observer_state
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_basket_observer_state.py")
   ament_add_gtest(test_demo_task test/test_demo_task.cpp TIMEOUT 60)
   target_link_libraries(test_demo_task demo_tasks)
   set_tests_properties(test_demo_task PROPERTIES ENVIRONMENT "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=151;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
@@ -225,7 +230,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_handover demo_tasks)
   ament_add_gtest(test_start_state_bounds test/test_start_state_bounds.cpp TIMEOUT 30)
   target_link_libraries(test_start_state_bounds demo_start_state_adapter)
-  ament_add_gtest(test_trajectory_smoother test/test_trajectory_smoother.cpp TIMEOUT 90)
+  ament_add_gtest(test_trajectory_smoother test/test_trajectory_smoother.cpp
+                  test/test_round_trip_collision.cpp TIMEOUT 90)
   target_link_libraries(test_trajectory_smoother demo_runtime)
   ament_target_dependencies(test_start_state_bounds moveit_core rclcpp)
   # This is an offline RobotModel test. Avoid the base image's Zenoh logger

@@ -2,7 +2,9 @@
 #include "demo_1f/tasks/demo_recovery.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -11,6 +13,16 @@ namespace {
 TimePoint after(double seconds) {
   return Clock::now() + std::chrono::duration_cast<Clock::duration>(
                             std::chrono::duration<double>(seconds));
+}
+
+bool is_cell_stage(const std::string & stage) {
+  return stage == "PICK_DYNAMIXEL" || stage == "HANDOVER" || stage == "APPROACH_CUP" ||
+         stage == "REFINE_CUP";
+}
+
+bool is_cup_stage(const std::string & stage) {
+  return stage == "WITHDRAW_CUP" || stage == "PICK_CUP" || stage == "HANDOVER_CUP" ||
+         stage == "POUR_CUP" || stage == "HANDOVER_CUP_BACK" || stage == "PLACE_CUP";
 }
 } // namespace
 
@@ -30,7 +42,10 @@ void TaskManager::setup_demo_server() {
   demo_retry_delay_ = node_.declare_parameter<double>("demo.retry_delay", 1.0);
   demo_pick_timeout_ = node_.declare_parameter<double>("demo.pick_timeout", 180.0);
   demo_withdraw_cup_ = node_.declare_parameter<bool>("demo.withdraw_cup", false);
-  if (demo_max_retries_ < 0 || demo_retry_delay_ < 0 || demo_pick_timeout_ <= 0) {
+  demo_max_cell_rounds_ = node_.declare_parameter<int>("demo.max_cell_rounds", 10);
+  demo_basket_empty_max_age_ = node_.declare_parameter<double>("demo.basket_empty_max_age", 5.0);
+  if (demo_max_retries_ < 0 || demo_retry_delay_ < 0 || demo_pick_timeout_ <= 0 ||
+      demo_max_cell_rounds_ < 1 || !(demo_basket_empty_max_age_ > 0)) {
     throw std::invalid_argument("Invalid demo retry/timeout parameters");
   }
   reset_demo_service_ = node_.create_service<std_srvs::srv::Trigger>("~/reset_demo",
@@ -62,7 +77,9 @@ void TaskManager::setup_demo_server() {
             !context_.ready(reason) ||
             (!resume && request->command != "pick" &&
                 (!initial_motion_ || !initial_motion_->is_ready_to_start(reason))) ||
-            (!initial_only && (!resume || demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "PICK_DYNAMIXEL") &&
+            // A resumed cell round picks again after REFINE_CUP.
+            (!initial_only &&
+                (!resume || demo_stage_ == "INITIALIZE_ROBOT" || is_cell_stage(demo_stage_)) &&
                 !pick_client_->action_server_is_ready()) ||
             (!initial_only && request->command != "pick" &&
                 (!demo_cup_module("/approach_cup") || !demo_cup_module("/refine_cup") ||
@@ -92,13 +109,23 @@ void TaskManager::setup_demo_server() {
         demo_retry_wait_ = false;
         demo_stage_active_ = false;
         if (handle->get_goal()->command != "resume") {
-          demo_stage_ = handle->get_goal()->command == "pick" ? "PICK_DYNAMIXEL" : "INITIALIZE_ROBOT";
+          enter_demo_stage(
+              handle->get_goal()->command == "pick" ? "PICK_DYNAMIXEL" : "INITIALIZE_ROBOT");
           demo_completed_stage_.clear();
           demo_cup_id_ = handle->get_goal()->cup_id.empty() ? "cup" : handle->get_goal()->cup_id;
           demo_pick_only_ = handle->get_goal()->command == "pick";
           demo_initial_only_ = handle->get_goal()->command == "initial";
+          demo_rounds_ = demo_total_rounds_ = 0;
+          demo_round_limit_hit_ = false;
+          demo_basket_ = BasketVerdict::Unknown;
+          demo_round_stage_seconds_.clear();
+          demo_cell_seconds_ = demo_cup_seconds_ = 0;
+          demo_started_ = Clock::now();
         } else {
           demo_pick_only_ = false;
+          if (demo_round_limit_hit_) demo_rounds_ = 0; // New round batch after CELL_ROUND_LIMIT.
+          demo_round_limit_hit_ = false;
+          demo_stage_entered_ = Clock::now(); // Stage times exclude the operator pause.
         }
         demo_resumable_ = false;
         demo_detail_ = "Starting " + demo_stage_;
@@ -213,6 +240,11 @@ void TaskManager::finish_demo(bool success, const std::string & code,
   else if (success) demo_goal_->succeed(result);
   else demo_goal_->abort(result);
   RCLCPP_INFO(node_.get_logger(), "Demo %s: %s", success ? "SUCCEEDED" : "STOPPED", detail.c_str());
+  if (!demo_pick_only_ && !demo_initial_only_) {
+    RCLCPP_INFO(node_.get_logger(),
+        "Demo summary: rounds %d, cell section %.1f s, cup section %.1f s, total %.1f s",
+        demo_total_rounds_, demo_cell_seconds_, demo_cup_seconds_, elapsed(demo_started_));
+  }
   demo_goal_.reset();
   active_cup_motion_ = nullptr;
   demo_stage_active_ = false;
@@ -233,6 +265,61 @@ void TaskManager::fail_demo_stage(const std::string & code,
     return;
   }
   finish_demo(false, code, detail, retryable);
+}
+
+void TaskManager::enter_demo_stage(const std::string & stage) {
+  demo_stage_ = stage;
+  demo_stage_entered_ = Clock::now();
+}
+
+void TaskManager::finish_cell_round() {
+  ++demo_rounds_;
+  ++demo_total_rounds_;
+  const auto seconds = [this](const char * stage) {
+    const auto it = demo_round_stage_seconds_.find(stage);
+    return it == demo_round_stage_seconds_.end() ? 0.0 : it->second;
+  };
+  double round_seconds = 0;
+  for (const auto & [stage, value] : demo_round_stage_seconds_) round_seconds += value;
+  demo_cell_seconds_ += round_seconds;
+  RCLCPP_INFO(node_.get_logger(),
+      "Round %d done in %.1f s: PICK_DYNAMIXEL %.1f s, HANDOVER %.1f s, APPROACH_CUP %.1f s, "
+      "REFINE_CUP %.1f s",
+      demo_total_rounds_, round_seconds, seconds("PICK_DYNAMIXEL"), seconds("HANDOVER"),
+      seconds("APPROACH_CUP"), seconds("REFINE_CUP"));
+  demo_round_stage_seconds_.clear();
+  enter_demo_stage("PICK_DYNAMIXEL");
+}
+
+void TaskManager::decide_empty_basket(const std::string & pick_message) {
+  // The pick's "no object twice" counts only while the wrist observer saw the basket recently.
+  const auto basket = context_.basket();
+  std::optional<double> age;
+  if (basket && basket->header.frame_id == context_.planning_frame()) {
+    age = (context_.now() - rclcpp::Time(basket->header.stamp)).seconds();
+  }
+  const bool fresh = age && *age <= demo_basket_empty_max_age_;
+  demo_basket_ = fresh ? BasketVerdict::EmptyConfirmed : BasketVerdict::Unknown;
+  char age_text[32] = "none";
+  if (age) std::snprintf(age_text, sizeof(age_text), "%.1f s", *age);
+  RCLCPP_INFO(node_.get_logger(),
+      "Basket check: %s, rounds completed %d, basket age %s, pick: %s",
+      fresh ? "EMPTY_CONFIRMED" : "UNKNOWN", demo_total_rounds_, age_text, pick_message.c_str());
+  if (!fresh) {
+    fail_demo_stage("BASKET_UNKNOWN",
+        std::string("Pick found no object but the basket view is ") +
+            (age ? "older than demo.basket_empty_max_age" : "missing or not in the planning frame") +
+            "; cup section not started; " + pick_message,
+        true);
+    return;
+  }
+  demo_cell_seconds_ += elapsed(demo_stage_entered_);
+  demo_round_stage_seconds_.clear();
+  demo_stage_active_ = false;
+  demo_retries_ = 0;
+  enter_demo_stage(demo_withdraw_cup_ && demo_total_rounds_ >= 1 ? "WITHDRAW_CUP" : "PICK_CUP");
+  context_.set_phase(demo_stage_, demo_completed_stage_);
+  demo_detail_ = "Basket empty confirmed; starting " + demo_stage_;
 }
 
 void TaskManager::tick_demo() {
@@ -298,9 +385,16 @@ void TaskManager::tick_demo() {
             detail.empty() ? "Stopped; grippers unchanged" : detail);
         return;
       }
-      if (!success) {
+      if (!success && demo_stage_ == "PICK_DYNAMIXEL" && !demo_pick_only_ &&
+          code == "BASKET_EMPTY" && pick_result_ && !pick_result_->motion_started &&
+          pick_result_->stop_confirmed) {
+        decide_empty_basket(detail); // Not a failure or retry when the basket view is fresh.
+      } else if (!success) {
         fail_demo_stage(code.empty() ? "EXECUTION_FAILED" : code, detail, retryable);
       } else {
+        const double stage_seconds = elapsed(demo_stage_entered_);
+        if (is_cell_stage(demo_stage_)) demo_round_stage_seconds_[demo_stage_] = stage_seconds;
+        if (is_cup_stage(demo_stage_)) demo_cup_seconds_ += stage_seconds;
         demo_completed_stage_ = demo_stage_;
         demo_stage_active_ = false;
         demo_retries_ = 0;
@@ -310,27 +404,37 @@ void TaskManager::tick_demo() {
             finish_demo(true, "", "Initial pose reached; no pick started");
             return;
           }
-          demo_stage_ = "PICK_DYNAMIXEL";
+          enter_demo_stage("PICK_DYNAMIXEL");
         } else if (demo_stage_ == "PICK_DYNAMIXEL") {
-          demo_stage_ = "HANDOVER";
+          demo_basket_ = BasketVerdict::HasCell;
+          enter_demo_stage("HANDOVER");
           if (demo_pick_only_) {
             finish_demo(true, "", "Pick complete; resume continues with handover", true);
             return;
           }
-        } else if (demo_stage_ == "HANDOVER") demo_stage_ = "APPROACH_CUP";
-        else if (demo_stage_ == "APPROACH_CUP") demo_stage_ = "REFINE_CUP";
-        else if (demo_stage_ == "REFINE_CUP")
-          demo_stage_ = demo_withdraw_cup_ ? "WITHDRAW_CUP" : "PICK_CUP"; // Cup position is already saved.
-        else if (demo_stage_ == "WITHDRAW_CUP") demo_stage_ = "PICK_CUP";
-        else if (demo_stage_ == "PICK_CUP") demo_stage_ = "HANDOVER_CUP";
-        else if (demo_stage_ == "HANDOVER_CUP") demo_stage_ = "POUR_CUP";
-        else if (demo_stage_ == "POUR_CUP") demo_stage_ = "HANDOVER_CUP_BACK";
-        else if (demo_stage_ == "HANDOVER_CUP_BACK") demo_stage_ = "PLACE_CUP";
-        else if (demo_stage_ == "PLACE_CUP") demo_stage_ = "RETURN_INITIAL";
+        } else if (demo_stage_ == "HANDOVER") enter_demo_stage("APPROACH_CUP");
+        else if (demo_stage_ == "APPROACH_CUP") enter_demo_stage("REFINE_CUP");
+        else if (demo_stage_ == "REFINE_CUP") {
+          finish_cell_round(); // Next round picks again; the cup section waits for an empty basket.
+          if (demo_rounds_ >= demo_max_cell_rounds_) {
+            demo_round_limit_hit_ = true;
+            finish_demo(false, "CELL_ROUND_LIMIT",
+                std::to_string(demo_rounds_) + " cell rounds reached demo.max_cell_rounds; "
+                "resume picks again with a new round count", true);
+            return;
+          }
+        } else if (demo_stage_ == "WITHDRAW_CUP") enter_demo_stage("PICK_CUP");
+        else if (demo_stage_ == "PICK_CUP") enter_demo_stage("HANDOVER_CUP");
+        else if (demo_stage_ == "HANDOVER_CUP") enter_demo_stage("POUR_CUP");
+        else if (demo_stage_ == "POUR_CUP") enter_demo_stage("HANDOVER_CUP_BACK");
+        else if (demo_stage_ == "HANDOVER_CUP_BACK") enter_demo_stage("PLACE_CUP");
+        else if (demo_stage_ == "PLACE_CUP") enter_demo_stage("RETURN_INITIAL");
         else {
-          finish_demo(true, "", "Pick, handover, cup release, cup pick, pour, cup handover back "
-                               "and place completed; both arms at the initial pose; transfers, "
-                               "pour and placement are not sensor-verified");
+          finish_demo(true, "", std::to_string(demo_total_rounds_) +
+                                    " cell round(s) until the basket was empty, then cup pick, "
+                                    "pour, cup handover back and place completed; both arms at "
+                                    "the initial pose; transfers, pour and placement are not "
+                                    "sensor-verified");
           return;
         }
         context_.set_phase(demo_stage_, demo_completed_stage_);
@@ -343,11 +447,14 @@ void TaskManager::tick_demo() {
     feedback->stage = demo_stage_;
     feedback->phase = demo_retry_wait_ ? "RECOVERY_WAIT" : demo_stage_ == "PICK_DYNAMIXEL" ?
         pick_phase_ : context_.snapshot().phase;
-    feedback->detail = demo_detail_;
+    const bool in_round = !demo_pick_only_ && !demo_initial_only_ && is_cell_stage(demo_stage_);
+    feedback->detail = in_round
+        ? "Round " + std::to_string(demo_total_rounds_ + 1) + ": " + demo_detail_ : demo_detail_;
     feedback->retry_count = demo_retries_;
     feedback->holding_state = "UNVERIFIED";
     demo_goal_->publish_feedback(feedback);
-    context_.set_task(demo_retry_wait_ ? "RECOVERING" : "RUNNING", "right_to_left", "", demo_detail_);
+    context_.set_task(demo_retry_wait_ ? "RECOVERING" : "RUNNING", "right_to_left", "",
+        feedback->detail);
   }
 }
 } // namespace demo_1f

@@ -125,7 +125,22 @@ bool TrajectoryExecutor::ready(const MotionSequence & sequence, std::string & re
 }
 
 ExecutionResult TrajectoryExecutor::result() const {
-  return operation_ ? operation_->result : ExecutionResult{};
+  if (!operation_) return ExecutionResult{};
+  auto outcome = operation_->result;
+  // start_paired failed before its combined path was sent: neither arm was commanded.
+  if (!operation_->paired_steps.empty() && outcome.state == ExecutionState::Failed &&
+      !operation_->executing_path && !operation_->cancel_requested) {
+    outcome.detail = outcome.code + ": " + outcome.detail;
+    outcome.code = "PAIRED_BEFORE_MOTION";
+  }
+  if (operation_->round_trip) {
+    const auto & trip = *operation_->round_trip;
+    outcome.phase = operation_->step.name;
+    outcome.last_completed_step = trip.last_completed;
+    outcome.retryable_before_motion = outcome.state == ExecutionState::Failed &&
+        trip.retryable && !trip.execution_requested && !operation_->cancel_requested;
+  }
+  return outcome;
 }
 
 void TrajectoryExecutor::publish_state() {
@@ -189,13 +204,41 @@ void TrajectoryExecutor::cancel(const std::string & code, const std::string & re
   if (!op || op->result.state != ExecutionState::Running) {
     return;
   }
+  if (op->round_trip) {
+    const auto & trip = *op->round_trip;
+    auto cause = reason;
+    std::replace(cause.begin(), cause.end(), '\n', ' ');
+    std::replace(cause.begin(), cause.end(), '\r', ' ');
+    const char * phase = "planning";
+    switch (trip.phase) {
+      case RoundPhase::Planning: phase = "planning"; break;
+      case RoundPhase::Validating: phase = "validating"; break;
+      case RoundPhase::Tilt: phase = "tilt"; break;
+      case RoundPhase::Hold: phase = "hold"; break;
+      case RoundPhase::ReturnValidating: phase = "return_validating"; break;
+      case RoundPhase::Untilt: phase = "untilt"; break;
+    }
+    RCLCPP_WARN(node_.get_logger(),
+        "round trip: cancel decision phase=%s step=%s execution_result_received=%s "
+        "success=%s phase_elapsed=%.3f s code=%s cause=%s",
+        phase, op->step.name.c_str(), trip.execution_result_at ? "true" : "false",
+        trip.execution_result_at && op->action_success ? "true" : "false",
+        elapsed(trip.phase_started), code.c_str(), cause.c_str());
+    log_wheel_peaks(*op); // Only while a tilt/untilt execution has not logged its peaks yet.
+  }
   op->cancel_requested = true;
   op->cancel_code = code;
   op->cancel_reason = reason;
   op->cancelling = Clock::now();
   op->stable_since.reset();
   op->result = {ExecutionState::Cancelling, code, reason};
-  if (op->step.type == "wait") {
+  if (op->round_trip) {
+    op->round_trip->retryable = false;
+    op->round_trip->forward = moveit_msgs::msg::RobotTrajectory{};
+    op->round_trip->backward = moveit_msgs::msg::RobotTrajectory{};
+    op->path = SmoothPath();
+  }
+  if (op->step.type == "wait" && !op->round_trip) {
     op->result.state = code == "CANCELLED" ? ExecutionState::Cancelled : ExecutionState::Failed;
   } else if (op->topic_command) {
     publish_hold(op);
@@ -225,7 +268,10 @@ void TrajectoryExecutor::tick() {
   if (!op) {
     return;
   }
-  if (op->preparation.valid() &&
+  if (op->round_trip) {
+    tick_round_trip(op);
+  }
+  if (!op->round_trip && op->preparation.valid() &&
       op->preparation.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     try {
       auto path = op->preparation.get();
@@ -319,6 +365,11 @@ void TrajectoryExecutor::tick() {
               op->steps.size(),
               rclcpp::Duration(goal.trajectory.joint_trajectory.points.back().time_from_start)
                   .seconds());
+          if (!op->paired_log.empty()) {
+            RCLCPP_INFO(node_.get_logger(), "%s, duration %.1f s", op->paired_log.c_str(),
+                rclcpp::Duration(goal.trajectory.joint_trajectory.points.back().time_from_start)
+                    .seconds());
+          }
         }
       }
     } catch (const std::exception & error) {
@@ -328,7 +379,7 @@ void TrajectoryExecutor::tick() {
     }
   }
   update_path_phase(op);
-  if (op->result.state == ExecutionState::Running) {
+  if (!op->round_trip && op->result.state == ExecutionState::Running) {
     if (elapsed(op->started) >= op->step.timeout) {
       cancel("TIMEOUT",
           "Step timed out: " + op->step.name + "; " + op->completion_wait_reason +
@@ -382,6 +433,17 @@ void TrajectoryExecutor::tick() {
           "STOP_UNCONFIRMED",
           op->cancel_reason + "; stop not confirmed"};
     }
+  }
+  if (op->round_trip && op->result.state != ExecutionState::Running &&
+      op->result.state != ExecutionState::Cancelling) {
+    if (!op->round_trip->total_logged) {
+      RCLCPP_INFO(node_.get_logger(), "round trip: terminal %s, total %.3f s, code=%s",
+          to_string(op->result.state), elapsed(op->round_trip->started), op->result.code.c_str());
+      op->round_trip->total_logged = true;
+    }
+    op->round_trip->forward = moveit_msgs::msg::RobotTrajectory{};
+    op->round_trip->backward = moveit_msgs::msg::RobotTrajectory{};
+    op->path = SmoothPath();
   }
   publish_state();
 }

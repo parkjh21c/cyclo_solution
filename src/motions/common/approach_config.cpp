@@ -127,6 +127,8 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
       node.declare_parameter("approach.refine_observe", c.refine_observe, descriptor);
   c.offset_xy = node.declare_parameter("approach.offset_xy", c.offset_xy, descriptor);
   c.cup_source = node.declare_parameter("approach.cup_source", c.cup_source, descriptor);
+  c.other_arm_return_sequence = node.declare_parameter(
+      "approach.other_arm_return_sequence", c.other_arm_return_sequence, descriptor);
   return c;
 }
 
