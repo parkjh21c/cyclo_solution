@@ -267,7 +267,7 @@ handover_demo:
           - -1.9681034
           - 1.43097349
           - 0.27834375
-      # approach.other_arm_return_sequence target; same steps as right_to_left (keep both equal).
+      # approach.other_arm_return_sequence target: the right arm folds, then opens to the initial pose.
       right_return:
         steps:
         - giver_home_via
@@ -282,14 +282,15 @@ handover_demo:
           acceleration_scale: 0.35
           tolerance: 0.05
           timeout: 45.0
+          # Folded bringup pose (step0): fold first, then open to the initial pose.
           target:
-          - 1.05
-          - -0.65717678
+          - 1.57
           - 0.0
-          - -1.50082468
-          - -1.9681034
-          - 1.43097349
-          - 0.27834375
+          - 0.0
+          - -2.8
+          - 0.0
+          - 0.0
+          - 0.0
         giver_home:
           type: joint
           arm: giver
