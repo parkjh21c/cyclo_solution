@@ -21,6 +21,20 @@ public:
     return false;
   }
 
+  // One arm's joint steps run beside the main operation (false: not started).
+  virtual bool start_side(const std::vector<Step> &) {
+    return false;
+  }
+
+  virtual void tick_side() {}
+
+  virtual void cancel_side(
+      const std::string & = "CANCELLED", const std::string & = "Cancelled") {}
+
+  virtual ExecutionResult side_result() const {
+    return {};
+  }
+
   virtual void tick() = 0;
   virtual void cancel(
       const std::string & code = "CANCELLED", const std::string & reason = "Cancelled") = 0;

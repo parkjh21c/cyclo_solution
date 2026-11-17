@@ -6,7 +6,9 @@ namespace demo_1f {
 inline bool demo_can_retry(const std::string & stage, const std::string & code) {
   if (stage == "INITIALIZE_ROBOT") return code == "SCENE_UNAVAILABLE";
   if (stage == "APPROACH_CUP") {
-    return code == "CUP_NOT_FOUND" || code == "CUP_CHANGED" || code == "SCENE_UNAVAILABLE";
+    // SIDE_BEFORE_MOTION: the other arm's return failed before sending anything.
+    return code == "CUP_NOT_FOUND" || code == "CUP_CHANGED" || code == "SCENE_UNAVAILABLE" ||
+           code == "SIDE_BEFORE_MOTION";
   }
   if (stage == "REFINE_CUP") {
     return code == "WRIST_NOT_READY" || code == "WRIST_INPUT_MISSING" ||

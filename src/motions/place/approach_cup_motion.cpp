@@ -79,7 +79,8 @@ bool ApproachCupMotion::begin_approach() {
   // The saved head cup target and obstacle were captured together in FIND_CUP.
   // Later head-camera noise or occlusion must not change this approach.
   phase("MOVE_TO_OBSERVE");
-  other_steps_ = other_arm_steps();
+  // Independent return: TaskManager already started the other arm; this moves one arm only.
+  other_steps_ = config_.independent_return ? std::vector<Step>{} : other_arm_steps();
   other_next_ = 0;
   if (other_steps_.empty()) {
     return dispatch(approach_target_.pose, config_.travel_scale);

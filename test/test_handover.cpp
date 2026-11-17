@@ -549,8 +549,9 @@ protected:
       joint_servers[side] = rclcpp_action::create_server<Joint>(
           mock,
           arm.trajectory_action,
-          [this, side](const rclcpp_action::GoalUUID &, std::shared_ptr<const Joint::Goal>) {
+          [this, side](const rclcpp_action::GoalUUID &, std::shared_ptr<const Joint::Goal> goal) {
             requests.push_back("gripper:" + side);
+            joint_goals.push_back(*goal);
             return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
           },
           [this](std::shared_ptr<JointHandle>) {
@@ -725,7 +726,8 @@ protected:
     })) << reason;
   }
 
-  void enable_smoothing() {
+  // arm_geometry: a box on left_joint0 and right_joint0; they meet when left - right = pi/2.
+  void enable_smoothing(bool arm_geometry = false) {
     config.smooth_motion = true;
     configure_five_step_sequences(config);
     for (auto & [direction, sequence] : config.motion_sequences) {
@@ -740,8 +742,13 @@ protected:
     srdf << "<robot name='smoothing_mock'><group name='" << config.coordinated_group << "'>";
     for (const auto & [name, position] : positions) {
       (void)position;
-      urdf << "<link name='" << name << "_link'/><joint name='" << name
-           << "' type='revolute'><parent link='base_link'/><child link='" << name
+      const bool body = arm_geometry && (name == "left_joint0" || name == "right_joint0");
+      urdf << "<link name='" << name << "_link'>"
+           << (body ? "<collision><origin xyz='0.5 0 0'/><geometry><box size='0.4 0.05 0.05'/>"
+                      "</geometry></collision>" : "")
+           << "</link><joint name='" << name << "' type='revolute'>"
+           << (body && name == "right_joint0" ? "<origin rpy='0 0 1.5707963'/>" : "")
+           << "<parent link='base_link'/><child link='" << name
            << "_link'/><axis xyz='0 0 1'/><limit lower='-3' upper='3' effort='10' "
               "velocity='2'/></joint>";
       srdf << "<joint name='" << name << "'/>";
@@ -831,6 +838,7 @@ protected:
   rclcpp::TimerBase::SharedPtr timer;
   std::vector<std::shared_ptr<MoveHandle>> moves;
   std::vector<std::shared_ptr<JointHandle>> grippers;
+  std::vector<Joint::Goal> joint_goals;
   std::vector<std::string> requests;
   std::vector<Move::Goal> move_goals;
   std::string omitted_joint;
@@ -1113,6 +1121,263 @@ TEST_F(RosFixture, PairedNeedsSmoothMotionAndTheOtherArmsJointSteps) {
   for (auto & step : same_arm) step.arm = "left";
   EXPECT_FALSE(executor.start_paired(paired_pose(), same_arm));
   EXPECT_TRUE(move_goals.empty());
+}
+
+// Side return: right arm joint0 via then home; full speed keeps the prepared path short.
+std::vector<Step> side_steps(double via, double home) {
+  auto steps = right_home_steps();
+  steps[0].target = std::vector<double>(7, 0.0);
+  steps[0].target[0] = via;
+  steps[1].target = std::vector<double>(7, 0.0);
+  steps[1].target[0] = home;
+  for (auto & step : steps) step.velocity_scale = step.acceleration_scale = 1.0;
+  return steps;
+}
+
+Step left_joint_step(double first) {
+  Step step;
+  step.name = "left_move";
+  step.type = "joint";
+  step.arm = "left";
+  step.target = std::vector<double>(7, 0.0);
+  step.target[0] = first;
+  step.tolerance = .01;
+  step.timeout = 5;
+  return step;
+}
+
+class SideFixture : public RosFixture {
+protected:
+  void begin(bool arm_geometry = false) {
+    enable_smoothing(arm_geometry);
+    // The mock plan has no timing; give the planned main path a duration.
+    transform_plan = [](Move::Result & result) {
+      result.planned_trajectory.joint_trajectory.points.back().time_from_start =
+          rclcpp::Duration::from_seconds(.2);
+    };
+    executor = std::make_unique<TrajectoryExecutor>(*node, config, *context);
+    warmup(*executor);
+  }
+
+  bool start_side(const std::vector<Step> & steps) {
+    // Retries only while the right controller client is still discovering its server.
+    return until([&] { return executor->start_side(steps); }, 2.0, tick());
+  }
+
+  std::function<void()> tick() {
+    return [this] { executor->tick(); };
+  }
+
+  bool side_sent() {
+    return until([&] { return !joint_goals.empty(); }, 5.0, tick());
+  }
+
+  ExecutionState side_state() const { return executor->side_result().state; }
+
+  std::unique_ptr<TrajectoryExecutor> executor;
+};
+
+TEST_F(SideFixture, SideSendsOnlyArmJointsToItsControllerWithoutMoveGroup) {
+  begin();
+  ASSERT_TRUE(start_side(side_steps(.2, .3))) << executor->side_result().detail;
+  ASSERT_TRUE(until([&] { return side_state() != ExecutionState::Running; }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Succeeded) << executor->side_result().detail;
+  ASSERT_EQ(joint_goals.size(), 1u);
+  EXPECT_EQ(joint_goals[0].trajectory.joint_names, config.arms.at("right").joints);
+  EXPECT_TRUE(execution_goals.empty());
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_NEAR(positions.at("right_joint0"), .3, 1e-6);
+  EXPECT_EQ(executor->result().state, ExecutionState::Idle); // The main slot was never used.
+}
+
+TEST_F(SideFixture, SideAlreadyHomeSendsNothing) {
+  positions["right_joint0"] = .3;
+  begin();
+  const auto scenes = scene_requests;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  EXPECT_EQ(side_state(), ExecutionState::Succeeded);
+  EXPECT_TRUE(joint_goals.empty());
+  EXPECT_EQ(scene_requests, scenes);
+}
+
+TEST_F(SideFixture, LeftMainRunsWhileTheRightSideMoves) {
+  begin();
+  auto_gripper = false; // The side goal stays in flight.
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(side_sent()) << executor->side_result().detail;
+  positions["right_joint1"] = .05; // The right arm is moving.
+  velocities["right_joint1"] = .3;
+  const auto step = left_joint_step(.1);
+  std::string reason;
+  ASSERT_TRUE(until([&] {
+    return executor->ready(MotionSequence{"", "", "", {step}, ""}, reason);
+  }, 2.0, tick())) << reason;
+  ASSERT_TRUE(executor->start(step)) << executor->result().detail;
+  ASSERT_TRUE(until([&] {
+    return executor->result().state != ExecutionState::Running;
+  }, 5.0, tick()));
+  EXPECT_EQ(executor->result().state, ExecutionState::Succeeded) << executor->result().detail;
+  EXPECT_EQ(side_state(), ExecutionState::Running);
+  ASSERT_EQ(execution_goals.size(), 1u);
+  EXPECT_EQ(execution_goals[0].trajectory.joint_trajectory.joint_names,
+      config.arms.at("left").joints);
+  ASSERT_EQ(move_goals.size(), 1u);
+  EXPECT_TRUE(move_goals[0].planning_options.plan_only); // Planned first for the pair check.
+  velocities["right_joint1"] = 0;
+  auto_gripper = true;
+  ASSERT_TRUE(until([&] { return side_state() != ExecutionState::Running; }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Succeeded) << executor->side_result().detail;
+}
+
+TEST_F(SideFixture, MainUsingTheSideArmIsRefused) {
+  begin();
+  auto_gripper = false;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(side_sent());
+  Step right = left_joint_step(.1);
+  right.arm = "right";
+  EXPECT_FALSE(executor->start(right));
+  EXPECT_EQ(executor->result().code, "SIDE_ARM_BUSY");
+  Step gripper;
+  gripper.name = "right_open";
+  gripper.type = "gripper";
+  gripper.arm = "right";
+  gripper.target = {0.0};
+  gripper.timeout = 2;
+  EXPECT_FALSE(executor->start(gripper));
+  EXPECT_EQ(executor->result().code, "SIDE_ARM_BUSY");
+  const auto & ready = config.motion_sequences.at("left_to_right").steps.front(); // dual_joint
+  EXPECT_FALSE(executor->start_sequence({ready}));
+  EXPECT_EQ(executor->result().code, "SIDE_ARM_BUSY");
+  EXPECT_FALSE(executor->start_paired(paired_pose(), right_home_steps()));
+  EXPECT_TRUE(move_goals.empty());
+  ASSERT_EQ(joint_goals.size(), 1u); // Only the side goal reached the right controller.
+  executor->cancel_side(); // cancel() stops the main operation only.
+  ASSERT_TRUE(until([&] { return side_state() != ExecutionState::Cancelling; }, 2.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Cancelled);
+}
+
+TEST_F(SideFixture, MainPathMeetingTheSidePathWaitsAndReplansAfterTheSide) {
+  begin(true);
+  auto_gripper = false;
+  // Side right_joint0 -> -0.6 -> -0.1; main left_joint0 -> 1.0 meets it at (1.0, -0.6).
+  ASSERT_TRUE(start_side(side_steps(-.6, -.1))) << executor->side_result().detail;
+  ASSERT_TRUE(side_sent()) << executor->side_result().detail;
+  ASSERT_TRUE(executor->start(left_joint_step(1.0))) << executor->result().detail;
+  ASSERT_TRUE(until([&] { return executor->result().phase == "WAIT_SIDE_ARM"; }, 5.0, tick()))
+      << executor->result().detail;
+  EXPECT_EQ(executor->result().state, ExecutionState::Running);
+  EXPECT_TRUE(execution_goals.empty()); // Nothing sent while the paths collide.
+  auto_gripper = true;
+  ASSERT_TRUE(until([&] {
+    return executor->result().state != ExecutionState::Running;
+  }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Succeeded);
+  EXPECT_EQ(executor->result().state, ExecutionState::Succeeded) << executor->result().detail;
+  ASSERT_EQ(move_goals.size(), 2u); // Planned again from the start after the side arrived.
+  EXPECT_FALSE(move_goals[1].planning_options.plan_only);
+  EXPECT_NEAR(positions.at("left_joint0"), 1.0, 1e-6);
+}
+
+TEST_F(SideFixture, SideStartCollidingWithTheOtherArmSendsNothing) {
+  positions["left_joint0"] = 1.2; // The right path crosses -0.37 where the boxes meet.
+  begin(true);
+  ASSERT_TRUE(start_side(side_steps(-.5, -.4)));
+  ASSERT_TRUE(until([&] { return side_state() != ExecutionState::Running; }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Failed);
+  EXPECT_TRUE(executor->side_result().retryable_before_motion);
+  EXPECT_NE(executor->side_result().detail.find("collision"), std::string::npos)
+      << executor->side_result().detail;
+  EXPECT_TRUE(joint_goals.empty());
+}
+
+TEST_F(SideFixture, SideFailureAfterMotionCancelsMainAndSideOutlivesMainFailure) {
+  begin();
+  auto_gripper = false;
+  auto_execute = false;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(side_sent());
+  ASSERT_TRUE(executor->start(left_joint_step(.1)));
+  ASSERT_TRUE(until([&] { return !executions.empty(); }, 5.0, tick()));
+  ASSERT_FALSE(grippers.empty());
+  auto aborted = std::make_shared<Joint::Result>();
+  aborted->error_code = Joint::Result::PATH_TOLERANCE_VIOLATED;
+  grippers.back()->abort(aborted);
+  grippers.pop_back();
+  ASSERT_TRUE(until([&] {
+    return executor->result().state != ExecutionState::Running &&
+           executor->result().state != ExecutionState::Cancelling &&
+           side_state() != ExecutionState::Cancelling;
+  }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Failed);
+  EXPECT_FALSE(executor->side_result().retryable_before_motion);
+  EXPECT_EQ(executor->result().code, "SIDE_ARM_FAILED") << executor->result().detail;
+
+  // A new side keeps going through a main failure and a main cancel, then arrives.
+  positions["right_joint0"] = 0;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(until([&] { return joint_goals.size() == 2; }, 5.0, tick()));
+  move_error = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+  ASSERT_TRUE(executor->start(left_joint_step(.1)));
+  ASSERT_TRUE(until([&] {
+    return executor->result().state == ExecutionState::Failed;
+  }, 5.0, tick()));
+  until([] { return false; }, .1, tick()); // Keep ticking: the side must not be cancelled.
+  EXPECT_EQ(side_state(), ExecutionState::Running);
+  move_error = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+  ASSERT_TRUE(executor->start(left_joint_step(.1)));
+  ASSERT_TRUE(until([&] { return executions.size() == 1; }, 5.0, tick()));
+  executor->cancel();
+  ASSERT_TRUE(until([&] {
+    return executor->result().state == ExecutionState::Cancelled;
+  }, 2.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Running);
+  auto_gripper = true;
+  ASSERT_TRUE(until([&] { return side_state() != ExecutionState::Running; }, 5.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Succeeded) << executor->side_result().detail;
+  EXPECT_NEAR(positions.at("right_joint0"), .3, 1e-6);
+}
+
+TEST_F(SideFixture, ExecutorCancelStopsMainOnlyAndAnUnconfirmedSideStopLatches) {
+  begin();
+  auto_gripper = false;
+  auto_execute = false;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(side_sent());
+  ASSERT_TRUE(executor->start(left_joint_step(.1)));
+  ASSERT_TRUE(until([&] { return !executions.empty(); }, 5.0, tick()));
+  executor->cancel();
+  ASSERT_TRUE(until([&] {
+    return executor->result().state == ExecutionState::Cancelled;
+  }, 2.0, tick()));
+  EXPECT_EQ(side_state(), ExecutionState::Running); // ExecutorPort::cancel is main only.
+  executor->cancel_side();
+  ASSERT_TRUE(until([&] { return side_state() == ExecutionState::Cancelled; }, 2.0, tick()));
+
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(until([&] { return joint_goals.size() == 2; }, 5.0, tick()));
+  executor->cancel_side();
+  velocities["right_joint0"] = .5; // The right arm never reports a stop.
+  ASSERT_TRUE(until([&] { return side_state() == ExecutionState::StopUnconfirmed; }, 2.0, tick()));
+  EXPECT_EQ(executor->result().state, ExecutionState::StopUnconfirmed);
+  EXPECT_FALSE(executor->start(left_joint_step(.1)));
+}
+
+TEST_F(SideFixture, MainStopUnconfirmedCancelsTheSide) {
+  begin();
+  auto_gripper = false;
+  auto_execute = false;
+  ASSERT_TRUE(start_side(side_steps(.2, .3)));
+  ASSERT_TRUE(side_sent());
+  ASSERT_TRUE(executor->start(left_joint_step(.1)));
+  ASSERT_TRUE(until([&] { return !executions.empty(); }, 5.0, tick()));
+  executor->cancel();
+  velocities["left_joint0"] = .5; // The left arm never reports a stop.
+  ASSERT_TRUE(until([&] {
+    return executor->result().state == ExecutionState::StopUnconfirmed &&
+           side_state() != ExecutionState::Running && side_state() != ExecutionState::Cancelling;
+  }, 2.0, tick()));
+  EXPECT_EQ(executor->side_result().code, "MAIN_STOP_UNCONFIRMED");
 }
 
 TEST_F(RosFixture, HeldGripperDriftFailsAtTheDefaultToleranceWithNumbers) {

@@ -62,3 +62,36 @@ handover_demo:
           velocity_scale: 0.35
           acceleration_scale: 0.35
           timeout: 45.0
+      # head joint
+      look_right:
+        steps: [turn_head]
+        turn_head:
+          type: joint_group
+          group: head
+          joint_names: [head_joint1, head_joint2]
+          target: [0.69, -0.26]
+          velocity_scale: 0.15
+          acceleration_scale: 0.15
+          timeout: 15.0
+
+      look_left:
+        steps: [turn_head]
+        turn_head:
+          type: joint_group
+          group: head
+          joint_names: [head_joint1, head_joint2]
+          target: [0.69, 0.26]
+          velocity_scale: 0.15
+          acceleration_scale: 0.15
+          timeout: 15.0
+
+      look_middle:
+        steps: [turn_head]
+        turn_head:
+          type: joint_group
+          group: head
+          joint_names: [head_joint1, head_joint2]
+          target: [0.69, 0.0]
+          velocity_scale: 0.15
+          acceleration_scale: 0.15
+          timeout: 15.0

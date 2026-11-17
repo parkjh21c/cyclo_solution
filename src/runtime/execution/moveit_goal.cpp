@@ -403,11 +403,14 @@ void TrajectoryExecutor::execute_planned_pose(const std::shared_ptr<Operation> &
   }
   Execute::Goal goal;
   goal.trajectory = planned; // Execute exactly the validated MoveIt path; no extra smoothing.
-  planned_trajectory_publisher_->publish(trajectory);
-  RCLCPP_INFO(node_.get_logger(), "Executing planned %s, duration %.3f s", op->step.name.c_str(), duration);
-  dispatch<Execute>(execute_client_, goal, op, [](const Execute::Result & result) {
-    return result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS
-               ? std::string{} : "MoveIt execution error " + std::to_string(result.error_code.val);
+  gate_main(op, trajectory, [this, op, goal, duration]() {
+    planned_trajectory_publisher_->publish(goal.trajectory.joint_trajectory);
+    RCLCPP_INFO(node_.get_logger(), "Executing planned %s, duration %.3f s", op->step.name.c_str(),
+        duration);
+    dispatch<Execute>(execute_client_, goal, op, [](const Execute::Result & result) {
+      return result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS
+                 ? std::string{} : "MoveIt execution error " + std::to_string(result.error_code.val);
+    });
   });
 }
 } // namespace demo_1f

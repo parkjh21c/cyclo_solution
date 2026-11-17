@@ -1,6 +1,7 @@
 #include "demo_1f/tasks/task_manager.hpp"
 #include "demo_1f/tasks/demo_recovery.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <future>
@@ -11,6 +12,11 @@
 
 namespace demo_1f {
 namespace {
+std::uint64_t next_request_identity() {
+  static std::atomic<std::uint64_t> sequence{0};
+  return ++sequence;
+}
+
 TimePoint after(double seconds) {
   return Clock::now() + std::chrono::duration_cast<Clock::duration>(
                             std::chrono::duration<double>(seconds));
@@ -28,7 +34,7 @@ bool is_cup_stage(const std::string & stage) {
 } // namespace
 
 bool TaskManager::demo_busy() const {
-  return demo_goal_ || pick_pending_ || pick_handle_ || demo_faulted_;
+  return demo_goal_ || pick_unsettled() || demo_faulted_;
 }
 
 CupMotion * TaskManager::demo_cup_module(const std::string & action) {
@@ -46,6 +52,10 @@ void TaskManager::setup_demo_server() {
   demo_max_cell_rounds_ = node_.declare_parameter<int>("demo.max_cell_rounds", 10);
   demo_basket_empty_max_age_ = node_.declare_parameter<double>("demo.basket_empty_max_age", 5.0);
   demo_prepare_pick_ = node_.declare_parameter<bool>("demo.prepare_pick_during_refine", false);
+  // load_approach_config may already own this parameter.
+  demo_independent_return_ = node_.has_parameter("demo.independent_return") ?
+      node_.get_parameter("demo.independent_return").as_bool() :
+      node_.declare_parameter<bool>("demo.independent_return", true);
   if (demo_max_retries_ < 0 || demo_retry_delay_ < 0 || demo_pick_timeout_ <= 0 ||
       demo_max_cell_rounds_ < 1 || !(demo_basket_empty_max_age_ > 0)) {
     throw std::invalid_argument("Invalid demo retry/timeout parameters");
@@ -53,7 +63,8 @@ void TaskManager::setup_demo_server() {
   reset_demo_service_ = node_.create_service<std_srvs::srv::Trigger>("~/reset_demo",
       [this](std_srvs::srv::Trigger::Request::ConstSharedPtr,
           std_srvs::srv::Trigger::Response::SharedPtr response) {
-        response->success = !shutdown_requested_ && !demo_busy() && !goal_start_pending_ &&
+        response->success = !shutdown_requested_ && !demo_busy() && !side_active() &&
+            !goal_start_pending_ &&
             !active_goal_handle_ && !cup_goal_ && !motion_.running() && !cup_motion_blocked();
         if (!response->success) {
           response->message = "Cannot reset while busy or stop/scene is unconfirmed";
@@ -74,7 +85,7 @@ void TaskManager::setup_demo_server() {
         const bool initial_only = request->command == "initial" || (resume && demo_initial_only_);
         const bool valid = resume || request->command == "initial" ||
             request->command == "start" || request->command == "pick";
-        if (!valid || shutdown_requested_ || demo_busy() || goal_start_pending_ ||
+        if (!valid || shutdown_requested_ || demo_busy() || side_active() || goal_start_pending_ ||
             active_goal_handle_ || cup_goal_ || motion_.running() || cup_motion_blocked() ||
             (resume && !demo_resumable_) ||
             !context_.ready(reason) ||
@@ -102,11 +113,16 @@ void TaskManager::setup_demo_server() {
         if (handle != demo_goal_) return rclcpp_action::CancelResponse::REJECT;
         demo_cancel_requested_ = true;
         cancel_demo_motion();
+        cancel_side_return(); // Operator cancel stops the side return too.
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](const std::shared_ptr<DemoHandle> handle) {
         goal_start_pending_ = false;
         demo_goal_ = handle;
+        demo_run_id_ = next_request_identity();
+        pick_.reset();
+        side_failure_.reset(); // An earlier run's side outcome is not this run's.
+        side_waiting_ = demo_prepare_deferred_ = false;
         demo_cancel_requested_ = shutdown_requested_;
         demo_retries_ = 0;
         demo_retry_wait_ = false;
@@ -142,33 +158,50 @@ void TaskManager::cancel_demo_motion() {
   if ((demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "RETURN_INITIAL") && initial_motion_)
     initial_motion_->cancel();
   if (active_cup_motion_ && demo_goal_) active_cup_motion_->cancel();
+  cancel_head();
 }
 
 void TaskManager::start_demo_stage() {
   demo_stage_started_ = Clock::now();
   demo_stage_active_ = true;
+  demo_prepare_deferred_ = false;
+  if (side_waiting_) {
+    side_waiting_ = false;
+    RCLCPP_INFO(node_.get_logger(), "%s waited %.1f s for the %s arm return",
+        demo_stage_.c_str(), elapsed(side_wait_started_), side_->arm().c_str());
+  }
   std::string reason;
   if (demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "RETURN_INITIAL") {
+    cancel_head(); // The initial sequence moves the head through MoveIt on the same controller.
     if (!initial_motion_ || !initial_motion_->start(reason)) {
       finish_demo(false, "NOT_READY", reason.empty() ? "Initial pose module missing" : reason, true);
     }
     return;
   }
+  command_head(demo_stage_); // Runs beside the stage; its outcome is only logged.
+  if (demo_stage_ == "APPROACH_CUP" && side_ && demo_independent_return_ &&
+      !start_side_return(reason)) {
+    // Nothing moved: handled like the stage's other failures before motion.
+    fail_demo_stage("SIDE_BEFORE_MOTION", reason,
+        demo_can_retry(demo_stage_, "SIDE_BEFORE_MOTION"));
+    return;
+  }
   if (demo_stage_ == "PICK_DYNAMIXEL") {
-    if (pick_early_) { // Requested during REFINE_CUP: take it over instead of a new request.
-      pick_early_ = false;
-      pick_owned_ = true;
-      pick_held_at_entry_ = pick_holding_;
-      if (pick_result_) {
+    if (pick_ && pick_->early) { // Requested during REFINE_CUP: take it over instead of a new request.
+      pick_->early = false;
+      pick_->owned = true;
+      pick_->stage_started_at = demo_stage_started_;
+      pick_->held_at_entry = pick_->holding;
+      if (pick_->result) {
         RCLCPP_INFO(node_.get_logger(),
             "Prepared pick: sent %.1f s into the demo at REFINE_CUP start; finished before "
             "PICK_DYNAMIXEL (%s)",
-            std::chrono::duration<double>(pick_sent_at_ - demo_started_).count(),
-            pick_result_->error_code.empty() ? "no code" : pick_result_->error_code.c_str());
+            std::chrono::duration<double>(pick_->sent_at - demo_started_).count(),
+            pick_->result->error_code.empty() ? "no code" : pick_->result->error_code.c_str());
         return; // tick_demo handles the result as if it arrived now.
       }
-      pick_release_wanted_ = true;
-      demo_detail_ = pick_holding_ ? "Prepared pick holding; releasing" :
+      pick_->release_wanted = true;
+      demo_detail_ = pick_->holding ? "Prepared pick holding; releasing" :
                                      "Prepared pick still planning";
       return;
     }
@@ -191,78 +224,165 @@ void TaskManager::start_demo_stage() {
   const auto stage = cup_stages.find(demo_stage_);
   active_cup_motion_ = stage == cup_stages.end() ? nullptr : demo_cup_module(stage->second.first);
   const auto arm = stage == cup_stages.end() ? std::string() : stage->second.second;
+  if (demo_independent_return_ &&
+      (demo_stage_ == "HANDOVER_CUP_BACK" || demo_stage_ == "PLACE_CUP") &&
+      !b2_return_ready(reason)) {
+    finish_demo(false, "NOT_READY", reason, false);
+    return;
+  }
   if (!active_cup_motion_ || !active_cup_motion_->start(arm, demo_cup_id_, reason, true)) {
     finish_demo(false, "NOT_READY", reason.empty() ? "Cup module missing" : reason, true);
     return;
   }
-  if (demo_stage_ == "REFINE_CUP") prepare_pick();
+  if (demo_stage_ == "PLACE_CUP" && demo_independent_return_ && !start_side_return(reason)) {
+    active_cup_motion_->cancel();
+    fail_demo_stage("SIDE_BEFORE_MOTION", reason, false);
+    return;
+  }
+  if (demo_stage_ == "REFINE_CUP") {
+    // The early pick moves the side arm: it waits until the side return has arrived.
+    demo_prepare_deferred_ = side_active();
+    if (!demo_prepare_deferred_) prepare_pick();
+  }
+}
+
+bool TaskManager::pick_in_flight() const {
+  return std::any_of(pick_requests_.begin(), pick_requests_.end(), [](const auto & request) {
+    return request->pending || request->handle;
+  });
+}
+
+bool TaskManager::pick_action_unsettled() const {
+  return pick_in_flight() || std::any_of(pick_requests_.begin(), pick_requests_.end(),
+      [](const auto & request) {
+        return request->dispatch_unknown || !request->result || !request->result->stop_confirmed;
+      });
+}
+
+bool TaskManager::pick_release_pending() const {
+  return std::any_of(pick_requests_.begin(), pick_requests_.end(), [](const auto & request) {
+    return request->release_sent && !request->release_response_received;
+  });
+}
+
+bool TaskManager::pick_unsettled() const {
+  return pick_action_unsettled() || pick_release_pending();
+}
+
+void TaskManager::maintain_pick_requests() {
+  for (const auto & request : pick_requests_) {
+    poll_pick_release(request);
+  }
+  pick_requests_.erase(std::remove_if(pick_requests_.begin(), pick_requests_.end(),
+      [this](const auto & request) {
+        return request != pick_ && !request->pending && !request->handle &&
+            !request->dispatch_unknown && request->result && request->result->stop_confirmed &&
+            (!request->release_sent || request->release_response_received) &&
+            !request->release_future.valid();
+      }), pick_requests_.end());
 }
 
 std::string TaskManager::send_pick_goal(bool hold) {
-  pick_result_.reset();
-  pick_handle_.reset();
-  pick_pending_ = true;
-  pick_cancel_sent_ = pick_cancel_wanted_ = false;
-  pick_holding_ = pick_held_at_entry_ = pick_release_wanted_ = false;
-  pick_release_error_.clear();
-  pick_release_future_ = {};
-  pick_owned_ = !hold;
-  pick_early_ = hold;
-  pick_sent_at_ = Clock::now();
-  pick_phase_ = "PICK_STARTING";
+  if (pick_release_pending()) return "An earlier pick release has no processing confirmation";
+  if (demo_faulted_ || pick_unsettled()) {
+    demo_faulted_ = true;
+    return "An earlier pick request has no confirmed final stop";
+  }
+  const auto request = std::make_shared<PickRequestContext>(
+      PickRequestId{demo_run_id_, next_request_identity()});
+  request->owned = !hold;
+  request->early = request->hold_requested = hold;
+  request->sent_at = Clock::now();
+  request->stage_started_at = demo_stage_started_;
+  pick_ = request;
+  pick_requests_.push_back(request);
   PickAction::Goal goal;
   goal.execute = true;
   goal.move_to_observe = false; // Full demo initializes first; pick-only uses the operator's current pose.
   goal.hold_before_motion = hold;
   rclcpp_action::Client<PickAction>::SendGoalOptions options;
-  options.goal_response_callback = [this](PickHandle::SharedPtr handle) {
-    pick_pending_ = false;
-    pick_handle_ = handle;
-    if (!handle) {
-      pick_result_ = std::make_shared<PickAction::Result>();
-      pick_result_->stop_confirmed = true;
-      pick_result_->error_code = "PICK_REJECTED";
-      pick_result_->message = "Pick backend rejected request";
-    } else if (!demo_goal_ || demo_cancel_requested_ || demo_faulted_ || pick_cancel_wanted_) {
-      pick_cancel_sent_ = true;
-      pick_client_->async_cancel_goal(handle);
-    }
+  options.goal_response_callback = [this, request](PickHandle::SharedPtr handle) {
+    on_pick_goal_response(request, handle);
   };
-  options.feedback_callback = [this](PickHandle::SharedPtr,
+  options.feedback_callback = [this, request](PickHandle::SharedPtr,
       const std::shared_ptr<const PickAction::Feedback> feedback) {
-    pick_holding_ = pick_holding_ || feedback->phase == "PICK_HOLD";
-    pick_phase_ = feedback->phase;
-    if (!pick_early_) demo_detail_ = feedback->detail; // REFINE_CUP keeps its own progress.
+    on_pick_feedback(request, feedback);
   };
-  options.result_callback = [this](const PickHandle::WrappedResult & result) {
-    pick_handle_.reset();
-    pick_pending_ = false;
-    pick_holding_ = false;
-    pick_result_ = result.result;
-    if (!pick_result_) {
-      pick_result_ = std::make_shared<PickAction::Result>();
-      pick_result_->error_code = "STOP_UNCONFIRMED";
-      pick_result_->message = "Pick backend returned no result";
-    } else if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-      pick_result_->success = false;
-    }
+  options.result_callback = [this, request](const PickHandle::WrappedResult & result) {
+    on_pick_result(request, result);
   };
   try {
     pick_client_->async_send_goal(goal, options);
   } catch (const std::exception & error) {
-    pick_pending_ = pick_early_ = false;
+    request->pending = request->early = false;
+    request->dispatch_unknown = true;
     demo_faulted_ = true; // Dispatch outcome is unknown; do not send another motion.
     return error.what();
   }
   return {};
 }
 
+void TaskManager::on_pick_goal_response(const PickRequest & request, PickHandle::SharedPtr handle) {
+  if (request->goal_response_received) return;
+  request->goal_response_received = true;
+  request->pending = false;
+  if (request->result_received) return;
+  request->handle = handle;
+  if (!handle) {
+    request->dispatch_unknown = false;
+    request->result_received = true;
+    request->result = std::make_shared<PickAction::Result>();
+    request->result->stop_confirmed = true;
+    request->result->error_code = "PICK_REJECTED";
+    request->result->message = "Pick backend rejected request";
+  } else if (request != pick_ || request->id.run != demo_run_id_ || !demo_goal_ ||
+      demo_cancel_requested_ || demo_faulted_ || request->cancel_wanted) {
+    cancel_pick(request);
+  }
+}
+
+void TaskManager::on_pick_feedback(const PickRequest & request,
+    PickAction::Feedback::ConstSharedPtr feedback) {
+  if (request->result_received || !feedback) return;
+  request->feedback = feedback;
+  request->holding = request->holding || feedback->phase == "PICK_HOLD";
+  request->phase = feedback->phase;
+  if (request == pick_ && request->id.run == demo_run_id_ && demo_goal_ &&
+      !request->early && !request->cancel_wanted) demo_detail_ = feedback->detail;
+}
+
+void TaskManager::on_pick_result(const PickRequest & request, const PickHandle::WrappedResult & result) {
+  if (request->result_received) return;
+  request->result_received = true;
+  request->handle.reset();
+  request->pending = request->dispatch_unknown = request->holding = false;
+  request->result_code = result.code;
+  if (!result.result) {
+    request->result = std::make_shared<PickAction::Result>();
+    request->result->error_code = "STOP_UNCONFIRMED";
+    request->result->message = "Pick backend returned no result";
+  } else {
+    request->result = std::make_shared<PickAction::Result>(*result.result);
+    if (result.code != rclcpp_action::ResultCode::SUCCEEDED) request->result->success = false;
+  }
+  if (!request->result->stop_confirmed) demo_faulted_ = true;
+}
+
+void TaskManager::cancel_pick(const PickRequest & request) {
+  if (!request->cancel_wanted) request->cancel_requested_at = Clock::now();
+  request->cancel_wanted = true; // Acceptance after cancellation still cancels this request's handle.
+  request->early = request->release_wanted = false;
+  if (request->handle && !request->cancel_sent) {
+    request->cancel_sent = true;
+    pick_client_->async_cancel_goal(request->handle);
+  }
+}
+
 void TaskManager::cancel_pick() {
-  pick_cancel_wanted_ = true; // A request still awaiting acceptance is cancelled on acceptance.
-  pick_early_ = pick_release_wanted_ = false;
-  if (pick_handle_ && !pick_cancel_sent_) {
-    pick_cancel_sent_ = true;
-    pick_client_->async_cancel_goal(pick_handle_);
+  for (const auto & request : pick_requests_) {
+    if (request == pick_ || request->pending || request->handle || request->dispatch_unknown ||
+        (request->release_sent && !request->release_response_received))
+      cancel_pick(request);
   }
 }
 
@@ -271,7 +391,7 @@ void TaskManager::prepare_pick() {
   std::string reason;
   if (demo_rounds_ + 1 >= demo_max_cell_rounds_) {
     reason = "this round reaches demo.max_cell_rounds";
-  } else if (pick_handle_ || pick_pending_) {
+  } else if (pick_unsettled()) {
     reason = "an earlier pick request is still ending";
   } else if (demo_cancel_requested_ || demo_faulted_) {
     reason = "demo stopping";
@@ -294,42 +414,61 @@ void TaskManager::prepare_pick() {
   }
 }
 
+void TaskManager::on_pick_release_response(const PickRequest & request,
+    std_srvs::srv::Trigger::Response::SharedPtr response) {
+  if (request->release_response_received) return;
+  request->release_response_received = static_cast<bool>(response);
+  request->release_response = response;
+  if (!response || !response->success) {
+    if (!request->release_timed_out) {
+      request->release_error = "Pick release refused: " +
+          (response ? response->message : std::string("no response"));
+    }
+    if (!response) demo_faulted_ = true;
+    cancel_pick(request);
+  }
+}
+
+void TaskManager::poll_pick_release(const PickRequest & request) {
+  if (!request->release_future.valid()) return;
+  if (request->release_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    const auto response = request->release_future.get();
+    request->release_future = {};
+    on_pick_release_response(request, response);
+  } else if (!request->release_timed_out && elapsed(request->release_sent_at) > 5.0) {
+    // A local timeout does not cancel remote service processing or its future response.
+    request->release_timed_out = true;
+    request->release_error = "Pick release unanswered for 5 s";
+    demo_faulted_ = true;
+    cancel_pick(request);
+  }
+}
+
 void TaskManager::tick_pick_release() {
-  if (pick_release_future_.valid()) {
-    std::string error;
-    if (pick_release_future_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-      const auto response = pick_release_future_.get();
-      if (!response || !response->success) {
-        error = "Pick release refused: " + (response ? response->message : std::string("no response"));
-      }
-    } else if (elapsed(pick_release_sent_at_) > 5.0) {
-      error = "Pick release unanswered for 5 s";
-    } else {
-      return;
-    }
-    pick_release_future_ = {};
-    if (!error.empty()) {
-      pick_release_error_ = error;
-      cancel_pick(); // The arm has not moved; the result then fails the stage.
-    }
+  const auto request = pick_;
+  if (!request) return;
+  if (request->release_future.valid()) {
+    poll_pick_release(request);
     return;
   }
-  if (!pick_release_wanted_ || !pick_holding_ || !pick_handle_ || pick_cancel_wanted_) return;
-  pick_release_wanted_ = false;
-  pick_release_sent_at_ = Clock::now();
+  if (!request->release_wanted || !request->holding || !request->handle ||
+      request->cancel_wanted) return;
+  request->release_wanted = false;
+  request->release_sent = true;
+  request->release_sent_at = Clock::now();
   RCLCPP_INFO(node_.get_logger(),
       "Prepared pick: sent %.1f s into the demo at REFINE_CUP start, released %.1f s after "
       "sending; %s when PICK_DYNAMIXEL began",
-      std::chrono::duration<double>(pick_sent_at_ - demo_started_).count(),
-      elapsed(pick_sent_at_), pick_held_at_entry_ ? "already holding" : "still planning");
-  pick_release_future_ = pick_release_client_->async_send_request(
+      std::chrono::duration<double>(request->sent_at - demo_started_).count(),
+      elapsed(request->sent_at), request->held_at_entry ? "already holding" : "still planning");
+  request->release_future = pick_release_client_->async_send_request(
       std::make_shared<std_srvs::srv::Trigger::Request>()).future.share();
 }
 
 void TaskManager::finish_demo(bool success, const std::string & code,
     const std::string & detail, bool resumable) {
   if (!demo_goal_) return;
-  if ((pick_handle_ || pick_pending_) && !pick_owned_) {
+  if (pick_in_flight() && (!pick_ || !pick_->owned)) {
     // A prepared pick request is live: cancel it and finish once its final result is in.
     cancel_pick();
     if (!demo_finish_) {
@@ -376,7 +515,7 @@ void TaskManager::fail_demo_stage(const std::string & code,
   if (code == "STOP_UNCONFIRMED" || code == "SCENE_UNCONFIRMED") demo_faulted_ = true;
   retryable = retryable && !demo_faulted_ && !demo_cancel_requested_ && !cup_motion_blocked();
   if (retryable && demo_retries_ < demo_max_retries_) {
-    if ((pick_handle_ || pick_pending_) && !pick_owned_) cancel_pick(); // REFINE_CUP retry.
+    if (pick_in_flight() && (!pick_ || !pick_->owned)) cancel_pick(); // REFINE_CUP retry.
     ++demo_retries_;
     demo_stage_active_ = false;
     demo_retry_wait_ = true;
@@ -402,11 +541,19 @@ void TaskManager::finish_cell_round() {
   double round_seconds = 0;
   for (const auto & [stage, value] : demo_round_stage_seconds_) round_seconds += value;
   demo_cell_seconds_ += round_seconds;
+  char side_text[48] = "not used";
+  if (side_return_seconds_ >= 0) {
+    std::snprintf(side_text, sizeof(side_text), "%.1f s", side_return_seconds_);
+  } else if (side_active()) {
+    std::snprintf(side_text, sizeof(side_text), "still running");
+  }
   RCLCPP_INFO(node_.get_logger(),
-      "Round %d done in %.1f s: PICK_DYNAMIXEL %.1f s, HANDOVER %.1f s, APPROACH_CUP %.1f s, "
-      "REFINE_CUP %.1f s",
+      "Round %d done in %.1f s: PICK_DYNAMIXEL %.1f s, HANDOVER %.1f s, "
+      "left APPROACH_CUP %.1f s, REFINE_CUP %.1f s, %s arm return %s",
       demo_total_rounds_, round_seconds, seconds("PICK_DYNAMIXEL"), seconds("HANDOVER"),
-      seconds("APPROACH_CUP"), seconds("REFINE_CUP"));
+      seconds("APPROACH_CUP"), seconds("REFINE_CUP"), side_ ? side_->arm().c_str() : "side",
+      side_text);
+  side_return_seconds_ = -1;
   demo_round_stage_seconds_.clear();
   enter_demo_stage("PICK_DYNAMIXEL");
 }
@@ -446,14 +593,14 @@ void TaskManager::tick_demo() {
   if (!demo_goal_) return;
   if (demo_finish_) {
     auto finish = *demo_finish_;
-    if (pick_handle_ || pick_pending_) {
+    if (pick_in_flight()) {
       if (Clock::now() < demo_finish_deadline_) return;
       demo_faulted_ = true; // No final result after cancel: the backend stop is unknown.
       finish_demo_now(false, "STOP_UNCONFIRMED",
           "Prepared pick request did not end after cancel; " + finish.detail, false);
       return;
     }
-    if (pick_result_ && !pick_result_->stop_confirmed) {
+    if (pick_action_unsettled()) {
       demo_faulted_ = true;
       finish = {false, "STOP_UNCONFIRMED", finish.detail, false};
     }
@@ -464,10 +611,40 @@ void TaskManager::tick_demo() {
     finish_demo(false, "CANCELLED", "Cancelled between stages; grippers unchanged");
     return;
   }
+  if (side_failure_ && !demo_cancel_requested_ && !demo_stage_active_) {
+    const auto failure = *side_failure_;
+    side_failure_.reset();
+    finish_demo(false, failure.code, failure.detail, false);
+    return;
+  }
+  if (side_failure_ && !demo_cancel_requested_ && !side_stage_stop_sent_) {
+    side_stage_stop_sent_ = true; // The stage stops; its end reports the side failure.
+    if (active_cup_motion_) active_cup_motion_->cancel();
+  }
+  if (demo_prepare_deferred_ && demo_stage_ == "REFINE_CUP" && demo_stage_active_ &&
+      !side_active()) {
+    demo_prepare_deferred_ = false;
+    if (side_->result().state == ExecutionState::Succeeded) prepare_pick();
+  }
   if (demo_retry_wait_) {
     if (Clock::now() >= demo_deadline_) demo_retry_wait_ = false;
   } else if (!demo_stage_active_) {
-    if (demo_stage_ == "PICK_DYNAMIXEL" && !pick_early_ && (pick_handle_ || pick_pending_)) {
+    if (waits_for_side(demo_stage_) && side_active()) {
+      if (!side_waiting_) {
+        side_waiting_ = true;
+        side_wait_started_ = Clock::now();
+        RCLCPP_INFO(node_.get_logger(), "%s waits for the %s arm return", demo_stage_.c_str(),
+            side_->arm().c_str());
+      }
+      demo_detail_ = "Waiting for the " + side_->arm() + " arm return before " + demo_stage_;
+    } else if (demo_stage_ == "PICK_DYNAMIXEL" && (!pick_ || !pick_->early) &&
+        pick_release_pending()) {
+      if (demo_faulted_) {
+        finish_demo(false, "PICK_RELEASE_FAILED", "Previous pick release processing is unconfirmed");
+        return;
+      }
+      demo_detail_ = "Waiting for previous pick release processing confirmation";
+    } else if (demo_stage_ == "PICK_DYNAMIXEL" && (!pick_ || !pick_->early) && pick_in_flight()) {
       // A cancelled prepared request is still ending; the backend takes one request at a time.
       if (elapsed(demo_stage_entered_) > 10.0) {
         demo_faulted_ = true;
@@ -485,28 +662,28 @@ void TaskManager::tick_demo() {
     std::string code, detail;
     if (demo_stage_ == "PICK_DYNAMIXEL") {
       if (demo_cancel_requested_) cancel_demo_motion();
-      if (!pick_result_ && elapsed(demo_stage_started_) > demo_pick_timeout_) {
+      if (!pick_->result && elapsed(pick_->stage_started_at) > demo_pick_timeout_) {
         demo_cancel_requested_ = true;
         cancel_demo_motion();
-        if (elapsed(demo_stage_started_) > demo_pick_timeout_ + 10.0) {
+        if (elapsed(pick_->stage_started_at) > demo_pick_timeout_ + 10.0) {
           demo_faulted_ = true;
           finish_demo(false, "STOP_UNCONFIRMED", "Pick backend timed out without a final stop result");
           return;
         }
       }
-      if (!pick_result_) tick_pick_release();
-      if (pick_result_) {
+      if (!pick_->result) tick_pick_release();
+      if (pick_->result) {
         done = true;
-        success = pick_result_->success && pick_result_->stop_confirmed;
-        code = pick_result_->error_code;
-        detail = pick_result_->message;
-        retryable = pick_result_->retryable && !pick_result_->motion_started;
-        if (!pick_release_error_.empty()) {
+        success = pick_->result->success && pick_->result->stop_confirmed;
+        code = pick_->result->error_code;
+        detail = pick_->result->message;
+        retryable = pick_->result->retryable && !pick_->result->motion_started;
+        if (!pick_->release_error.empty()) {
           success = retryable = false;
           code = "PICK_RELEASE_FAILED";
-          detail = pick_release_error_ + "; " + detail;
+          detail = pick_->release_error + "; " + detail;
         }
-        if (!pick_result_->stop_confirmed) code = "STOP_UNCONFIRMED";
+        if (!pick_->result->stop_confirmed) code = "STOP_UNCONFIRMED";
       }
     } else {
       const MotionResult * outcome = nullptr;
@@ -530,6 +707,16 @@ void TaskManager::tick_demo() {
         retryable = demo_can_retry(demo_stage_, code);
       }
     }
+    if (done && side_failure_ && !demo_cancel_requested_) {
+      const auto failure = *side_failure_;
+      side_failure_.reset();
+      if (failure.before_motion && demo_stage_ == "APPROACH_CUP") {
+        fail_demo_stage(failure.code, failure.detail, demo_can_retry(demo_stage_, failure.code));
+      } else {
+        finish_demo(false, failure.code, failure.detail, false);
+      }
+      return;
+    }
     if (done) {
       if (demo_cancel_requested_) {
         if (code == "STOP_UNCONFIRMED" || code == "SCENE_UNCONFIRMED") demo_faulted_ = true;
@@ -538,8 +725,8 @@ void TaskManager::tick_demo() {
         return;
       }
       if (!success && demo_stage_ == "PICK_DYNAMIXEL" && !demo_pick_only_ &&
-          code == "BASKET_EMPTY" && pick_result_ && !pick_result_->motion_started &&
-          pick_result_->stop_confirmed) {
+          code == "BASKET_EMPTY" && pick_->result && !pick_->result->motion_started &&
+          pick_->result->stop_confirmed) {
         decide_empty_basket(detail); // Not a failure or retry when the basket view is fresh.
       } else if (!success) {
         fail_demo_stage(code.empty() ? "EXECUTION_FAILED" : code, detail, retryable);
@@ -551,6 +738,9 @@ void TaskManager::tick_demo() {
         demo_stage_active_ = false;
         demo_retries_ = 0;
         active_cup_motion_ = nullptr;
+        if (demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "RETURN_INITIAL") {
+          head_last_sent_ = "look_middle"; // The initial sequence leaves the head there.
+        }
         if (demo_stage_ == "INITIALIZE_ROBOT") {
           if (demo_initial_only_) {
             finish_demo(true, "", "Initial pose reached; no pick started");
@@ -598,7 +788,7 @@ void TaskManager::tick_demo() {
     auto feedback = std::make_shared<DemoAction::Feedback>();
     feedback->stage = demo_stage_;
     feedback->phase = demo_retry_wait_ ? "RECOVERY_WAIT" : demo_stage_ == "PICK_DYNAMIXEL" ?
-        pick_phase_ : context_.snapshot().phase;
+        (pick_ ? pick_->phase : std::string()) : context_.snapshot().phase;
     const bool in_round = !demo_pick_only_ && !demo_initial_only_ && is_cell_stage(demo_stage_);
     feedback->detail = in_round
         ? "Round " + std::to_string(demo_total_rounds_ + 1) + ": " + demo_detail_ : demo_detail_;

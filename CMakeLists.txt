@@ -73,6 +73,8 @@ add_library(
   src/runtime/execution/gripper.cpp
   src/runtime/execution/completion.cpp
   src/runtime/execution/trajectory_smoother.cpp
+  src/runtime/execution/head_commander.cpp
+  src/runtime/execution/side_execution.cpp
   src/runtime/geometry/tcp_roll.cpp
 )
 # Reusable motion modules have no action servers.
@@ -84,6 +86,7 @@ add_library(
   src/motions/pour/pour_geometry.cpp
   src/motions/initial/initial_pose_motion.cpp
   src/motions/common/sequence_motion.cpp
+  src/motions/common/side_return.cpp
   src/motions/common/cup_motion.cpp
   src/motions/common/head_cup_observer.cpp
   src/motions/pick/pick_geometry.cpp
@@ -219,7 +222,7 @@ if(BUILD_TESTING)
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_initial_pose_check.py")
   add_test(NAME test_basket_observer_state
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_basket_observer_state.py")
-  ament_add_gtest(test_demo_task test/test_demo_task.cpp TIMEOUT 60)
+  ament_add_gtest(test_demo_task test/test_demo_task.cpp TIMEOUT 120)
   target_link_libraries(test_demo_task demo_tasks)
   set_tests_properties(test_demo_task PROPERTIES ENVIRONMENT "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=151;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
   ament_add_gtest(test_ai_cup test/test_ai_cup.cpp TIMEOUT 30)

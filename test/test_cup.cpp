@@ -172,6 +172,11 @@ public:
     return true;
   }
 
+  bool start_paired(const Step &, const std::vector<Step> &) override {
+    ++paired_calls;
+    return false; // As before motion: the approach falls back to one step at a time.
+  }
+
   bool start_round_trip(const Step & tilt, const Step & hold, const Step & untilt) override {
     round_steps = {tilt, hold, untilt};
     round_trips.push_back(round_steps);
@@ -202,6 +207,7 @@ public:
   }
 
   bool stationary = true;
+  int paired_calls = 0;
   ExecutionResult current;
   std::vector<Step> steps;
   std::vector<Step> round_steps;
@@ -1105,6 +1111,40 @@ TEST_F(ApproachFixture, ReachesTargetOnceWithoutGripperOrAttachmentChanges) {
   EXPECT_EQ(executor.steps.size(), 1u);
   std::string reason;
   EXPECT_TRUE(motion->is_ready_to_start("right", "cup", reason));
+}
+
+void add_right_return(Config & robot, ApproachConfig & config) {
+  MotionSequence sequence;
+  Step home;
+  home.name = "giver_home";
+  home.type = "joint";
+  home.arm = "right";
+  home.target = {1.0};
+  sequence.steps = {home};
+  robot.motion_sequences["right_return"] = sequence;
+  config.other_arm_return_sequence = "right_return";
+}
+
+TEST_F(ApproachFixture, IndependentReturnMovesOnlyTheApproachArm) {
+  add_right_return(robot, config);
+  config.independent_return = true;
+  ASSERT_TRUE(start("left"));
+  advance("OBSERVATION_READY");
+  EXPECT_EQ(executor.paired_calls, 0);
+  ASSERT_EQ(executor.steps.size(), 1u);
+  EXPECT_EQ(executor.steps[0].type, "pose");
+  EXPECT_EQ(executor.steps[0].arm, "left");
+}
+
+TEST_F(ApproachFixture, PairedReturnStaysAvailableWhenIndependentReturnIsOff) {
+  add_right_return(robot, config);
+  config.independent_return = false;
+  ASSERT_TRUE(start("left"));
+  advance("OBSERVATION_READY");
+  EXPECT_EQ(executor.paired_calls, 1);
+  ASSERT_EQ(executor.steps.size(), 2u); // Paired refused: the return, then the approach.
+  EXPECT_EQ(executor.steps[0].name, "giver_home");
+  EXPECT_EQ(executor.steps[1].arm, "left");
 }
 
 TEST_F(ApproachFixture, OutsideRollBandApproachesDirectlyWithoutAlignment) {

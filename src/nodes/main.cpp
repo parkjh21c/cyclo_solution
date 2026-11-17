@@ -1,16 +1,20 @@
 #include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/motions/pick/pick_cup_motion.hpp"
 #include "demo_1f/motions/pour/cup_pour_motion.hpp"
+#include "demo_1f/motions/common/side_return.hpp"
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/motions/place/approach_cup_motion.hpp"
 #include "demo_1f/motions/place/refine_cup_motion.hpp"
 #include "demo_1f/motions/place/withdraw_cup_motion.hpp"
 #include "demo_1f/motions/place/place_cup_motion.hpp"
 #include "demo_1f/runtime/config.hpp"
+#include "demo_1f/runtime/execution/head_commander.hpp"
 #include "demo_1f/runtime/execution/trajectory_executor.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include "demo_1f/tasks/task_manager.hpp"
+#include <algorithm>
 #include <csignal>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -39,12 +43,26 @@ int main(int argc, char ** argv) {
       }
     }
     const auto approach_config = demo_1f::load_approach_config(*node);
+    if (approach_config.independent_return) {
+      const auto found = config.motion_sequences.find("right_return");
+      if (approach_config.other_arm_return_sequence != "right_return" ||
+          found == config.motion_sequences.end() || !found->second.validation_error.empty() ||
+          !demo_1f::validate_motion_sequence(found->second, config).empty() ||
+          found->second.steps.empty() ||
+          std::any_of(found->second.steps.begin(), found->second.steps.end(),
+              [](const demo_1f::Step & step) { return step.type != "joint" || step.arm != "right"; })) {
+        throw std::invalid_argument(
+            "demo.independent_return requires approach.other_arm_return_sequence=right_return "
+            "with valid right-arm joint steps");
+      }
+    }
     demo_1f::RobotContext robot_context(*node, config,
         {approach_config.inner_radius,
             approach_config.wall_thickness,
             approach_config.max_position_error,
             approach_config.cup_source});
     demo_1f::TrajectoryExecutor trajectory_executor(*node, config, robot_context);
+    demo_1f::HeadCommander head_commander(*node, config, robot_context);
     demo_1f::HandoverMotion handover_motion(config, robot_context, trajectory_executor);
     demo_1f::ApproachScene approach_scene(*node);
     demo_1f::InitialPoseMotion initial_motion(
@@ -67,6 +85,9 @@ int main(int argc, char ** argv) {
     const auto pour_config = demo_1f::load_pour_config(*node);
     demo_1f::CupPourMotion cup_pour_motion(
         config, approach_config, pour_config, robot_context, trajectory_executor, approach_scene);
+    // The same right_return runs beside APPROACH_CUP and PLACE_CUP without matching arrival times.
+    demo_1f::SideReturn side_return(
+        config, approach_config.other_arm_return_sequence, trajectory_executor);
     demo_1f::TaskManager task_manager(*node,
         robot_context,
         handover_motion,
@@ -77,7 +98,8 @@ int main(int argc, char ** argv) {
             {"/handover_cup", cup_handover_motion},
             {"/pour_cup", cup_pour_motion},
             {"/handover_cup_back", cup_handover_back_motion},
-            {"/place_cup", place_motion}}, &initial_motion);
+            {"/place_cup", place_motion}}, &initial_motion, &head_commander,
+        approach_config.other_arm_return_sequence.empty() ? nullptr : &side_return);
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     RCLCPP_INFO(

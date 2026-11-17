@@ -35,6 +35,9 @@ bool TrajectoryExecutor::start_sequence(const std::vector<Step> & steps) {
       previous == ExecutionState::StopUnconfirmed) {
     return false;
   }
+  Step probe; // Both controllers or the coordinated group.
+  probe.type = "dual_joint";
+  if (refuse_for_side(probe)) return false;
   auto op = std::make_shared<Operation>();
   set_operation(op);
   MotionSequence sequence;
@@ -75,6 +78,9 @@ bool TrajectoryExecutor::start_paired(const Step & pose, const std::vector<Step>
       previous == ExecutionState::StopUnconfirmed) {
     return false;
   }
+  Step probe; // Both controllers or the coordinated group.
+  probe.type = "dual_joint";
+  if (refuse_for_side(probe)) return false;
   auto op = std::make_shared<Operation>();
   set_operation(op);
   MotionSequence sequence;

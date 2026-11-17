@@ -31,4 +31,18 @@ void validate_smooth_path(const SmoothPath & path,
     const std::vector<Step> & steps,
     const Config & config,
     planning_scene::PlanningScene & scene);
+
+using JointRows = std::vector<std::vector<double>>;
+
+// Interpolated path positions; consecutive rows differ by at most max_step per joint.
+JointRows sample_joint_path(const trajectory_msgs::msg::JointTrajectory & path, double max_step);
+
+// Every first row with every second row (other joints as in scene); "" when collision-free.
+std::string check_path_pairs(planning_scene::PlanningScene & scene,
+    const Config & config,
+    const std::vector<std::string> & first_names,
+    const JointRows & first,
+    const std::vector<std::string> & second_names,
+    const JointRows & second,
+    size_t & pairs);
 } // namespace demo_1f

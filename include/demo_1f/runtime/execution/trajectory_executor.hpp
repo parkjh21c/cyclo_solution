@@ -5,6 +5,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <functional>
 #include <future>
+#include <optional>
 #include <moveit_msgs/action/execute_trajectory.hpp>
 #include <moveit_msgs/action/move_group.hpp>
 #include <moveit_msgs/srv/get_planning_scene.hpp>
@@ -24,6 +25,12 @@ public:
   void cancel(
       const std::string & code = "CANCELLED", const std::string & reason = "Cancelled") override;
   ExecutionResult result() const override;
+  // Side: one arm's joint steps sent straight to its controller beside the main operation.
+  bool start_side(const std::vector<Step> & steps) override;
+  void tick_side() override;
+  void cancel_side(
+      const std::string & code = "CANCELLED", const std::string & reason = "Cancelled") override;
+  ExecutionResult side_result() const override;
 
 private:
   using Move = moveit_msgs::action::MoveGroup;
@@ -49,6 +56,48 @@ private:
     bool wheel_peaks_pending{false};
     bool total_logged{false};
     std::map<std::string, double> initial_positions, scene_positions;
+  };
+
+  struct PairOutcome {
+    std::string collision; // Empty: every pair is collision-free.
+    size_t pairs{0};
+    double seconds{0};
+  };
+
+  // A main path held until it is checked against the running side path.
+  struct MainGate {
+    trajectory_msgs::msg::JointTrajectory path;
+    std::function<void()> send;
+    TimePoint started{Clock::now()};
+    bool scene_requested{false};
+    bool waiting_side{false}; // Pairs collide: wait for the side to end, then replan.
+    std::future<PairOutcome> check;
+  };
+
+  struct SidePlan {
+    SmoothPath path;
+    PairOutcome pairs;
+  };
+
+  struct SideOperation {
+    std::vector<Step> steps;
+    std::string arm;
+    double timeout{0};
+    ExecutionResult result{ExecutionState::Running, {}, {}};
+    TimePoint started{Clock::now()}, cancelling{}, sent_at{};
+    bool sent{false};        // A goal reached the controller client: the arm may move.
+    bool rejected{false};    // The controller rejected the goal: nothing moved.
+    bool action_terminal{false}, action_success{false};
+    bool cancel_requested{false}, main_notified{false};
+    std::string cancel_code, cancel_reason;
+    std::optional<TimePoint> stable_since;
+    std::future<SidePlan> preparation;
+    TimePoint preparation_started{};
+    std::map<std::string, double> preparation_positions;
+    SmoothPath path;
+    bool path_ready{false};
+    std::function<void()> cancel_action;
+    size_t generation{0};
   };
 
   struct Operation {
@@ -90,6 +139,10 @@ private:
     std::string paired_log; // "paired approach: left N pts, right M pts"
     std::optional<RoundTrip> round_trip;
     size_t action_generation{0};
+    bool side_linked{false};   // Ran while a side operation was live.
+    bool side_notified{false}; // Its failure already cancelled the side.
+    std::optional<MainGate> gate;
+    trajectory_msgs::msg::JointTrajectory dispatched_path; // Seen by a later side pair check.
   };
 
   void round_trip_scene(const std::shared_ptr<Operation> & op,
@@ -132,6 +185,21 @@ private:
   void publish_hold(const std::shared_ptr<Operation> & op);
   void publish_state();
   void set_operation(const std::shared_ptr<Operation> & op);
+  void cancel_main(const std::string & code, const std::string & reason);
+  void begin_main(const std::shared_ptr<Operation> & op);
+  void restart_main(const std::shared_ptr<Operation> & op);
+  // Sends now, or holds the path until it is pair-checked against the live side path.
+  void gate_main(const std::shared_ptr<Operation> & op,
+      const trajectory_msgs::msg::JointTrajectory & path, std::function<void()> send);
+  void tick_gate(const std::shared_ptr<Operation> & op);
+  bool side_live() const;
+  bool side_blocks(const Step & step, std::string & reason) const;
+  bool refuse_for_side(const Step & step); // True: a SIDE_ARM_BUSY operation was recorded.
+  void prepare_side(const std::shared_ptr<SideOperation> & side,
+      const moveit_msgs::msg::PlanningScene & scene);
+  void send_side(const std::shared_ptr<SideOperation> & side);
+  bool settled_side(const std::shared_ptr<SideOperation> & side, bool check_target);
+  void couple_side();
   rclcpp::Node & node_;
   const Config & config_;
   RobotContext & context_;
@@ -146,5 +214,7 @@ private:
       publishers_;
   std::shared_ptr<Operation> operation_;
   std::vector<std::shared_ptr<Operation>> retired_operations_;
+  std::shared_ptr<SideOperation> side_;
+  std::vector<std::shared_ptr<SideOperation>> retired_sides_;
 };
 } // namespace demo_1f

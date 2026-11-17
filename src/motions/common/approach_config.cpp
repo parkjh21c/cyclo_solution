@@ -129,6 +129,8 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   c.cup_source = node.declare_parameter("approach.cup_source", c.cup_source, descriptor);
   c.other_arm_return_sequence = node.declare_parameter(
       "approach.other_arm_return_sequence", c.other_arm_return_sequence, descriptor);
+  c.independent_return =
+      node.declare_parameter("demo.independent_return", c.independent_return, descriptor);
   return c;
 }
 

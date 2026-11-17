@@ -6,8 +6,9 @@ namespace demo_1f {
 TaskManager::TaskManager(rclcpp::Node & node,
     RobotContext & context,
     HandoverMotion & motion,
-    std::vector<CupMotionRegistration> cup_motions, InitialPoseMotion * initial_motion)
-    : node_(node), context_(context), motion_(motion), initial_motion_(initial_motion),
+    std::vector<CupMotionRegistration> cup_motions, InitialPoseMotion * initial_motion,
+    HeadCommandPort * head, SideMotionPort * side)
+    : head_(head), side_(side), node_(node), context_(context), motion_(motion), initial_motion_(initial_motion),
       cup_motions_(std::move(cup_motions)) {
   rcl_interfaces::msg::ParameterDescriptor descriptor;
   descriptor.read_only = true;
@@ -36,6 +37,108 @@ TaskManager::TaskManager(rclcpp::Node & node,
   publish_status();
 }
 
+std::string TaskManager::head_pose_for_task(const std::string & task) {
+  if (task == "PICK_DYNAMIXEL" || task == "POUR_CUP" || task == "/pour_cup") {
+    return "look_right";
+  }
+  if (task == "APPROACH_CUP" || task == "REFINE_CUP" || task == "PICK_CUP" ||
+      task == "PLACE_CUP" || task == "/approach_cup" || task == "/refine_cup" ||
+      task == "/pick_cup" || task == "/place_cup") {
+    return "look_left";
+  }
+  return "look_middle";
+}
+
+void TaskManager::command_head(const std::string & task) {
+  const auto name = head_pose_for_task(task);
+  if (!head_ || name == head_last_sent_) return;
+  if (head_->command(name)) head_last_sent_ = name;
+  else head_last_sent_.clear(); // Not sent: the next task tries again.
+}
+
+void TaskManager::cancel_head() {
+  if (head_) head_->cancel();
+  head_last_sent_.clear();
+}
+
+bool TaskManager::waits_for_side(const std::string & stage) {
+  // Stages that move the side arm or both arms start only after the side has arrived.
+  return stage == "PICK_DYNAMIXEL" || stage == "HANDOVER" || stage == "WITHDRAW_CUP" ||
+         stage == "HANDOVER_CUP" || stage == "POUR_CUP" || stage == "HANDOVER_CUP_BACK" ||
+         stage == "INITIALIZE_ROBOT" || stage == "RETURN_INITIAL";
+}
+
+bool TaskManager::side_active() const {
+  if (!side_) return false;
+  const auto state = side_->result().state;
+  return state == ExecutionState::Running || state == ExecutionState::Cancelling;
+}
+
+bool TaskManager::b2_return_ready(std::string & reason) const {
+  if (!side_ || side_->arm() != "right") {
+    reason = "Independent cup return requires a configured right-arm side port";
+    return false;
+  }
+  return true;
+}
+
+bool TaskManager::start_side_return(std::string & reason) {
+  if (!side_) {
+    reason = "Side return port missing";
+    return false;
+  }
+  if (side_active()) return true; // A stage retry keeps the return already under way.
+  side_failure_.reset();
+  side_cancel_requested_ = side_stage_stop_sent_ = false;
+  if (!side_->start(reason)) {
+    RCLCPP_WARN(node_.get_logger(), "%s arm return not started: %s", side_->arm().c_str(),
+        reason.c_str());
+    return false;
+  }
+  side_started_at_ = Clock::now();
+  side_return_seconds_ = -1;
+  side_watching_ = true;
+  watch_side(); // Already home: done at once.
+  return true;
+}
+
+void TaskManager::cancel_side_return() {
+  if (!side_active()) return;
+  side_cancel_requested_ = true;
+  side_->cancel();
+}
+
+void TaskManager::watch_side() {
+  if (!side_watching_ || side_active()) return;
+  side_watching_ = false;
+  const auto outcome = side_->result();
+  if (outcome.state == ExecutionState::Succeeded) {
+    side_return_seconds_ = elapsed(side_started_at_);
+    RCLCPP_INFO(node_.get_logger(), "%s arm return done in %.1f s", side_->arm().c_str(),
+        side_return_seconds_);
+    return;
+  }
+  if (outcome.state == ExecutionState::StopUnconfirmed) demo_faulted_ = true;
+  if (side_cancel_requested_ && outcome.state == ExecutionState::Cancelled) return;
+  const bool before_motion = outcome.retryable_before_motion;
+  const auto code = before_motion ? std::string("SIDE_BEFORE_MOTION") :
+      outcome.state == ExecutionState::StopUnconfirmed ? std::string("STOP_UNCONFIRMED") :
+      std::string("SIDE_ARM_FAILED");
+  side_failure_ = SideFailure{code, side_->arm() + " arm return " + outcome.code + ": " +
+      outcome.detail, before_motion};
+  RCLCPP_WARN(node_.get_logger(), "%s: %s", code.c_str(), side_failure_->detail.c_str());
+  // After the demo already ended: no demo stage reports it, so the saved checkpoint is dropped.
+  if (!demo_goal_ && !before_motion) demo_resumable_ = false;
+}
+
+bool TaskManager::side_blocks_cup(const std::string & name, const std::string & arm) const {
+  if (!side_active()) return false;
+  // Only one-arm cup actions on the other arm may run beside the side return.
+  const bool one_arm = name == "/approach_cup" || name == "/refine_cup" || name == "/pick_cup" ||
+                       name == "/place_cup" || name == "/withdraw_cup";
+  return !one_arm || arm == "both" || arm == side_->arm();
+}
+
 rclcpp_action::Server<TaskManager::Action>::SharedPtr TaskManager::make_handover_server(
     const std::string & action_name, bool prepare_only) {
   return rclcpp_action::create_server<Action>(
@@ -44,8 +147,8 @@ rclcpp_action::Server<TaskManager::Action>::SharedPtr TaskManager::make_handover
       [this, prepare_only](
           const rclcpp_action::GoalUUID &, std::shared_ptr<const Action::Goal> request) {
         std::string reason;
-        if (demo_busy() || shutdown_requested_ || goal_start_pending_ || active_goal_handle_ != nullptr ||
-            cup_goal_ != nullptr || cup_motion_blocked() ||
+        if (demo_busy() || side_active() || shutdown_requested_ || goal_start_pending_ ||
+            active_goal_handle_ != nullptr || cup_goal_ != nullptr || cup_motion_blocked() ||
             !motion_.is_ready_to_start(request->direction, reason, prepare_only)) {
           if (reason.empty()) {
             reason = "Task manager is busy or shutting down";
@@ -64,6 +167,7 @@ rclcpp_action::Server<TaskManager::Action>::SharedPtr TaskManager::make_handover
           return rclcpp_action::CancelResponse::REJECT;
         }
         motion_.cancel();
+        cancel_head();
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this, prepare_only](const std::shared_ptr<GoalHandle> handle) {
@@ -77,6 +181,7 @@ rclcpp_action::Server<TaskManager::Action>::SharedPtr TaskManager::make_handover
           handle->abort(result);
           return;
         }
+        command_head("HANDOVER");
         demo_resumable_ = false; // Manual motions invalidate a saved automatic checkpoint.
         active_goal_handle_ = handle;
         context_.set_task("RUNNING", handle->get_goal()->direction);
@@ -91,6 +196,8 @@ void TaskManager::request_shutdown() {
   shutdown_requested_ = true;
   demo_cancel_requested_ = true;
   cancel_demo_motion();
+  cancel_head();
+  cancel_side_return();
   motion_.cancel();
   for (const auto & module : cup_motions_) {
     module.motion.cancel();
@@ -105,7 +212,8 @@ bool TaskManager::cup_motion_blocked() const {
 
 bool TaskManager::can_shutdown() const {
   if (demo_faulted_ && !demo_goal_) return true;
-  return !demo_goal_ && !pick_pending_ && !pick_handle_ && !goal_start_pending_ && !active_goal_handle_ && !motion_.running() &&
+  return !demo_goal_ && !pick_unsettled() && !goal_start_pending_ && !active_goal_handle_ &&
+         !motion_.running() && !side_active() &&
          (!initial_motion_ || !initial_motion_->running()) && !cup_goal_ &&
          std::none_of(cup_motions_.begin(), cup_motions_.end(), [](const auto & module) {
            return module.motion.running();
@@ -113,6 +221,10 @@ bool TaskManager::can_shutdown() const {
 }
 
 void TaskManager::tick() {
+  maintain_pick_requests();
+  if (side_) side_->tick(); // Progresses even when no module runs.
+  watch_side();
+  if (demo_faulted_) cancel_side_return(); // Fault latch: everything stops.
   if (demo_goal_) {
     tick_demo();
   } else if (cup_goal_) {

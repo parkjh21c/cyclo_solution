@@ -19,9 +19,13 @@ rclcpp_action::Server<TaskManager::ApproachAction>::SharedPtr TaskManager::make_
       [this, &module, name](
           const rclcpp_action::GoalUUID &, std::shared_ptr<const ApproachAction::Goal> request) {
         std::string reason;
-        if (demo_busy() || shutdown_requested_ || goal_start_pending_ || active_goal_handle_ || cup_goal_ ||
+        if (demo_busy() || side_blocks_cup(name, request->arm) || shutdown_requested_ ||
+            goal_start_pending_ || active_goal_handle_ || cup_goal_ ||
             motion_.running() || cup_motion_blocked() ||
-            !module.is_ready_to_start(request->arm, request->cup_id, reason, request->execute)) {
+            !module.is_ready_to_start(request->arm, request->cup_id, reason, request->execute) ||
+            (request->execute && demo_independent_return_ &&
+                ((name == "/handover_cup_back" && request->arm == "right") ||
+                 (name == "/place_cup" && request->arm == "left")) && !b2_return_ready(reason))) {
           RCLCPP_WARN(node_.get_logger(),
               "Rejected cup approach: %s",
               reason.empty() ? "Task manager busy/shutting down" : reason.c_str());
@@ -36,12 +40,36 @@ rclcpp_action::Server<TaskManager::ApproachAction>::SharedPtr TaskManager::make_
           return rclcpp_action::CancelResponse::REJECT;
         }
         module.cancel();
+        cancel_head();
+        if (cup_side_) cancel_side_return();
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this, &module, name](const std::shared_ptr<ApproachGoalHandle> handle) {
         goal_start_pending_ = false;
         const auto request = handle->get_goal();
         std::string reason;
+        const bool place_return = name == "/place_cup" && request->arm == "left" &&
+                                  request->execute && demo_independent_return_;
+        const bool approach_return = name == "/approach_cup" && request->execute && side_ &&
+                                     demo_independent_return_;
+        if (shutdown_requested_ ||
+            !module.is_ready_to_start(request->arm, request->cup_id, reason, request->execute) ||
+            (request->execute && demo_independent_return_ &&
+                (place_return || (name == "/handover_cup_back" && request->arm == "right")) &&
+                !b2_return_ready(reason))) {
+          auto result = std::make_shared<ApproachAction::Result>();
+          result->error_code = "NOT_READY";
+          result->message = reason.empty() ? "Shutting down" : reason;
+          handle->abort(result);
+          return;
+        }
+        if (approach_return && !start_side_return(reason)) {
+          auto result = std::make_shared<ApproachAction::Result>();
+          result->error_code = "SIDE_BEFORE_MOTION";
+          result->message = reason;
+          handle->abort(result);
+          return;
+        }
         if (shutdown_requested_ ||
             !module.start(request->arm, request->cup_id, reason, request->execute)) {
           auto result = std::make_shared<ApproachAction::Result>();
@@ -50,6 +78,18 @@ rclcpp_action::Server<TaskManager::ApproachAction>::SharedPtr TaskManager::make_
           handle->abort(result);
           return;
         }
+        // start() only prepares the cup module; its first tick sends the first arm movement.
+        if (place_return && !start_side_return(reason)) {
+          module.cancel();
+          auto result = std::make_shared<ApproachAction::Result>();
+          result->error_code = "SIDE_BEFORE_MOTION";
+          result->message = reason;
+          handle->abort(result);
+          return;
+        }
+        if (request->execute) command_head(name); // Preview leaves the head alone.
+        cup_side_ = approach_return || place_return;
+        side_stage_stop_sent_ = false;
         demo_resumable_ = false;
         active_cup_motion_ = &module;
         cup_goal_ = handle;
@@ -72,6 +112,10 @@ void TaskManager::publish_cup_target() {
 }
 
 void TaskManager::tick_cup_action() {
+  if (cup_side_ && side_failure_ && !side_stage_stop_sent_) {
+    side_stage_stop_sent_ = true; // The cup action stops; its result reports the side failure.
+    active_cup_motion_->cancel();
+  }
   active_cup_motion_->tick();
   const auto & outcome = active_cup_motion_->result();
   context_.set_task(outcome.state, cup_goal_->get_goal()->arm, outcome.code, outcome.detail);
@@ -93,9 +137,17 @@ void TaskManager::tick_cup_action() {
   result->estimated_cup_pose = active_cup_motion_->estimated_cup_pose();
   result->error_code = outcome.code;
   result->message = outcome.detail;
+  const bool side_failed = cup_side_ && side_failure_;
+  if (side_failed) {
+    result->success = false;
+    result->error_code = side_failure_->code;
+    result->message = side_failure_->detail;
+    side_failure_.reset();
+  }
+  cup_side_ = false;
   if (cup_goal_->is_canceling()) {
     cup_goal_->canceled(result);
-  } else if (outcome.sequence_completed) {
+  } else if (outcome.sequence_completed && !side_failed) {
     cup_goal_->succeed(result);
   } else {
     cup_goal_->abort(result);

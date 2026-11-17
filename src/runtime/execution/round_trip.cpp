@@ -34,6 +34,9 @@ bool TrajectoryExecutor::start_round_trip(
   const auto previous = result().state;
   if (previous == ExecutionState::Running || previous == ExecutionState::Cancelling ||
       previous == ExecutionState::StopUnconfirmed) return false;
+  Step probe; // Both controllers or the coordinated group.
+  probe.type = "dual_joint";
+  if (refuse_for_side(probe)) return false;
   auto op = std::make_shared<Operation>();
   op->step = tilt;
   op->round_trip.emplace();

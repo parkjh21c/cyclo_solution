@@ -75,8 +75,13 @@ bool TrajectoryExecutor::ready(const MotionSequence & sequence, std::string & re
     reason = "Executor is busy or stop is unconfirmed";
     return false;
   }
+  if (side_ && side_->result.state == ExecutionState::Cancelling) {
+    reason = "Side arm stop is being confirmed";
+    return false;
+  }
   const auto snapshot = context_.snapshot();
   for (const auto & [name, arm] : config_.arms) {
+    if (side_live() && name == side_->arm) continue; // The side arm is moving on its own.
     auto joints = arm.joints;
     joints.push_back(arm.gripper_joint);
     for (const auto & joint : joints) {
@@ -97,6 +102,7 @@ bool TrajectoryExecutor::ready(const MotionSequence & sequence, std::string & re
     return false;
   }
   for (const auto & step : sequence.steps) {
+    if (side_blocks(step, reason)) return false;
     if (!joint_group_ready(step, reason)) return false;
     if ((step.type == "joint" || step.type == "pose" || step.type == "linear" ||
             step.type == "dual_joint" || step.type == "joint_gripper" ||
@@ -125,6 +131,10 @@ bool TrajectoryExecutor::ready(const MotionSequence & sequence, std::string & re
 }
 
 ExecutionResult TrajectoryExecutor::result() const {
+  if (side_ && side_->result.state == ExecutionState::StopUnconfirmed) {
+    return {ExecutionState::StopUnconfirmed, "STOP_UNCONFIRMED",
+        side_->arm + " side arm: " + side_->result.detail};
+  }
   if (!operation_) return ExecutionResult{};
   auto outcome = operation_->result;
   // start_paired failed before its combined path was sent: neither arm was commanded.
@@ -147,12 +157,31 @@ void TrajectoryExecutor::publish_state() {
   context_.set_execution(result());
 }
 
+namespace {
+template <class Value>
+bool pending(const std::future<Value> & future) {
+  return future.valid() && future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+}
+} // namespace
+
 void TrajectoryExecutor::set_operation(const std::shared_ptr<Operation> & op) {
-  if (operation_ && operation_->preparation.valid() &&
-      operation_->preparation.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+  // An unfinished std::async future blocks in its destructor: keep it until it is ready.
+  if (operation_ && (pending(operation_->preparation) ||
+                        (operation_->gate && pending(operation_->gate->check)))) {
     retired_operations_.push_back(operation_);
   }
   operation_ = op;
+}
+
+bool TrajectoryExecutor::refuse_for_side(const Step & step) {
+  std::string reason;
+  if (!side_blocks(step, reason)) return false;
+  auto op = std::make_shared<Operation>();
+  op->step = step;
+  op->result = {ExecutionState::Failed, "SIDE_ARM_BUSY", reason};
+  set_operation(op);
+  publish_state();
+  return true;
 }
 
 bool TrajectoryExecutor::start(const Step & step) {
@@ -165,6 +194,7 @@ bool TrajectoryExecutor::start(const Step & step) {
       previous == ExecutionState::StopUnconfirmed) {
     return false;
   }
+  if (refuse_for_side(step)) return false;
   MotionSequence single_step_sequence;
   single_step_sequence.steps = {step};
   const auto validation = validate_motion_sequence(single_step_sequence, config_);
@@ -178,20 +208,9 @@ bool TrajectoryExecutor::start(const Step & step) {
     publish_state();
     return false;
   }
+  op->side_linked = side_live();
   try {
-    if (step.type == "joint" || step.type == "pose" || step.type == "linear" ||
-        step.type == "dual_joint" || step.type == "joint_gripper" ||
-        step.type == "dual_joint_gripper" || step.type == "joint_group") {
-      // Corridor-constrained corrections are planned first, then executed explicitly.
-      send_move(op, step.type == "pose" && step.tcp_path_margin > 0);
-    } else if (step.type == "gripper") {
-      if (config_.smooth_motion) {
-        request_scene(op, false);
-      } else {
-        send_gripper(op);
-      }
-    }
-    // wait is intentionally non-blocking; tick() completes it.
+    begin_main(op);
   } catch (const std::exception & error) {
     op->result = {ExecutionState::Failed, "SEND_FAILED", error.what()};
   }
@@ -199,7 +218,30 @@ bool TrajectoryExecutor::start(const Step & step) {
   return op->result.state == ExecutionState::Running;
 }
 
+void TrajectoryExecutor::begin_main(const std::shared_ptr<Operation> & op) {
+  const auto & step = op->step;
+  if (step.type == "joint" || step.type == "pose" || step.type == "linear" ||
+      step.type == "dual_joint" || step.type == "joint_gripper" ||
+      step.type == "dual_joint_gripper" || step.type == "joint_group") {
+    // Corridor corrections, and arm moves beside a live side path, are planned first.
+    const bool plan_first = (step.type == "pose" && step.tcp_path_margin > 0) ||
+        (side_live() && (step.type == "joint" || step.type == "pose" || step.type == "linear"));
+    send_move(op, plan_first);
+  } else if (step.type == "gripper") {
+    if (config_.smooth_motion) {
+      request_scene(op, false);
+    } else {
+      send_gripper(op);
+    }
+  }
+  // wait is intentionally non-blocking; tick() completes it.
+}
+
 void TrajectoryExecutor::cancel(const std::string & code, const std::string & reason) {
+  cancel_main(code, reason); // The side stops only through cancel_side().
+}
+
+void TrajectoryExecutor::cancel_main(const std::string & code, const std::string & reason) {
   const auto op = operation_;
   if (!op || op->result.state != ExecutionState::Running) {
     return;
@@ -254,9 +296,9 @@ void TrajectoryExecutor::cancel(const std::string & code, const std::string & re
 
 void TrajectoryExecutor::tick() {
   for (auto it = retired_operations_.begin(); it != retired_operations_.end();) {
-    if ((*it)->preparation.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    if (!pending((*it)->preparation) && !((*it)->gate && pending((*it)->gate->check))) {
       try {
-        (*it)->preparation.get();
+        if ((*it)->preparation.valid()) (*it)->preparation.get();
       } catch (const std::exception &) {
       }
       it = retired_operations_.erase(it);
@@ -266,6 +308,7 @@ void TrajectoryExecutor::tick() {
   }
   const auto op = operation_;
   if (!op) {
+    tick_side();
     return;
   }
   if (op->round_trip) {
@@ -312,6 +355,11 @@ void TrajectoryExecutor::tick() {
           }
         };
         for (const auto & [name, planned] : op->preparation_positions) {
+          const bool side_arm = op->side_linked && side_ &&
+              (name == config_.arms.at(side_->arm).gripper_joint ||
+                  std::count(config_.arms.at(side_->arm).joints.begin(),
+                      config_.arms.at(side_->arm).joints.end(), name));
+          if (side_arm) continue; // Moved by the side operation; covered by the pair check.
           check_start("Robot moved during trajectory preparation", name, planned);
         }
         const double duration =
@@ -327,7 +375,7 @@ void TrajectoryExecutor::tick() {
         }
         op->path = std::move(path);
         if (op->step.type == "gripper") {
-          send_gripper(op);
+          gate_main(op, op->path.trajectory.joint_trajectory, [this, op]() { send_gripper(op); });
         } else {
           Execute::Goal goal;
           goal.trajectory = op->path.trajectory;
@@ -353,23 +401,25 @@ void TrajectoryExecutor::tick() {
               }
             }
           }
-          planned_trajectory_publisher_->publish(goal.trajectory.joint_trajectory);
-          dispatch<Execute>(execute_client_, goal, op, [](const Execute::Result & result) {
-            return result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS
-                       ? std::string{}
-                       : "MoveIt execution error " + std::to_string(result.error_code.val);
-          });
-          op->executing_path = true;
-          RCLCPP_INFO(node_.get_logger(),
-              "Executing %zu continuous segment(s), duration %.3f s",
-              op->steps.size(),
-              rclcpp::Duration(goal.trajectory.joint_trajectory.points.back().time_from_start)
-                  .seconds());
-          if (!op->paired_log.empty()) {
-            RCLCPP_INFO(node_.get_logger(), "%s, duration %.1f s", op->paired_log.c_str(),
+          gate_main(op, goal.trajectory.joint_trajectory, [this, op, goal]() {
+            planned_trajectory_publisher_->publish(goal.trajectory.joint_trajectory);
+            dispatch<Execute>(execute_client_, goal, op, [](const Execute::Result & result) {
+              return result.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS
+                         ? std::string{}
+                         : "MoveIt execution error " + std::to_string(result.error_code.val);
+            });
+            op->executing_path = true;
+            RCLCPP_INFO(node_.get_logger(),
+                "Executing %zu continuous segment(s), duration %.3f s",
+                op->steps.size(),
                 rclcpp::Duration(goal.trajectory.joint_trajectory.points.back().time_from_start)
                     .seconds());
-          }
+            if (!op->paired_log.empty()) {
+              RCLCPP_INFO(node_.get_logger(), "%s, duration %.1f s", op->paired_log.c_str(),
+                  rclcpp::Duration(goal.trajectory.joint_trajectory.points.back().time_from_start)
+                      .seconds());
+            }
+          });
         }
       }
     } catch (const std::exception & error) {
@@ -378,6 +428,7 @@ void TrajectoryExecutor::tick() {
       }
     }
   }
+  tick_gate(op);
   update_path_phase(op);
   if (!op->round_trip && op->result.state == ExecutionState::Running) {
     if (elapsed(op->started) >= op->step.timeout) {
@@ -445,6 +496,7 @@ void TrajectoryExecutor::tick() {
     op->round_trip->backward = moveit_msgs::msg::RobotTrajectory{};
     op->path = SmoothPath();
   }
+  tick_side();
   publish_state();
 }
 } // namespace demo_1f

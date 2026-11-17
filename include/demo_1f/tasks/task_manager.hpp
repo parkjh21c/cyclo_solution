@@ -2,11 +2,14 @@
 #include "demo_1f/action/approach_cup.hpp"
 #include "demo_1f/action/handover.hpp"
 #include "demo_1f/action/run_demo.hpp"
+#include "demo_1f/core/head_command_port.hpp"
+#include "demo_1f/core/side_motion_port.hpp"
 #include <ffw_vision_msgs/action/pick_dynamixel.hpp>
 #include "demo_1f/motions/common/cup_motion.hpp"
 #include "demo_1f/motions/handover/handover_motion.hpp"
 #include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/msg/demo_status.hpp"
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -24,16 +27,85 @@ public:
   TaskManager(rclcpp::Node & node,
       RobotContext & context,
       HandoverMotion & motion,
-      std::vector<CupMotionRegistration> cup_motions = {}, InitialPoseMotion * initial_motion = nullptr);
+      std::vector<CupMotionRegistration> cup_motions = {},
+      InitialPoseMotion * initial_motion = nullptr, HeadCommandPort * head = nullptr,
+      SideMotionPort * side = nullptr);
   void request_shutdown();
   bool can_shutdown() const;
   bool demo_faulted() const { return demo_faulted_; }
 
 private:
+  friend class TaskManagerTestAccess;
   using DemoAction = demo_1f::action::RunDemo;
   using DemoHandle = rclcpp_action::ServerGoalHandle<DemoAction>;
   using PickAction = ffw_vision_msgs::action::PickDynamixel;
   using PickHandle = rclcpp_action::ClientGoalHandle<PickAction>;
+  static std::string head_pose_for_task(const std::string & task);
+  void command_head(const std::string & task); // Never waits; skips the pose sent last.
+  void cancel_head();                           // Request only; the head pose becomes unknown.
+  HeadCommandPort * head_{nullptr};
+  std::string head_last_sent_;
+  // Independent other-arm return started with APPROACH_CUP or PLACE_CUP.
+  struct SideFailure {
+    std::string code, detail;
+    bool before_motion;
+  };
+  static bool waits_for_side(const std::string & stage);
+  bool side_active() const; // Running or stopping.
+  bool b2_return_ready(std::string & reason) const;
+  bool start_side_return(std::string & reason);
+  void cancel_side_return();
+  void watch_side();
+  bool side_blocks_cup(const std::string & name, const std::string & arm) const;
+  SideMotionPort * side_{nullptr};
+  bool demo_independent_return_{true};
+  bool side_watching_{false}, side_cancel_requested_{false}, side_waiting_{false};
+  bool side_stage_stop_sent_{false};
+  bool demo_prepare_deferred_{false}; // REFINE_CUP early pick waits for the side to arrive.
+  bool cup_side_{false};              // The standalone cup action owns side failure and operator cancel handling.
+  TimePoint side_started_at_{}, side_wait_started_{};
+  double side_return_seconds_{-1};
+  std::optional<SideFailure> side_failure_;
+  struct PickRequestId {
+    std::uint64_t run;
+    std::uint64_t request;
+    bool operator==(const PickRequestId & other) const {
+      return run == other.run && request == other.request;
+    }
+  };
+  struct PickRequestContext {
+    explicit PickRequestContext(PickRequestId value) : id(value) {}
+    const PickRequestId id;
+    bool pending{true}, goal_response_received{false}, result_received{false};
+    bool dispatch_unknown{false};
+    PickHandle::SharedPtr handle;
+    PickAction::Feedback::ConstSharedPtr feedback;
+    PickAction::Result::SharedPtr result;
+    rclcpp_action::ResultCode result_code{rclcpp_action::ResultCode::UNKNOWN};
+    bool cancel_wanted{false}, cancel_sent{false};
+    bool owned{false}; // PICK_DYNAMIXEL has taken over this request.
+    bool early{false}; // REFINE_CUP requested this pick before stage takeover.
+    bool hold_requested{false}, holding{false}, held_at_entry{false};
+    bool release_wanted{false}, release_sent{false}, release_response_received{false};
+    bool release_timed_out{false};
+    std::string phase{"PICK_STARTING"}, release_error;
+    std_srvs::srv::Trigger::Response::SharedPtr release_response;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture release_future;
+    TimePoint sent_at{}, stage_started_at{}, cancel_requested_at{}, release_sent_at{};
+  };
+  using PickRequest = std::shared_ptr<PickRequestContext>;
+  bool pick_in_flight() const;
+  bool pick_action_unsettled() const;
+  bool pick_release_pending() const;
+  bool pick_unsettled() const;
+  void maintain_pick_requests();
+  void cancel_pick(const PickRequest & request);
+  void on_pick_goal_response(const PickRequest & request, PickHandle::SharedPtr handle);
+  void on_pick_feedback(const PickRequest & request, PickAction::Feedback::ConstSharedPtr feedback);
+  void on_pick_result(const PickRequest & request, const PickHandle::WrappedResult & result);
+  void on_pick_release_response(const PickRequest & request,
+      std_srvs::srv::Trigger::Response::SharedPtr response);
+  void poll_pick_release(const PickRequest & request);
   void setup_demo_server();
   void tick_demo();
   void start_demo_stage();
@@ -52,30 +124,23 @@ private:
   rclcpp_action::Server<DemoAction>::SharedPtr demo_server_;
   rclcpp_action::Client<PickAction>::SharedPtr pick_client_;
   std::shared_ptr<DemoHandle> demo_goal_;
-  PickHandle::SharedPtr pick_handle_;
-  PickAction::Result::SharedPtr pick_result_;
-  bool pick_pending_{false}, pick_cancel_sent_{false}, demo_stage_active_{false};
+  PickRequest pick_;
+  std::vector<PickRequest> pick_requests_;
+  std::uint64_t demo_run_id_{0};
+  bool demo_stage_active_{false};
   bool demo_retry_wait_{false}, demo_resumable_{false}, demo_pick_only_{false};
   bool demo_initial_only_{false};
   bool demo_withdraw_cup_{false}; // Old WITHDRAW_CUP stage between release and return.
   bool demo_faulted_{false}, demo_cancel_requested_{false};
   std::string demo_stage_, demo_completed_stage_;
-  std::string demo_cup_id_, demo_detail_, pick_phase_;
+  std::string demo_cup_id_, demo_detail_;
   int demo_retries_{0}, demo_max_retries_{2};
   double demo_retry_delay_{1.0}, demo_pick_timeout_{180.0};
   TimePoint demo_deadline_{}, demo_stage_started_{};
 
   // PICK_DYNAMIXEL requested at REFINE_CUP start; held before motion until released.
   bool demo_prepare_pick_{false};
-  bool pick_owned_{false};          // The live pick request belongs to PICK_DYNAMIXEL.
-  bool pick_early_{false};          // Sent during REFINE_CUP; PICK_DYNAMIXEL has not taken it.
-  bool pick_holding_{false};        // PICK_HOLD feedback received.
-  bool pick_held_at_entry_{false};  // Already holding when PICK_DYNAMIXEL began.
-  bool pick_release_wanted_{false}, pick_cancel_wanted_{false};
-  std::string pick_release_error_;
-  TimePoint pick_sent_at_{}, pick_release_sent_at_{};
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pick_release_client_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture pick_release_future_;
   struct DemoFinish {
     bool success;
     std::string code, detail;

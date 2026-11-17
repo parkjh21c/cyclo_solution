@@ -25,6 +25,7 @@ struct ApproachConfig {
   double refine_pitch_ceiling_deg{75.0};
   bool refine_observe{true}; // false: open at the approach pose without wrist rim observation.
   std::string other_arm_return_sequence{}; // motion_sequences name; empty: approach arm moves alone
+  bool independent_return{true}; // demo.independent_return: the return runs as a side operation
   std::string validate(const std::string & arm) const;
 };
 

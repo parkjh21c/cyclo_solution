@@ -383,4 +383,77 @@ void validate_smooth_path(const SmoothPath & path,
     }
   }
 }
+JointRows sample_joint_path(const trajectory_msgs::msg::JointTrajectory & path, double max_step) {
+  const size_t dofs = path.joint_names.size();
+  if (path.points.empty() || dofs == 0 || !(max_step > 0)) return {};
+  const auto quintic_ready = [&](const Point & point) {
+    return point.positions.size() == dofs && point.velocities.size() == dofs &&
+           point.accelerations.size() == dofs;
+  };
+  JointRows dense;
+  dense.push_back(path.points.front().positions);
+  for (size_t i = 1; i < path.points.size(); ++i) {
+    const auto & first = path.points[i - 1];
+    const auto & last = path.points[i];
+    const double delta = distance(first.positions, last.positions);
+    const size_t count = std::max<size_t>(4, std::ceil(4 * delta / max_step));
+    const bool smooth = quintic_ready(first) && quintic_ready(last) &&
+                        seconds(last.time_from_start) > seconds(first.time_from_start);
+    for (size_t sample = 1; sample <= count; ++sample) {
+      const double u = double(sample) / count;
+      Positions row(dofs);
+      for (size_t joint = 0; joint < dofs; ++joint) {
+        // Controller quintic when velocities and accelerations exist, else a straight line.
+        row[joint] = smooth ? quintic(first, last, joint, u).position
+                            : first.positions[joint] +
+                                  u * (last.positions[joint] - first.positions[joint]);
+      }
+      dense.push_back(std::move(row));
+    }
+  }
+  JointRows rows{dense.front()};
+  for (size_t i = 1; i + 1 < dense.size(); ++i) {
+    if (distance(rows.back(), dense[i + 1]) > max_step) rows.push_back(dense[i]);
+  }
+  if (dense.size() > 1) rows.push_back(dense.back());
+  return rows;
+}
+
+std::string check_path_pairs(planning_scene::PlanningScene & scene,
+    const Config & config,
+    const std::vector<std::string> & first_names,
+    const JointRows & first,
+    const std::vector<std::string> & second_names,
+    const JointRows & second,
+    size_t & pairs) {
+  pairs = 0;
+  auto state = scene.getCurrentState();
+  collision_detection::CollisionRequest request;
+  request.group_name = config.coordinated_group;
+  request.contacts = true;
+  request.max_contacts = 10;
+  for (size_t a = 0; a < first.size(); ++a) {
+    for (size_t j = 0; j < first_names.size(); ++j) {
+      state.setVariablePosition(first_names[j], first[a][j]);
+    }
+    for (size_t b = 0; b < second.size(); ++b) {
+      for (size_t j = 0; j < second_names.size(); ++j) {
+        state.setVariablePosition(second_names[j], second[b][j]);
+      }
+      state.update();
+      ++pairs;
+      collision_detection::CollisionResult collision;
+      scene.checkCollision(request, collision, state);
+      if (collision.collision) {
+        std::string contacts;
+        for (const auto & contact : collision.contacts) {
+          contacts += "; " + contact.first.first + " / " + contact.first.second;
+        }
+        return "path pair " + std::to_string(a) + "/" + std::to_string(first.size()) + " x " +
+               std::to_string(b) + "/" + std::to_string(second.size()) + " collides" + contacts;
+      }
+    }
+  }
+  return {};
+}
 } // namespace demo_1f
