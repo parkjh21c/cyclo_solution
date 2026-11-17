@@ -20,6 +20,11 @@ MotionLimits effective_limits(const Config & config,
     const Step & step,
     const moveit::core::RobotModelConstPtr & model = {});
 
+// Explicit arm corridors are validation constraints; no positions are corrected.
+std::map<std::string, double> held_arm_targets(const Step & step, const Config & config);
+void validate_held_arm_path(const trajectory_msgs::msg::JointTrajectory & path,
+    const Step & step, const Config & config);
+
 // Ruckig runs locally, one target state at a time. No online waypoint service is used.
 SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> & segments,
     const std::vector<Step> & steps,

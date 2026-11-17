@@ -98,6 +98,120 @@ TEST_F(SmootherTest, ConnectsViaPointWithNonzeroVelocityAndStopsAtTransfer) {
   EXPECT_NO_THROW(validate_smooth_path(path, {first, second}, config, *scene));
 }
 
+TEST_F(SmootherTest, CupPreparationKeepsTheRepeatedLeftGoalAndCrossesTheRightViaAtPointThreeScale) {
+  first.velocity_scale = first.acceleration_scale = .3;
+  second.velocity_scale = second.acceleration_scale = .3;
+  auto path = smooth_segments(
+      {segment({{0, 0}, {.2, .1}, {.4, .2}}), segment({{.4, .2}, {.4, .5}, {.4, .8}})},
+      {first, second}, config, model);
+  ASSERT_EQ(path.segment_end_times.size(), 2u);
+  bool found_via = false;
+  for (const auto & point : path.trajectory.joint_trajectory.points) {
+    const double time = rclcpp::Duration(point.time_from_start).seconds();
+    if (std::abs(time - path.segment_end_times.front()) < 1e-8) {
+      found_via = true;
+      EXPECT_NEAR(point.positions[0], .4, 1e-8);
+      EXPECT_NEAR(point.positions[1], .2, 1e-8);
+      EXPECT_NEAR(point.velocities[0], 0, 1e-8);
+      EXPECT_GT(point.velocities[1], 0);
+    }
+    if (time >= path.segment_end_times.front() - 1e-8) {
+      EXPECT_NEAR(point.positions[0], .4, 1e-8);
+      EXPECT_NEAR(point.velocities[0], 0, 1e-8);
+      EXPECT_NEAR(point.accelerations[0], 0, 1e-8);
+    }
+  }
+  EXPECT_TRUE(found_via);
+  const auto & last = path.trajectory.joint_trajectory.points.back();
+  EXPECT_NEAR(last.positions[0], .4, 1e-8);
+  EXPECT_NEAR(last.positions[1], .8, 1e-8);
+  EXPECT_NO_THROW(validate_smooth_path(path, {first, second}, config, *scene));
+}
+
+TEST_F(SmootherTest, CupAttachmentIsStillCollisionCheckedAfterPreparationSmoothing) {
+  auto path = smooth_segments({segment({{0, 0}, {.3, .2}})}, {first}, config, model);
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "cup_obstacle";
+  obstacle.header.frame_id = "base";
+  obstacle.operation = obstacle.ADD;
+  shape_msgs::msg::SolidPrimitive sphere;
+  sphere.type = sphere.SPHERE;
+  sphere.dimensions = {.06};
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1;
+  pose.position.x = .5;
+  pose.position.z = .4;
+  obstacle.primitives = {sphere};
+  obstacle.primitive_poses = {pose};
+  ASSERT_TRUE(scene->processCollisionObjectMsg(obstacle));
+  EXPECT_NO_THROW(validate_smooth_path(path, {first}, config, *scene));
+  moveit_msgs::msg::AttachedCollisionObject cup;
+  cup.link_name = "two";
+  cup.object.header.frame_id = "two";
+  cup.object.id = "demo_place_cup";
+  cup.object.operation = cup.object.ADD;
+  pose.position.x = 0;
+  cup.object.primitives = {sphere};
+  cup.object.primitive_poses = {pose};
+  ASSERT_TRUE(scene->processAttachedCollisionObjectMsg(cup));
+  EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
+}
+
+TEST_F(SmootherTest, HeldArmCorridorRejectsAnOmplDetourWithoutCorrectingThePlan) {
+  config.arms["left"].joints = {"j1"};
+  second.hold_arm = "left";
+  second.hold_tolerance = .001;
+  second.left_target = {.4};
+  const auto detour = segment({{.4, .2}, {.42, .4}, {.4, .8}});
+  const auto original = detour;
+  EXPECT_THROW(validate_held_arm_path(detour.joint_trajectory, second, config), std::runtime_error);
+  EXPECT_THROW(smooth_segments({segment({{0, 0}, {.4, .2}}), detour}, {first, second}, config, model),
+      std::runtime_error);
+  EXPECT_EQ(detour, original);
+}
+
+TEST_F(SmootherTest, HeldArmCorridorAcceptsBoundedPlanningErrorAndChecksTheStart) {
+  config.arms["left"].joints = {"j1"};
+  second.hold_arm = "left";
+  second.hold_tolerance = .001;
+  second.left_target = {.4};
+  EXPECT_NO_THROW(validate_held_arm_path(segment({{.4005, .2}, {.3995, .8}}).joint_trajectory,
+      second, config));
+  EXPECT_THROW(validate_held_arm_path(segment({{.402, .2}, {.4, .8}}).joint_trajectory,
+      second, config), std::runtime_error);
+  EXPECT_THROW(validate_held_arm_path(segment({{.4, .2}, {.402, .8}}).joint_trajectory,
+      second, config), std::runtime_error);
+}
+
+TEST_F(SmootherTest, HeldArmCorridorRejectsQuinticExcursionsBetweenValidKnots) {
+  config.arms["left"].joints = {"j1"};
+  first.hold_arm = "left";
+  first.hold_tolerance = .001;
+  first.left_target = {.4};
+  SmoothPath path;
+  path.trajectory = segment({{.4, .2}, {.4, .2}});
+  path.point_steps = {0, 0};
+  auto & points = path.trajectory.joint_trajectory.points;
+  for (auto & point : points) {
+    point.velocities = {.02, 0};
+    point.accelerations = {0, 0};
+  }
+  points.back().time_from_start = rclcpp::Duration::from_seconds(1);
+  const auto original = path.trajectory;
+  EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
+  EXPECT_EQ(path.trajectory, original);
+}
+
+TEST_F(SmootherTest, HeldArmCorridorAlsoAcceptsValidSmoothedPreparation) {
+  config.arms["left"].joints = {"j1"};
+  second.hold_arm = "left";
+  second.hold_tolerance = .001;
+  second.left_target = {.4};
+  auto path = smooth_segments({segment({{0, 0}, {.4, .2}}), segment({{.4, .2}, {.4, .8}})},
+      {first, second}, config, model);
+  EXPECT_NO_THROW(validate_smooth_path(path, {first, second}, config, *scene));
+}
+
 TEST_F(SmootherTest, RespectsSlowerApproachAndUrdfVelocityCap) {
   config.motion_limits["j1"].velocity = 10;
   auto path = smooth_segments({segment({{0, 0}, {0.4, 0.2}}), segment({{0.4, 0.2}, {0.8, 0.4}})},

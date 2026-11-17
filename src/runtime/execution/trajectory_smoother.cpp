@@ -98,6 +98,45 @@ Sample quintic(const Point & first, const Point & last, size_t joint, double u) 
 }
 } // namespace
 
+std::map<std::string, double> held_arm_targets(const Step & step, const Config & config) {
+  if (step.hold_arm.empty()) return {};
+  const auto found = config.arms.find(step.hold_arm);
+  if (step.type != "dual_joint" || found == config.arms.end() ||
+      (step.hold_arm != "left" && step.hold_arm != "right") ||
+      !std::isfinite(step.hold_tolerance) || step.hold_tolerance <= 0 || step.hold_tolerance > .01) {
+    throw std::runtime_error("Invalid held-arm corridor: " + step.name);
+  }
+  const auto & target = step.hold_arm == "left" ? step.left_target : step.right_target;
+  if (target.size() != found->second.joints.size() || target.empty()) {
+    throw std::runtime_error("Incomplete held-arm goal: " + step.name);
+  }
+  std::map<std::string, double> result;
+  for (size_t i = 0; i < target.size(); ++i) {
+    if (!std::isfinite(target[i])) throw std::runtime_error("Nonfinite held-arm goal");
+    result.emplace(found->second.joints[i], target[i]);
+  }
+  return result;
+}
+
+void validate_held_arm_path(const trajectory_msgs::msg::JointTrajectory & path,
+    const Step & step, const Config & config) {
+  const auto targets = held_arm_targets(step, config);
+  if (targets.empty()) return;
+  if (path.points.empty()) throw std::runtime_error("Empty held-arm path");
+  for (const auto & [name, target] : targets) {
+    const auto found = std::find(path.joint_names.begin(), path.joint_names.end(), name);
+    if (found == path.joint_names.end()) throw std::runtime_error("Held-arm path lacks " + name);
+    const auto index = found - path.joint_names.begin();
+    for (const auto & point : path.points) {
+      const auto value = point.positions.at(index);
+      if (!std::isfinite(value) || std::abs(value - target) > step.hold_tolerance + 1e-10) {
+        throw std::runtime_error("Planned held arm leaves corridor: " + step.name + " / " + name +
+            " offset=" + std::to_string(value - target) + " limit=" + std::to_string(step.hold_tolerance));
+      }
+    }
+  }
+}
+
 MotionLimits effective_limits(const Config & config,
     const std::string & name,
     const Step & step,
@@ -151,6 +190,7 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
   std::set<std::string> previous_held_joints;
   for (size_t segment = 0; segment < segments.size(); ++segment) {
     const auto & source = segments[segment].joint_trajectory;
+    validate_held_arm_path(source, steps[segment], config);
     if (source.points.empty() || source.joint_names.size() != dofs ||
         !segments[segment].multi_dof_joint_trajectory.points.empty()) {
       throw std::runtime_error("Invalid coordinated trajectory");
@@ -312,6 +352,25 @@ void validate_smooth_path(const SmoothPath & path,
     const double dt = seconds(last.time_from_start) - seconds(first.time_from_start);
     if (!(dt > 0)) {
       throw std::runtime_error("Non-increasing trajectory timestamps");
+    }
+    const auto & corridor_step = steps.at(path.point_steps.at(i));
+    for (const auto & [name, target] : held_arm_targets(corridor_step, config)) {
+      const auto found = std::find(trajectory.joint_names.begin(), trajectory.joint_names.end(), name);
+      if (found == trajectory.joint_names.end()) throw std::runtime_error("Smoothed path lacks " + name);
+      const size_t j = found - trajectory.joint_names.begin();
+      // Quintic Bernstein control points bound the complete interval, including between samples.
+      const double p0 = first.positions.at(j), p1 = last.positions.at(j);
+      const double v0 = first.velocities.at(j), v1 = last.velocities.at(j);
+      const double a0 = first.accelerations.at(j), a1 = last.accelerations.at(j);
+      const std::vector<double> controls = {p0, p0 + v0 * dt / 5,
+          p0 + 2 * v0 * dt / 5 + a0 * dt * dt / 20,
+          p1 - 2 * v1 * dt / 5 + a1 * dt * dt / 20, p1 - v1 * dt / 5, p1};
+      for (const double value : controls) {
+        if (!std::isfinite(value) || std::abs(value - target) > corridor_step.hold_tolerance + 1e-10) {
+          throw std::runtime_error("Smoothed held arm leaves certified corridor: " +
+              corridor_step.name + " / " + name);
+        }
+      }
     }
     const size_t samples = std::max<size_t>(5, std::ceil(dt / 0.002));
     for (size_t sample = 0; sample <= samples; ++sample) {

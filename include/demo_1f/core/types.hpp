@@ -96,6 +96,9 @@ struct Step {
   // to fallback_attempts times (zero = no fallback). The step timeout covers every attempt.
   std::string fallback_pipeline{}, fallback_planner{};
   int fallback_attempts{0};
+  std::string hold_arm{}; // Optional dual_joint path corridor around this arm's nominal goal.
+  double hold_tolerance{0.001}; // Radians per joint; checked before and after smoothing.
+  bool joint_line{false}; // dual_joint only: straight joint segment from the planned start, no planner.
 };
 
 struct MotionSequence {

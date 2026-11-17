@@ -162,6 +162,9 @@ private:
   // True: replanned with the step's fallback planner; false: failure stands (history in detail).
   bool replan_with_fallback(
       const std::shared_ptr<Operation> & op, const Move::Result & result, std::string & detail);
+  // Plan-only sequence segment: held-arm check, store, advance the start, then next or prepare.
+  void accept_segment(const std::shared_ptr<Operation> & op,
+      const moveit_msgs::msg::RobotTrajectory & planned);
   void execute_planned_pose(const std::shared_ptr<Operation> & op,
       const moveit_msgs::msg::RobotTrajectory & trajectory);
   void request_scene(const std::shared_ptr<Operation> & op, bool prepare_execution);

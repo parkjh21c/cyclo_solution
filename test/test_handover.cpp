@@ -46,6 +46,60 @@ TEST(PlanningConfig, CandidateCountIsBoundedAndReadOnly) {
   }
 }
 
+TEST(PlanningConfig, ExplicitHeldArmCorridorIsLoadedAndReadOnly) {
+  rclcpp::NodeOptions options;
+  const std::string prefix = "motion_sequences.cup_left_to_right.";
+  options.parameter_overrides({
+      rclcpp::Parameter(prefix + "steps", std::vector<std::string>{"cup_ready"}),
+      rclcpp::Parameter(prefix + "cup_ready.type", "dual_joint"),
+      rclcpp::Parameter(prefix + "cup_ready.left_target", std::vector<double>(7, .1)),
+      rclcpp::Parameter(prefix + "cup_ready.right_target", std::vector<double>(7, -.1)),
+      rclcpp::Parameter(prefix + "cup_ready.hold_arm", "left"),
+      rclcpp::Parameter(prefix + "cup_ready.hold_tolerance", .001)});
+  auto node = std::make_shared<rclcpp::Node>("held_arm_config", options);
+  auto config = load_config(*node);
+  auto sequence = config.motion_sequences.at("cup_left_to_right");
+  ASSERT_EQ(sequence.steps.size(), 1u);
+  EXPECT_EQ(sequence.steps.front().hold_arm, "left");
+  EXPECT_DOUBLE_EQ(sequence.steps.front().hold_tolerance, .001);
+  EXPECT_TRUE(node->describe_parameter(prefix + "cup_ready.hold_arm").read_only);
+  EXPECT_TRUE(node->describe_parameter(prefix + "cup_ready.hold_tolerance").read_only);
+  EXPECT_TRUE(validate_motion_sequence(sequence, config).empty());
+  sequence.steps.front().type = "dual_joint_gripper";
+  EXPECT_FALSE(validate_motion_sequence(sequence, config).empty());
+  sequence.steps.front().type = "dual_joint";
+  sequence.steps.front().hold_tolerance = 0;
+  EXPECT_FALSE(validate_motion_sequence(sequence, config).empty());
+}
+
+TEST(PlanningConfig, JointLineIsLoadedAndRequiresAPlainDualJointStep) {
+  rclcpp::NodeOptions options;
+  const std::string prefix = "motion_sequences.cup_left_to_right.";
+  options.parameter_overrides({
+      rclcpp::Parameter(prefix + "steps", std::vector<std::string>{"cup_ready"}),
+      rclcpp::Parameter(prefix + "cup_ready.type", "dual_joint"),
+      rclcpp::Parameter(prefix + "cup_ready.left_target", std::vector<double>(7, .1)),
+      rclcpp::Parameter(prefix + "cup_ready.right_target", std::vector<double>(7, -.1)),
+      rclcpp::Parameter(prefix + "cup_ready.joint_line", true)});
+  auto node = std::make_shared<rclcpp::Node>("joint_line_config", options);
+  auto config = load_config(*node);
+  auto sequence = config.motion_sequences.at("cup_left_to_right");
+  ASSERT_EQ(sequence.steps.size(), 1u);
+  EXPECT_TRUE(sequence.steps.front().joint_line);
+  EXPECT_TRUE(node->describe_parameter(prefix + "cup_ready.joint_line").read_only);
+  EXPECT_TRUE(validate_motion_sequence(sequence, config).empty());
+  auto planned = sequence;
+  planned.steps.front().pipeline = "ompl";
+  planned.steps.front().planner = "RRTConnectkConfigDefault";
+  EXPECT_NE(validate_motion_sequence(planned, config).find("Joint line"), std::string::npos);
+  auto single = sequence;
+  single.steps.front().type = "joint";
+  single.steps.front().arm = "left";
+  single.steps.front().target = std::vector<double>(7, .1);
+  EXPECT_NE(validate_motion_sequence(single, config).find("Joint line"), std::string::npos);
+  EXPECT_FALSE(Step{}.joint_line);
+}
+
 TEST(PlanningConfig, TfSpinThreadDefaultsOff) {
   auto defaults = std::make_shared<rclcpp::Node>("tf_spin_thread_default");
   EXPECT_FALSE(load_config(*defaults).tf_spin_thread);
@@ -2198,6 +2252,94 @@ TEST_F(RosFixture, ContinuousPlansAreReadOnlyUntilOneCombinedExecution) {
           "gripper:left",
           "move:handover_arms:RRTConnectkConfigDefault",
           "execute:path"}));
+}
+
+TEST_F(RosFixture, CupPreparationOmplDetourIsRejectedBeforeAnyTrajectoryIsSent) {
+  enable_smoothing();
+  auto steps = config.motion_sequences.at("left_to_right").steps;
+  steps.resize(2);
+  steps[1].type = "dual_joint";
+  steps[1].gripper_target.clear();
+  steps[1].left_target = steps[0].left_target;
+  steps[1].hold_arm = "left";
+  steps[1].hold_tolerance = .001;
+  for (auto & step : steps) {
+    step.pipeline = "ompl";
+    step.planner = "RRTConnectkConfigDefault";
+    step.velocity_scale = step.acceleration_scale = .3;
+  }
+  transform_plan = [this](Move::Result & result) {
+    if (move_goals.size() != 2) return;
+    auto & path = result.planned_trajectory.joint_trajectory;
+    const auto found = std::find(path.joint_names.begin(), path.joint_names.end(),
+        config.arms.at("left").joints.front());
+    ASSERT_NE(found, path.joint_names.end());
+    auto detour = path.points.front();
+    detour.positions.at(found - path.joint_names.begin()) += .02;
+    path.points.insert(path.points.begin() + 1, detour);
+  };
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(steps));
+  ASSERT_TRUE(until([&] { return executor.result().state != ExecutionState::Running; }, 5.,
+      [&] { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Failed);
+  EXPECT_NE(executor.result().detail.find("corridor"), std::string::npos);
+  EXPECT_TRUE(execution_goals.empty());
+  ASSERT_EQ(move_goals.size(), 2u);
+  EXPECT_EQ(move_goals[1].request.pipeline_id, "ompl");
+  EXPECT_EQ(move_goals[1].request.planner_id, "RRTConnectkConfigDefault");
+  int held_left = 0;
+  for (const auto & constraint : move_goals[1].request.path_constraints.joint_constraints) {
+    if (std::find(config.arms.at("left").joints.begin(), config.arms.at("left").joints.end(),
+            constraint.joint_name) == config.arms.at("left").joints.end()) continue;
+    ++held_left;
+    EXPECT_DOUBLE_EQ(constraint.tolerance_above, .001);
+    EXPECT_DOUBLE_EQ(constraint.tolerance_below, .001);
+  }
+  EXPECT_EQ(held_left, 7);
+}
+
+TEST_F(RosFixture, CupPreparationJointLineSkipsMoveGroupAndKeepsTheHeldArm) {
+  enable_smoothing();
+  for (const auto & name : config.arms.at("left").joints) positions.at(name) = .1;
+  auto steps = config.motion_sequences.at("left_to_right").steps;
+  steps.resize(2);
+  steps[0].blend_with_next = true;
+  steps[1].name = "cup_ready";
+  steps[1].type = "dual_joint";
+  steps[1].arm.clear();
+  steps[1].gripper_target.clear();
+  steps[1].left_target = steps[0].left_target;
+  steps[1].hold_arm = "left";
+  steps[1].hold_tolerance = .001;
+  for (auto & step : steps) {
+    step.joint_line = true;
+    step.pipeline.clear();
+    step.planner.clear();
+    step.velocity_scale = step.acceleration_scale = .3;
+  }
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(steps));
+  ASSERT_TRUE(until([&] { return executor.result().state != ExecutionState::Running; }, 5.,
+      [&] { executor.tick(); }));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_TRUE(move_goals.empty());
+  ASSERT_EQ(execution_goals.size(), 1u);
+  const auto & path = execution_goals[0].trajectory.joint_trajectory;
+  for (const auto & name : config.arms.at("left").joints) {
+    const auto found = std::find(path.joint_names.begin(), path.joint_names.end(), name);
+    ASSERT_NE(found, path.joint_names.end());
+    for (const auto & point : path.points) {
+      EXPECT_NEAR(point.positions.at(found - path.joint_names.begin()), .1, .001) << name;
+    }
+  }
+  const auto right = std::find(path.joint_names.begin(), path.joint_names.end(),
+      config.arms.at("right").joints.front());
+  ASSERT_NE(right, path.joint_names.end());
+  EXPECT_NEAR(path.points.back().positions.at(right - path.joint_names.begin()),
+      steps[1].right_target.front(), 1e-6);
 }
 
 TEST_F(RosFixture, CurrentLimitedReceiverDoesNotBlockReleaseAndRetreat) {

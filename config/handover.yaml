@@ -312,18 +312,17 @@ handover_demo:
       # Cup handover (left holds, right receives); see scripts/generate_cup_handover_targets.py.
       cup_left_to_right:
         steps:
-        - cup_carry
         - cup_ready_via
         - cup_ready
-        cup_carry:
-          type: joint
-          arm: giver
+        cup_ready_via:
+          type: dual_joint
+          joint_line: true
           velocity_scale: 0.3
           acceleration_scale: 0.3
-          tolerance: 0.017453292519943295
+          tolerance: 0.05
           planning_tolerance: 0.0005
           timeout: 60.0
-          target:
+          left_target:
           - -0.15714083
           - 0.37945894
           - -0.44538296
@@ -331,32 +330,34 @@ handover_demo:
           - 0.16935813
           - 0.132273
           - -1.16007363
-        # Initial pose with j1 at cup_ready: lifts the hand before it swings forward.
-        # The direct PTP line hits basket_wall_y+ (scripts/ptp_path_check.py --via-search).
-        cup_ready_via:
-          type: joint
-          arm: receiver
-          velocity_scale: 0.3
-          acceleration_scale: 0.3
-          tolerance: 0.05
-          timeout: 60.0
-          target:
-          - -0.15991552
+          right_target:
+          - 1.57
           - 0.0
           - 0.0
-          - -2.27
+          - -2.8
           - 0.0
-          - 0.35
           - 0.0
+          - 0.0
+          blend_with_next: true
         cup_ready:
-          type: joint
-          arm: receiver
+          type: dual_joint
+          joint_line: true
+          hold_arm: left
+          hold_tolerance: 0.001
           velocity_scale: 0.3
           acceleration_scale: 0.3
           tolerance: 0.017453292519943295
           planning_tolerance: 0.0005
           timeout: 60.0
-          target:
+          left_target:
+          - -0.15714083
+          - 0.37945894
+          - -0.44538296
+          - -1.61585321
+          - 0.16935813
+          - 0.132273
+          - -1.16007363
+          right_target:
           - -0.15991552
           - -0.6942645
           - 0.33626403

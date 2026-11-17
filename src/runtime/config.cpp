@@ -96,6 +96,18 @@ std::string validate_motion_sequence(const MotionSequence & sequence, const Conf
         (!step.position_only || (step.arm != "left" && step.arm != "right"))) {
       return "Inward TCP yaw requires a left/right position-only pose step";
     }
+    if (!step.hold_arm.empty() &&
+        (step.type != "dual_joint" || !config.arms.count(step.hold_arm) ||
+            (step.hold_arm != "left" && step.hold_arm != "right") ||
+            !std::isfinite(step.hold_tolerance) || step.hold_tolerance <= 0 ||
+            step.hold_tolerance > 0.01)) {
+      return prefix + "Held arm requires dual_joint, a known arm and tolerance in (0, 0.01] rad";
+    }
+    if (step.joint_line && (step.type != "dual_joint" || !step.pipeline.empty() ||
+                               !step.planner.empty() || fallback_named ||
+                               step.fallback_attempts != 0)) {
+      return prefix + "Joint line requires dual_joint without planner or fallback settings";
+    }
     if (step.type == "wait") {
       if (step.timeout < step.duration) {
         return prefix + "Timeout is shorter than wait";
@@ -374,6 +386,9 @@ Config load_config(rclcpp::Node & node) {
       step.acceleration_scale =
           node.declare_parameter<double>(q + "acceleration_scale", 0.0, descriptor);
       step.blend_with_next = node.declare_parameter<bool>(q + "blend_with_next", false, descriptor);
+      step.hold_arm = text(q + "hold_arm", "");
+      step.hold_tolerance = node.declare_parameter<double>(q + "hold_tolerance", 0.001, descriptor);
+      step.joint_line = node.declare_parameter<bool>(q + "joint_line", false, descriptor);
       sequence.steps.push_back(step);
     }
     sequence.validation_error = validate_motion_sequence(sequence, c);

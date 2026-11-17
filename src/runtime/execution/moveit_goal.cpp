@@ -267,10 +267,49 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
       constraints.orientation_constraints.push_back(orientation);
     }
   }
+  if (plan_only && !op->steps.empty() && step.joint_line) {
+    const auto * group = robot_model_ ? robot_model_->getJointModelGroup(config_.coordinated_group)
+                                      : nullptr;
+    if (!group) throw std::runtime_error("Joint line needs the coordinated group model");
+    std::vector<std::string> names;
+    for (const auto * joint : group->getActiveJointModels()) {
+      for (const auto & name : joint->getVariableNames()) names.push_back(name);
+    }
+    for (const auto & [side, settings] : config_.arms) {
+      for (const auto & name : settings.joints) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) {
+          throw std::runtime_error("Joint line group lacks " + side + " arm joint " + name);
+        }
+      }
+    }
+    const auto & start = op->planned_start.joint_state;
+    moveit_msgs::msg::RobotTrajectory line;
+    line.joint_trajectory.joint_names = names;
+    trajectory_msgs::msg::JointTrajectoryPoint first, last;
+    for (const auto & name : names) {
+      const auto found = std::find(start.name.begin(), start.name.end(), name);
+      if (found == start.name.end()) {
+        throw std::runtime_error("Joint line start lacks " + name);
+      }
+      const double value = start.position.at(found - start.name.begin());
+      const auto target = op->joint_targets.find(name);
+      first.positions.push_back(value);
+      last.positions.push_back(target == op->joint_targets.end() ? value : target->second);
+    }
+    line.joint_trajectory.points = {first, last};
+    // No action is outstanding, same as request_scene while its service call is pending.
+    op->action_terminal = true;
+    op->action_success = false;
+    op->cancel_action = {};
+    RCLCPP_INFO(node_.get_logger(), "Planned %s: joint line, no planner", step.name.c_str());
+    accept_segment(op, line);
+    return;
+  }
   auto planning_step = step;
   if (step.planning_tolerance > 0) {
     planning_step.tolerance = step.planning_tolerance;
   }
+  const auto held_arm = held_arm_targets(step, config_);
   for (const auto & [name, target] : op->joint_targets) {
     moveit_msgs::msg::JointConstraint joint;
     joint.joint_name = name;
@@ -279,7 +318,10 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
     joint.tolerance_below = goal_tolerance(name, planning_step);
     joint.weight = 1.0;
     constraints.joint_constraints.push_back(joint);
-    if (held_joints.count(name)) {
+    if (held_arm.count(name)) {
+      joint.tolerance_above = joint.tolerance_below = step.hold_tolerance;
+      request.path_constraints.joint_constraints.push_back(joint);
+    } else if (held_joints.count(name)) {
       // A held joint needs a path constraint, not just the same endpoint.
       joint.tolerance_above = joint.tolerance_below = std::min(planning_step.tolerance, 0.001);
       request.path_constraints.joint_constraints.push_back(joint);
@@ -348,21 +390,28 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
           execute_planned_pose(op, result.planned_trajectory);
           return;
         }
-        op->planned_segments.push_back(result.planned_trajectory);
-        moveit::core::RobotState state(robot_model_);
-        moveit::core::robotStateMsgToRobotState(op->planned_start, state);
-        state.setVariablePositions(trajectory.joint_names, trajectory.points.back().positions);
-        state.update();
-        moveit::core::robotStateToRobotStateMsg(state, op->planned_start);
-        if (op->planned_segments.size() < op->steps.size()) {
-          send_move(op, true);
-        } else {
-          if (!op->paired_steps.empty()) pair_with_other_arm(*op); // start_paired
-          request_scene(op, true);
-        }
+        accept_segment(op, result.planned_trajectory);
       })
                 : std::function<void(const Move::Result &)>{});
 }
+void TrajectoryExecutor::accept_segment(const std::shared_ptr<Operation> & op,
+    const moveit_msgs::msg::RobotTrajectory & planned) {
+  const auto & trajectory = planned.joint_trajectory;
+  validate_held_arm_path(trajectory, op->steps.at(op->planned_segments.size()), config_);
+  op->planned_segments.push_back(planned);
+  moveit::core::RobotState state(robot_model_);
+  moveit::core::robotStateMsgToRobotState(op->planned_start, state);
+  state.setVariablePositions(trajectory.joint_names, trajectory.points.back().positions);
+  state.update();
+  moveit::core::robotStateToRobotStateMsg(state, op->planned_start);
+  if (op->planned_segments.size() < op->steps.size()) {
+    send_move(op, true);
+  } else {
+    if (!op->paired_steps.empty()) pair_with_other_arm(*op); // start_paired
+    request_scene(op, true);
+  }
+}
+
 void TrajectoryExecutor::execute_planned_pose(const std::shared_ptr<Operation> & op,
     const moveit_msgs::msg::RobotTrajectory & planned) {
   if (op->cancel_requested || op->result.state != ExecutionState::Running) return;

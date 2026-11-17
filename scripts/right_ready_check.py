@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read-only: pick the right hand's wait distance whose Pilz PTP path avoids the held cup.
 
-Needs full_demo running and the robot where cup_carry ended (left holding the cup at the
-transfer pose, right arm at the initial pose). For each wait distance behind the grasp it solves
-IK, walks the joint-space interpolation from the current right arm joints (cup contacts
+Historical fixed-left-arm diagnostic: needs full_demo running with the left holding the cup
+at the transfer pose and the right at initial. B3 no longer stops in this intermediate state;
+this tool does not check B3 simultaneous preparation or its blended, smoothed trajectory.
+For each wait distance behind the grasp it solves IK, walks the joint-space interpolation from the current right arm joints (cup contacts
 included) and checks the straight approach to the grasp. Prints YAML-ready joints for passes.
 Usage: python3 right_ready_check.py [--waits 0.12,0.2,0.25,0.3]
 """

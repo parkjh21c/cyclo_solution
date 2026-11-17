@@ -172,6 +172,13 @@ public:
     return true;
   }
 
+  bool start_sequence(const std::vector<Step> & sequence) override {
+    continuous.push_back(sequence);
+    steps.insert(steps.end(), sequence.begin(), sequence.end());
+    current = {ExecutionState::Running, {}, {}, sequence.front().name};
+    return true;
+  }
+
   bool start_paired(const Step &, const std::vector<Step> &) override {
     ++paired_calls;
     return false; // As before motion: the approach falls back to one step at a time.
@@ -210,6 +217,7 @@ public:
   int paired_calls = 0;
   ExecutionResult current;
   std::vector<Step> steps;
+  std::vector<std::vector<Step>> continuous;
   std::vector<Step> round_steps;
   std::vector<std::vector<Step>> round_trips;
   size_t round_index{0};
@@ -2010,7 +2018,179 @@ TEST_F(CupHandoverFixture, CancelDuringSceneSwapStillAttachesBeforeStopping) {
   EXPECT_EQ(executor.steps.size(), 3u); // The giver never opened.
 }
 
+
+class B3HandoverFixture : public CupHandoverFixture {
+protected:
+  void SetUp() override {
+    CupHandoverFixture::SetUp();
+    robot.smooth_motion = true;
+    Step via = taught("cup_ready_via", "dual_joint", "", {});
+    via.left_target = {.1};
+    via.right_target = {.2};
+    via.velocity_scale = via.acceleration_scale = .3;
+    via.pipeline = "ompl";
+    via.planner = "RRTConnectkConfigDefault";
+    via.tolerance = .05;
+    via.planning_tolerance = .0005;
+    via.blend_with_next = true;
+    Step ready = via;
+    ready.name = "cup_ready";
+    ready.right_target = {.3};
+    ready.tolerance = M_PI / 180;
+    ready.blend_with_next = false;
+    ready.hold_arm = "left";
+    ready.hold_tolerance = .001;
+    robot.motion_sequences.at("cup_left_to_right").steps = {via, ready};
+  }
+};
+
+TEST_F(B3HandoverFixture, SendsBothPreparationStepsTogetherBeforeContactAndGrasp) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run(motion);
+  ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  const auto & stages = executor.continuous.front();
+  ASSERT_EQ(stages.size(), 2u);
+  EXPECT_EQ(stages[0].name, "cup_ready_via");
+  EXPECT_EQ(stages[1].name, "cup_ready");
+  EXPECT_EQ(stages[0].left_target, stages[1].left_target);
+  EXPECT_EQ(stages[0].right_target, (std::vector<double>{.2}));
+  EXPECT_EQ(stages[1].right_target, (std::vector<double>{.3}));
+  for (const auto & step : stages) {
+    EXPECT_EQ(step.type, "dual_joint");
+    EXPECT_TRUE(step.gripper_target.empty());
+    EXPECT_EQ(step.pipeline, "ompl");
+    EXPECT_EQ(step.planner, "RRTConnectkConfigDefault");
+    EXPECT_DOUBLE_EQ(step.velocity_scale, .3);
+    EXPECT_DOUBLE_EQ(step.acceleration_scale, .3);
+  }
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{2, 4, 4}));
+  ASSERT_EQ(executor.steps.size(), 6u);
+  EXPECT_EQ(executor.steps[2].name, "cup_insert");
+  EXPECT_EQ(executor.steps[3].name, "receiver_close");
+  EXPECT_EQ(executor.steps[4].name, "giver_release");
+  EXPECT_EQ(executor.steps[5].name, "cup_retreat");
+}
+
+TEST_F(B3HandoverFixture, PreparationFailureNeverInsertsClosesOrSwapsTheCup) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run(motion, 2);
+  EXPECT_EQ(motion.result().state, "FAILED");
+  EXPECT_EQ(executor.continuous.size(), 1u);
+  EXPECT_EQ(executor.steps.size(), 2u);
+  EXPECT_TRUE(scene.scenes.empty());
+}
+
+TEST_F(B3HandoverFixture, CancelDuringPreparationNeverInsertsClosesOrSwapsTheCup) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  for (int i = 0; i < 10 && executor.continuous.empty(); ++i) {
+    feedback();
+    motion.tick();
+  }
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  motion.cancel();
+  run(motion);
+  EXPECT_EQ(motion.result().state, "CANCELLED");
+  EXPECT_EQ(executor.steps.size(), 2u);
+  EXPECT_TRUE(scene.scenes.empty());
+}
+
+TEST_F(B3HandoverFixture, PreviewReportsOnlyInsertPoseWithoutPlanningPreparation) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason, false)) << reason;
+  motion.tick();
+  EXPECT_TRUE(motion.result().sequence_completed);
+  EXPECT_TRUE(executor.continuous.empty());
+  EXPECT_TRUE(executor.steps.empty());
+  EXPECT_TRUE(scene.scenes.empty());
+}
+
+class B2HandoverFixture : public CupHandoverFixture {
+protected:
+  void SetUp() override {
+    CupHandoverFixture::SetUp();
+    config.other_arm_return_sequence = "right_return";
+    MotionSequence transfer, grasp, release, returning;
+    transfer.steps = {taught("receiver_open", "gripper", "left", {0.})};
+    grasp.steps = {taught("cup_insert", "linear", "left", {.38, -.05, .95, 0, 0, 0, 1}),
+        taught("receiver_close", "gripper", "left", {.8})};
+    release.steps = {taught("giver_release", "gripper", "right", {0.}),
+        taught("cup_retreat", "linear", "right", {.38, -.16, 1., 0, 0, 0, 1}),
+        taught("giver_via", "joint", "right", {.1}),
+        taught("giver_home", "joint", "right", {.2})};
+    returning.steps = {taught("giver_home_via", "joint", "right", {.3}),
+        taught("giver_home", "joint", "right", {.2})};
+    robot.motion_sequences["cup_right_to_left"] = transfer;
+    robot.motion_sequences["cup_right_to_left_grasp"] = grasp;
+    robot.motion_sequences["cup_right_to_left_release"] = release;
+    robot.motion_sequences["right_return"] = returning;
+  }
+};
+
+TEST_F(B2HandoverFixture, IndependentReleaseStopsAtRetreatWithoutChangingTheConfiguredSequence) {
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  ASSERT_TRUE(back.start("right", "cup", reason)) << reason;
+  run(back);
+  ASSERT_TRUE(back.result().sequence_completed) << back.result().detail;
+  std::vector<std::string> names;
+  for (const auto & step : executor.steps) names.push_back(step.name);
+  EXPECT_EQ(names, (std::vector<std::string>{"receiver_open", "cup_insert", "receiver_close",
+      "giver_release", "cup_retreat"}));
+  EXPECT_EQ(back.result().last_completed_step, "cup_retreat");
+  EXPECT_EQ(robot.motion_sequences.at("cup_right_to_left_release").steps.size(), 4u);
+  ASSERT_EQ(scene.scenes.size(), 3u);
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{1, 3, 3}));
+  EXPECT_EQ(scene.scenes.back().robot_state.attached_collision_objects[0].link_name,
+      robot.arms.at("left").tcp);
+}
+
+TEST_F(B2HandoverFixture, PairedModeRetainsBothLegacyReturnSteps) {
+  config.independent_return = false;
+  config.other_arm_return_sequence.clear();
+  robot.motion_sequences.erase("right_return");
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  ASSERT_TRUE(back.start("right", "cup", reason)) << reason;
+  run(back);
+  ASSERT_TRUE(back.result().sequence_completed) << back.result().detail;
+  ASSERT_EQ(executor.steps.size(), 7u);
+  EXPECT_EQ(executor.steps[5].name, "giver_via");
+  EXPECT_EQ(executor.steps[6].name, "giver_home");
+}
+
+TEST_F(B2HandoverFixture, MissingIndependentReturnConfigurationRejectsBeforeAnyMotion) {
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  config.other_arm_return_sequence.clear();
+  EXPECT_FALSE(back.start("right", "cup", reason));
+  config.other_arm_return_sequence = "right_return";
+  robot.motion_sequences.erase("right_return");
+  EXPECT_FALSE(back.start("right", "cup", reason));
+  EXPECT_TRUE(executor.steps.empty());
+  EXPECT_TRUE(scene.scenes.empty());
+}
+
+TEST_F(B2HandoverFixture, PreviewWithoutReturnConfigurationDoesNotMoveOrSwapTheCup) {
+  config.other_arm_return_sequence.clear();
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  ASSERT_TRUE(back.start("right", "cup", reason, false)) << reason;
+  back.tick();
+  EXPECT_TRUE(back.result().sequence_completed);
+  EXPECT_TRUE(executor.steps.empty());
+  EXPECT_TRUE(scene.scenes.empty());
+}
+
 TEST_F(CupHandoverFixture, RightGiverHandsTheCupBackToTheLeft) {
+  config.independent_return = false;
   MotionSequence open, grasp, release;
   open.steps = {taught("receiver_open", "gripper", "left", {0.})};
   open.steps[0].duration = 1;

@@ -3,6 +3,8 @@
 
 Never sends motion goals. Run with the robot at the initial pose and the cup measured
 (VALID_INIT). Merge the output under handover_demo.ros__parameters.motion_sequences.
+Preparation output uses two blended dual_joint joint-line stages (no planner), including the right via.
+Generation-time IK diagnostics are not an attached-cup simultaneous-path validation.
 Usage: python3 generate_cup_handover_targets.py CUP_X CUP_Y RIM_Z --output /tmp/cup_handover.yaml
 """
 import argparse
@@ -73,7 +75,7 @@ def inverse(q):
 
 
 def joint_path_report(node, begin, end, names, steps=10):
-    """What Pilz PTP does: straight line in joint space. Report elbow height, cup tilt, contacts."""
+    """Straight joint line, the joint_line preparation shape; geometry diagnostics only."""
     _, hold_q = node.link_pose("gripper_l_tcp", end)
     cup_axis_in_hand = rotate(inverse(hold_q), (0.0, 0.0, 1.0))
     start_values = joints_of(begin, names)
@@ -100,8 +102,21 @@ class RosDumper(yaml.SafeDumper):
         return True
 
 
+def preparation_steps(left, right_via, right, speed=0.3):
+    """Two blended joint-line goals (no planner); grippers retain their measured positions."""
+    common = {"type": "dual_joint", "joint_line": True, "velocity_scale": speed, "acceleration_scale": speed,
+              "planning_tolerance": 0.0005, "timeout": 60.0}
+    return {
+        "steps": ["cup_ready_via", "cup_ready"],
+        "cup_ready_via": {**common, "tolerance": 0.05, "blend_with_next": True,
+                          "left_target": list(left), "right_target": list(right_via)},
+        "cup_ready": {**common, "hold_arm": "left", "hold_tolerance": 0.001, "tolerance": 0.017453292519943295,
+                      "left_target": list(left), "right_target": list(right)},
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cup_x", type=float)
     parser.add_argument("cup_y", type=float)
     parser.add_argument("rim_z", type=float)
@@ -115,10 +130,10 @@ def main():
                         help="pad center past the cup axis; about 0.027 touches the palm")
     parser.add_argument("--travel", type=float, default=0.12, help="right insert / left retreat")
     parser.add_argument("--speed", type=float, default=0.3, help="dual_joint velocity/accel scale")
-    parser.add_argument("--standoff", type=float, default=0.15,
-                        help="right hand waits this far behind the grasp (simultaneous mode)")
+    parser.add_argument("--standoff", type=float,
+                        help="override the right pregrasp distance (default: --travel)")
     parser.add_argument("--simultaneous", action="store_true",
-                        help="both arms at once with Pilz PTP (dual_joint); needs a test, off by default")
+                        help="compatibility flag; two blended dual_joint joint-line stages are now the default")
     parser.add_argument("--elbow-tries", type=int, default=0, help="random IK seeds for a low elbow")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
@@ -152,10 +167,8 @@ def main():
 
         left_hold = grasp(transfer, tz, yaw_l, **left)
         right_hold = grasp(transfer, tz, yaw_r, 0.0, args.right_height, args.right_depth)
-        # Simultaneous: wait --standoff behind the grasp, then one straight approach. Sequential
-        # keeps the shorter --travel pre-pose.
-        sequential = not args.simultaneous
-        back = args.travel if sequential else args.standoff
+        # IK construction uses the sequential geometric seed chain, not a simultaneous-path proof.
+        back = args.travel if args.standoff is None else args.standoff
         right_pre = shifted(right_hold, back * back_r[0], back * back_r[1])
         left_out = shifted(left_hold, args.travel * back_l[0], args.travel * back_l[1])
 
@@ -187,7 +200,7 @@ def main():
         print(f"left elbow z: DYNAMIXEL handover pose {elbow(reference):.3f}, first IK {elbow(carried):.3f}")
         best = (elbow(carried), carried, ready)
         rng = random.Random(args.seed)
-        for _ in range(args.elbow_tries if sequential else 0):
+        for _ in range(args.elbow_tries):
             try:
                 found = search_candidate(node, rng, carried, left_hold, right_pre, right_hold, left_out)
             except RuntimeError:
@@ -201,15 +214,12 @@ def main():
         carried, ready = best[1], best[2]
         try:
             tilt, high, contacts = joint_path_report(node, state, carried, LEFT_JOINTS)
-            print(f"carry PTP path: max cup tilt {tilt:.1f} deg, max elbow z {high:.3f}, "
+            print(f"geometric carry joint-line estimate: max cup tilt {tilt:.1f} deg, max elbow z {high:.3f}, "
                   f"contacts {contacts or 'none'}")
         except Exception as error:  # The report is optional; never block target generation.
             print("carry path report skipped:", error)
         left_joints = joints_of(carried, LEFT_JOINTS)
         right_joints = joints_of(ready, RIGHT_JOINTS)
-        slow = {"velocity_scale": args.speed, "acceleration_scale": args.speed}
-        precise = {"tolerance": 0.017453292519943295, "planning_tolerance": 0.0005,
-                   "timeout": 60.0}
         close = {"type": "gripper", "arm": "receiver", "gripper_wait_only": True,
                  "target": [0.8], "duration": 1.0, "velocity_scale": 1.0,
                  "acceleration_scale": 1.0, "timeout": 12.0}
@@ -219,25 +229,10 @@ def main():
                "acceleration_scale": 0.015, "timeout": 30.0}
         insert = {**lin, "arm": "receiver", "target": pose_of(right_hold)}
         # Receiver contact is allowed only between the transfer and the grasp sequences.
-        # Right starts at the initial pose; j1 first lifts the hand over the basket wall.
-        right_via = [right_joints[0], 0.0, 0.0, -2.27, 0.0, 0.35, 0.0]
-        sequential_steps = {
-            "steps": ["cup_carry", "cup_ready_via", "cup_ready"],
-            "cup_ready_via": {"type": "joint", "arm": "receiver", **slow, "tolerance": 0.05,
-                              "timeout": 60.0, "target": right_via},
-            "cup_carry": {"type": "joint", "arm": "giver", **slow, **precise,
-                          "target": left_joints},
-            "cup_ready": {"type": "joint", "arm": "receiver", **slow, **precise,
-                          "target": right_joints},
-        }
-        simultaneous_steps = {
-            "steps": ["cup_ready"],
-            "cup_ready": {"type": "dual_joint", "pipeline": "pilz_industrial_motion_planner",
-                          "planner": "PTP", **slow, **precise,
-                          "left_target": left_joints, "right_target": right_joints},
-        }
+        # Right folds first (right_return via), then one joint line to ready keeps the hand low.
+        right_via = [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0]
         sequences = {
-            "cup_left_to_right": (sequential_steps if sequential else simultaneous_steps),
+            "cup_left_to_right": preparation_steps(left_joints, right_via, right_joints, args.speed),
             "cup_left_to_right_grasp": {
                 "steps": ["cup_insert", "receiver_close"],
                 "cup_insert": {**insert, "velocity_scale": 0.08, "acceleration_scale": 0.02},
@@ -252,6 +247,9 @@ def main():
         document = {"handover_demo": {"ros__parameters": {"motion_sequences": sequences}}}
         with open(args.output, "w") as handle:
             yaml.dump(document, handle, Dumper=RosDumper, sort_keys=False)
+        print("Preparation output: two blended dual_joint joint-line stages; grippers held.")
+        print("LIMIT: geometric IK checks above use sequential seeds and filter cup contacts.")
+        print("They do not validate the simultaneous, smoothed path with an attached cup.")
         print("left hold joints ", left_joints)
         print("right pre joints ", right_joints)
         print("right insert pose", pose_of(right_hold))
