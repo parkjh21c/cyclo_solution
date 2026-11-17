@@ -12,6 +12,7 @@ namespace demo_1f {
 class TaskManagerTestAccess {
 public:
   using Request = TaskManager::PickRequest;
+  static void remove_side(TaskManager & manager) { manager.side_ = nullptr; }
   static Request current(const TaskManager & manager) { return manager.pick_; }
   static std::uint64_t run(const TaskManager & manager) { return manager.demo_run_id_; }
   static std::string detail(const TaskManager & manager) { return manager.demo_detail_; }
@@ -135,11 +136,17 @@ public:
   int first_failure = 1; // Runs first_failure .. first_failure + failures - 1 fail.
   std::string failure = "CUP_NOT_FOUND";
   std::string requested_arm;
-  bool stall = false;
+  bool stall = false, refuse_ready = false, refuse_start = false;
+  bool is_ready_to_start(const std::string & arm, const std::string & cup_id,
+      std::string & reason, bool execute = true) const override {
+    if (refuse_ready) { reason = "Test readiness refusal"; return false; }
+    return CupMotion::is_ready_to_start(arm, cup_id, reason, execute);
+  }
   std::function<bool()> may_finish; // Unset: finishes on its first tick.
   bool start(const std::string & arm, const std::string & cup_id,
       std::string & reason, bool execute = true) override {
     requested_arm = arm;
+    if (refuse_start) { reason = "Test start refusal"; return false; }
     return CupMotion::start(arm == "both" ? "left" : arm, cup_id, reason, execute);
   }
   void tick() override {
@@ -1558,6 +1565,237 @@ TEST_F(DemoDeferredResumeTest, ResumableCheckpointWaitsForReleaseConfirmation) {
   auto finished = client->async_get_result(resumed); wait(finished);
   EXPECT_TRUE(finished.get().result->success);
   EXPECT_EQ(picks, 3);
+}
+
+
+class B2PlaceTest : public DemoTest {
+protected:
+  using CupAction = action::ApproachCup;
+  rclcpp_action::Client<CupAction>::SharedPtr cup_client;
+  void SetUp() override {
+    DemoTest::SetUp();
+    cup_client = rclcpp_action::create_client<CupAction>(node, "/place_cup");
+    ASSERT_TRUE(cup_client->wait_for_action_server(2s));
+  }
+  rclcpp_action::ClientGoalHandle<CupAction>::SharedPtr send_place(
+      bool execute = true, const std::string & arm = "left") {
+    pump();
+    CupAction::Goal goal;
+    goal.arm = arm;
+    goal.cup_id = "cup";
+    goal.execute = execute;
+    auto accepted = cup_client->async_send_goal(goal);
+    wait(accepted);
+    return accepted.get();
+  }
+  void hold_return_at_place() {
+    handover_back->may_finish = [this] { side.stall = true; return true; };
+  }
+};
+
+TEST_F(B2PlaceTest, DemoStartsPlaceReturnAndWaitsBeforeFinalInitial) {
+  hold_return_at_place();
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal);
+  for (int i = 0; i < 1500 && place->runs == 0; ++i) pump();
+  ASSERT_EQ(place->runs, 1);
+  for (int i = 0; i < 50; ++i) pump();
+  EXPECT_FALSE(place->running());
+  EXPECT_EQ(side.starts, 2); // APPROACH_CUP and PLACE_CUP share the existing port.
+  EXPECT_EQ(std::count(executor.executed.begin(), executor.executed.end(), "initial_test"), 1);
+  EXPECT_NE(result.wait_for(0s), std::future_status::ready);
+  side.stall = false;
+  wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(std::count(executor.executed.begin(), executor.executed.end(), "initial_test"), 2);
+}
+
+TEST_F(B2PlaceTest, StandalonePlaceSuccessMayPrecedeTheSideCompletion) {
+  side.stall = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.starts, 1);
+  EXPECT_EQ(side.state.state, ExecutionState::Running);
+  EXPECT_FALSE(send("initial"));
+  side.stall = false;
+  for (int i = 0; i < 50 && !manager->can_shutdown(); ++i) pump();
+  auto initial_goal = send("initial"); ASSERT_TRUE(initial_goal);
+  auto finished = client->async_get_result(initial_goal); wait(finished);
+  EXPECT_TRUE(finished.get().result->success);
+}
+
+TEST_F(B2PlaceTest, PreviewAndOtherArmNeverStartTheSide) {
+  auto preview = send_place(false); ASSERT_TRUE(preview);
+  auto preview_result = cup_client->async_get_result(preview); wait(preview_result);
+  EXPECT_TRUE(preview_result.get().result->success);
+  auto other = send_place(true, "right"); ASSERT_TRUE(other);
+  auto other_result = cup_client->async_get_result(other); wait(other_result);
+  EXPECT_EQ(side.starts, 0);
+  EXPECT_FALSE(send_place(true, "invalid"));
+}
+
+TEST_F(B2PlaceTest, PreparationAndActualStartRefusalNeverStartTheSide) {
+  place->refuse_ready = true;
+  EXPECT_FALSE(send_place());
+  EXPECT_EQ(side.starts, 0);
+  place->refuse_ready = false;
+  place->refuse_start = true;
+  auto refused = send_place(); ASSERT_TRUE(refused);
+  auto result = cup_client->async_get_result(refused); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "NOT_READY");
+  EXPECT_EQ(side.starts, 0);
+}
+
+TEST_F(B2PlaceTest, MissingSidePortRejectsPlaceAndHandoverBackBeforeStarting) {
+  TaskManagerTestAccess::remove_side(*manager);
+  EXPECT_FALSE(send_place());
+  EXPECT_EQ(place->runs, 0);
+  auto back = rclcpp_action::create_client<CupAction>(node, "/handover_cup_back");
+  ASSERT_TRUE(back->wait_for_action_server(2s));
+  CupAction::Goal request;
+  request.arm = "right"; request.cup_id = "cup"; request.execute = true;
+  auto accepted = back->async_send_goal(request); wait(accepted);
+  EXPECT_FALSE(accepted.get());
+  EXPECT_EQ(handover_back->runs, 0);
+}
+
+TEST_F(B2PlaceTest, SideStartFailureAbortsBeforeTheFirstPlaceTick) {
+  side.refuse = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_BEFORE_MOTION");
+  EXPECT_FALSE(place->running());
+  EXPECT_TRUE(executor.executed.empty());
+}
+
+TEST_F(B2PlaceTest, SideFailureAfterMotionStopsStandalonePlaceAndReportsIt) {
+  side.stall = place->stall = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  side.fail(false);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_ARM_FAILED");
+  EXPECT_FALSE(place->running());
+}
+
+TEST_F(B2PlaceTest, OperatorCancelStopsTheStandaloneSideAndWaitsForItsStop) {
+  side.stall = place->stall = true;
+  side.cancel_stalls = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto cancel = cup_client->async_cancel_goal(goal); wait(cancel);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_GE(side.cancels, 1);
+  EXPECT_FALSE(manager->can_shutdown());
+  side.state = {ExecutionState::Cancelled, "CANCELLED", "stopped"};
+  pump();
+  EXPECT_TRUE(manager->can_shutdown());
+}
+
+TEST_F(B2PlaceTest, PlaceRetryKeepsAnAlreadyRunningSide) {
+  side.stall = true;
+  place->failures = 1;
+  auto first = send_place(); ASSERT_TRUE(first);
+  auto failed = cup_client->async_get_result(first); wait(failed);
+  EXPECT_FALSE(failed.get().result->success);
+  EXPECT_EQ(side.cancels, 0);
+  auto retry = send_place(); ASSERT_TRUE(retry);
+  auto result = cup_client->async_get_result(retry); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.starts, 1);
+  side.stall = false;
+}
+
+TEST_F(B2PlaceTest, UnconfirmedSideStopLatchesTheManagerAgainstFurtherGoals) {
+  side.stall = place->stall = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  side.state = {ExecutionState::StopUnconfirmed, "STOP_UNCONFIRMED", "unknown stop"};
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "STOP_UNCONFIRMED");
+  EXPECT_TRUE(manager->demo_faulted());
+  EXPECT_FALSE(send_place());
+  EXPECT_FALSE(send("initial"));
+}
+
+TEST_F(B2PlaceTest, DemoPlaceFailureLeavesTheSideRunningAndLateSideFailureInvalidatesResume) {
+  hold_return_at_place();
+  place->failures = 1;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(side.cancels, 0);
+  EXPECT_EQ(side.state.state, ExecutionState::Running);
+  side.fail(false);
+  pump();
+  EXPECT_FALSE(send("resume"));
+}
+
+
+TEST_F(B2PlaceTest, DemoPlaceSideStartFailureNeverTicksPlaceOrStartsFinalInitial) {
+  handover_back->may_finish = [this] { side.refuse = true; return true; };
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_BEFORE_MOTION");
+  EXPECT_EQ(result.get().result->last_completed_stage, "HANDOVER_CUP_BACK");
+  EXPECT_EQ(side.starts, 2);
+  EXPECT_FALSE(place->running());
+  EXPECT_EQ(std::count(executor.executed.begin(), executor.executed.end(), "initial_test"), 1);
+}
+
+TEST_F(B2PlaceTest, DemoPlaceSideFailureStopsTheStageAndPreventsFinalInitial) {
+  hold_return_at_place();
+  place->stall = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && place->runs == 0; ++i) pump();
+  ASSERT_EQ(place->runs, 1);
+  side.fail(false);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_ARM_FAILED");
+  EXPECT_FALSE(result.get().result->can_resume);
+  EXPECT_FALSE(place->running());
+  EXPECT_EQ(std::count(executor.executed.begin(), executor.executed.end(), "initial_test"), 1);
+}
+
+TEST_F(B2PlaceTest, DemoOperatorCancelAtPlaceStopsBothBranches) {
+  hold_return_at_place();
+  place->stall = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && place->runs == 0; ++i) pump();
+  ASSERT_EQ(place->runs, 1);
+  auto cancel = client->async_cancel_goal(goal); wait(cancel);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_GE(side.cancels, 1);
+  EXPECT_FALSE(place->running());
+  EXPECT_FALSE(result.get().result->can_resume);
+}
+
+TEST_F(B2PlaceTest, PlaceReadinessRefusalInTheDemoDoesNotStartAnotherSide) {
+  place->refuse_ready = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "NOT_READY");
+  EXPECT_EQ(place->runs, 0);
+  EXPECT_EQ(side.starts, 1); // Only the unchanged menu 4 return started.
+}
+
+class B2PairedPlaceTest : public B2PlaceTest {
+protected:
+  void SetUp() override {
+    independent = false;
+    B2PlaceTest::SetUp();
+  }
+};
+
+TEST_F(B2PairedPlaceTest, DisabledIndependentReturnNeedsNoPortForStandalonePlace) {
+  TaskManagerTestAccess::remove_side(*manager);
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.starts, 0);
 }
 
 TEST_F(DemoTest, ApproachStartsTheSideReturnAndRefineDoesNotWaitForIt) {

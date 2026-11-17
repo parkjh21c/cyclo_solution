@@ -1,5 +1,6 @@
 #include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/runtime/config.hpp"
+#include <algorithm>
 
 namespace demo_1f {
 CupHandoverMotion::CupHandoverMotion(const Config & robot,
@@ -41,6 +42,17 @@ bool CupHandoverMotion::is_ready_to_start(const std::string & arm,
   if (!first || !sequence(base + "_grasp", reason) || !sequence(base + "_release", reason)) {
     return false;
   }
+  if (execute && giver_ == "right" && config_.independent_return) {
+    const auto * returning = sequence("right_return", reason);
+    if (config_.other_arm_return_sequence != "right_return" || !returning ||
+        returning->steps.empty() || !validate_motion_sequence(*returning, robot_).empty() ||
+        std::any_of(returning->steps.begin(), returning->steps.end(), [](const Step & step) {
+          return step.type != "joint" || step.arm != "right";
+        })) {
+      reason = "Independent cup return requires the configured right_return joint sequence";
+      return false;
+    }
+  }
   return !execute || sequence_.is_ready_to_start(*first, reason);
 }
 
@@ -57,7 +69,17 @@ bool CupHandoverMotion::start(const std::string & arm,
 bool CupHandoverMotion::start_sequence(const std::string & name) {
   std::string reason;
   const auto * selected = sequence(name, reason);
-  if (!selected || !sequence_.start(*selected, reason,
+  MotionSequence execution;
+  if (selected) {
+    execution = *selected;
+    if (giver_ == "right" && config_.independent_return &&
+        name == "cup_right_to_left_release") {
+      execution.steps.erase(std::remove_if(execution.steps.begin(), execution.steps.end(),
+          [](const Step & step) { return step.name == "giver_via" || step.name == "giver_home"; }),
+          execution.steps.end());
+    }
+  }
+  if (!selected || !sequence_.start(execution, reason,
                        "Cup handover; transfer and grasp are not sensor-verified")) {
     fail("NOT_READY", reason);
     return false;
