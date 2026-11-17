@@ -5,7 +5,7 @@ import pytest
 
 from ffw_pick.hold import (
     fresh_joints, HOLD_MAX_AGE, HOLD_TIMEOUT, hold_verdict, joints_moved, path_recheck_needed,
-    wait_for_release)
+    PathStateWatch, wait_for_release)
 
 
 class Clock:
@@ -100,3 +100,38 @@ def test_stale_joint_values_are_unreadable():
     assert 'arm_l_joint2' not in fresh and len(fresh) == 6
     assert path_recheck_needed(fresh, fresh_joints(values, {n: 10.2 for n in LEFT}, LEFT, 10.2),
                                LEFT, 0.01)
+
+
+HEAD = ['head_joint1', 'head_joint2']
+
+
+def test_passive_watch_skips_only_unchanged_fresh_joints():
+    values = {n: 0.0 for n in LEFT}
+    times = {n: 10.0 for n in LEFT}
+    watch = PathStateWatch(values, times, LEFT, 0.01, 10.0)
+    assert not watch.update(values, times, 10.2)
+
+
+def test_left_arm_move_and_return_still_rechecks_the_held_path():
+    values = {n: 0.0 for n in LEFT}
+    watch = PathStateWatch(values, {n: 10.0 for n in LEFT}, LEFT, 0.01, 10.0)
+    assert watch.update(dict(values, arm_l_joint2=0.26), {n: 10.1 for n in LEFT}, 10.1)
+    assert watch.update(values, {n: 10.2 for n in LEFT}, 10.2)
+
+
+def test_head_motion_alone_does_not_force_a_recheck():
+    values = {n: 0.0 for n in LEFT + HEAD}
+    watch = PathStateWatch(values, {n: 10.0 for n in LEFT + HEAD}, LEFT, 0.01, 10.0)
+    assert not watch.update(dict(values, head_joint2=0.26), {n: 10.1 for n in LEFT + HEAD}, 10.1)
+
+
+def test_missing_left_arm_feedback_forces_a_recheck():
+    values = {n: 0.0 for n in LEFT}
+    watch = PathStateWatch(values, {n: 10.0 for n in LEFT[1:]}, LEFT, 0.01, 10.0)
+    assert watch.update(values, {n: 10.2 for n in LEFT}, 10.2)
+
+
+def test_left_arm_feedback_gap_is_not_erased_by_a_fresh_sample():
+    values = {n: 0.0 for n in LEFT}
+    watch = PathStateWatch(values, {n: 10.0 for n in LEFT}, LEFT, 0.01, 10.0)
+    assert watch.update(values, {n: 11.2 for n in LEFT}, 11.2)

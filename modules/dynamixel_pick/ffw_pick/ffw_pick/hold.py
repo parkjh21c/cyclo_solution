@@ -48,3 +48,25 @@ def path_recheck_needed(before, after, names, tolerance):
     """False only when every name is in both (fresh) snapshots and moved at most tolerance."""
     return any(n not in before or n not in after or not abs(after[n] - before[n]) <= tolerance
                for n in names)
+
+
+class PathStateWatch:
+    """Latch passive joint changes or missing feedback until a held path is released."""
+
+    def __init__(self, values, times, names, tolerance, now):
+        self.names = tuple(names)
+        self.tolerance = tolerance
+        self.before = fresh_joints(values, times, self.names, now)
+        self.times = {n: times.get(n, -math.inf) for n in self.names}
+        self.changed = len(self.before) != len(self.names)
+
+    def update(self, values, times, now):
+        current = fresh_joints(values, times, self.names, now)
+        self.changed = self.changed or path_recheck_needed(
+            self.before, current, self.names, self.tolerance)
+        for name in self.names:
+            stamp = times.get(name, -math.inf)
+            if stamp - self.times[name] > STALE_JOINT_AGE:
+                self.changed = True
+            self.times[name] = stamp
+        return self.changed
