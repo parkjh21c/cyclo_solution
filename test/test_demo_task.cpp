@@ -13,6 +13,7 @@ class TaskManagerTestAccess {
 public:
   using Request = TaskManager::PickRequest;
   static void remove_side(TaskManager & manager) { manager.side_ = nullptr; }
+  static bool waits_for_side(const std::string & stage) { return TaskManager::waits_for_side(stage); }
   static Request current(const TaskManager & manager) { return manager.pick_; }
   static std::uint64_t run(const TaskManager & manager) { return manager.demo_run_id_; }
   static std::string detail(const TaskManager & manager) { return manager.demo_detail_; }
@@ -88,9 +89,31 @@ public:
   int starts = 0, cancels = 0;
   bool stall = false, refuse = false;
   bool cancel_stalls = false; // Cancel leaves the stop unconfirmed until the test ends it.
+  // Left return (start_sequence): unsupported unless enabled, as the port default.
+  bool left_supported = false, stall_left = false, refuse_left = false;
+  int left_starts = 0;
+  std::string active = "right";
+  std::vector<std::string> order; // Sequence of every start, in order.
   ExecutionResult state;
+  bool start_sequence(const std::string & sequence, std::string & reason) override {
+    if (!left_supported) return SideMotionPort::start_sequence(sequence, reason);
+    ++left_starts;
+    active = "left";
+    order.push_back(sequence);
+    if (refuse_left) {
+      reason = "test left refusal";
+      state = {ExecutionState::Failed, "SIDE_NOT_READY", reason};
+      state.retryable_before_motion = true;
+      return false;
+    }
+    state = {ExecutionState::Running, {}, {}};
+    return true;
+  }
+  std::string active_arm() const override { return active; }
   bool start(std::string & reason) override {
     ++starts;
+    active = "right";
+    order.push_back("right_return");
     if (refuse) {
       reason = "test side refusal";
       state = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", reason};
@@ -101,7 +124,9 @@ public:
     return true;
   }
   void tick() override {
-    if (state.state == ExecutionState::Running && !stall) state.state = ExecutionState::Succeeded;
+    if (state.state == ExecutionState::Running && !(active == "left" ? stall_left : stall)) {
+      state.state = ExecutionState::Succeeded;
+    }
   }
   void cancel() override {
     ++cancels;
@@ -179,6 +204,7 @@ protected:
   Head head;
   Side side;
   bool independent = true; // demo.independent_return
+  bool left_return = true;  // demo.left_return_after_refine
   std::unique_ptr<HandoverMotion> handover;
   std::unique_ptr<InitialPoseMotion> initial;
   std::unique_ptr<Cup> approach, refine, withdraw, pick_cup, handover_cup, pour, handover_back, place;
@@ -215,7 +241,8 @@ protected:
     std::vector<rclcpp::Parameter> overrides = {rclcpp::Parameter("demo.retry_delay", .01),
         rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled),
         rclcpp::Parameter("demo.prepare_pick_during_refine", prepare),
-        rclcpp::Parameter("demo.independent_return", independent)};
+        rclcpp::Parameter("demo.independent_return", independent),
+        rclcpp::Parameter("demo.left_return_after_refine", left_return)};
     if (max_rounds > 0) overrides.emplace_back("demo.max_cell_rounds", max_rounds);
     node = std::make_shared<rclcpp::Node>("demo_task_test",
         rclcpp::NodeOptions().parameter_overrides(overrides));
@@ -1976,6 +2003,150 @@ TEST_F(DemoPrepareTest, RefineEndingBeforeTheSideReturnSkipsTheEarlyPick) {
   EXPECT_EQ(events[1], "pick"); // An ordinary PICK_DYNAMIXEL request, not a held one.
   auto result = client->async_get_result(goal); wait(result);
   EXPECT_TRUE(result.get().result->success);
+}
+
+TEST_F(DemoTest, RefineSuccessStartsTheLeftReturnAfterTheRound) {
+  side.left_supported = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.left_starts, 1); // One cell round, one REFINE_CUP.
+  EXPECT_EQ(side.order,
+      (std::vector<std::string>{"right_return", "left_return", "right_return"}));
+}
+
+TEST_F(DemoTest, LeftReturnFollowsTheRunningRightReturn) {
+  side.left_supported = true;
+  side.stall = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1000 && refine->runs == 0; ++i) pump();
+  ASSERT_EQ(refine->runs, 1);
+  for (int i = 0; i < 200; ++i) pump(); // REFINE_CUP done while the right return runs.
+  EXPECT_EQ(side.left_starts, 0);
+  EXPECT_EQ(picks, 1);
+  side.stall = false;
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  ASSERT_GE(side.order.size(), 2u);
+  EXPECT_EQ(side.order[0], "right_return");
+  EXPECT_EQ(side.order[1], "left_return");
+}
+
+TEST_F(DemoTest, LeftReturnRefusedBeforeMotionKeepsTheDemoGoing) {
+  side.left_supported = side.refuse_left = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.left_starts, 1);
+  EXPECT_EQ(pick_cup->runs, 1);
+}
+
+TEST_F(DemoTest, LeftReturnFailingBeforeMotionKeepsTheDemoGoing) {
+  side.left_supported = side.stall_left = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && side.left_starts == 0; ++i) pump();
+  ASSERT_EQ(side.left_starts, 1);
+  side.fail(true); // e.g. the pair or scene check refused the path: nothing moved.
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(pick_cup->runs, 1);
+}
+
+TEST_F(DemoTest, LeftReturnFailingAfterMotionStopsTheDemo) {
+  side.left_supported = side.stall_left = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && side.left_starts == 0; ++i) pump();
+  ASSERT_EQ(side.left_starts, 1);
+  side.fail(false);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_ARM_FAILED");
+  EXPECT_FALSE(result.get().result->can_resume);
+  EXPECT_EQ(pick_cup->runs, 0);
+  EXPECT_EQ(picks, 1);
+}
+
+TEST_F(DemoTest, StagesUsingTheLeftArmWaitForTheLeftReturn) {
+  EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("PICK_CUP"));
+  EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("HANDOVER"));
+  EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("PICK_DYNAMIXEL"));
+  cells = 2;
+  side.left_supported = side.stall_left = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && side.left_starts == 0; ++i) pump();
+  ASSERT_EQ(side.left_starts, 1);
+  for (int i = 0; i < 200; ++i) pump();
+  EXPECT_EQ(picks, 1); // The next round waits for the left arm.
+  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_EQ(pick_cup->runs, 0);
+  side.stall_left = false;
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.left_starts, 2);
+  EXPECT_EQ(handovers(executor), 2);
+  EXPECT_EQ(pick_cup->runs, 1);
+}
+
+TEST_F(DemoTest, OperatorCancelStopsTheLeftReturn) {
+  side.left_supported = side.stall_left = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && side.left_starts == 0; ++i) pump();
+  ASSERT_EQ(side.left_starts, 1);
+  auto cancel = client->async_cancel_goal(goal); wait(cancel);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_GE(side.cancels, 1);
+  EXPECT_EQ(pick_cup->runs, 0);
+}
+
+class DemoNoLeftReturnTest : public DemoTest {
+protected:
+  void SetUp() override {
+    left_return = false;
+    DemoTest::SetUp();
+  }
+};
+
+TEST_F(DemoNoLeftReturnTest, DisabledFlagNeverStartsTheLeftReturn) {
+  EXPECT_TRUE(node->describe_parameter("demo.left_return_after_refine").read_only);
+  EXPECT_FALSE(node->get_parameter("demo.left_return_after_refine").as_bool());
+  side.left_supported = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.left_starts, 0);
+  EXPECT_EQ(side.order, (std::vector<std::string>{"right_return", "right_return"}));
+}
+
+TEST_F(DemoTest, StandaloneRefineStartsTheLeftReturnWithoutWaitingAndBlocksLeftCupActions) {
+  using CupAction = action::ApproachCup;
+  side.left_supported = side.stall_left = true;
+  const auto send_cup = [this](const std::string & name, const std::string & arm) {
+    auto cup = rclcpp_action::create_client<CupAction>(node, name);
+    EXPECT_TRUE(cup->wait_for_action_server(2s));
+    pump();
+    CupAction::Goal goal;
+    goal.arm = arm;
+    goal.cup_id = "cup";
+    goal.execute = true;
+    auto accepted = cup->async_send_goal(goal);
+    wait(accepted);
+    return std::make_pair(cup, accepted.get());
+  };
+  auto [refine_client, refined] = send_cup("/refine_cup", "left");
+  ASSERT_TRUE(refined);
+  auto result = refine_client->async_get_result(refined); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  pump();
+  EXPECT_EQ(side.left_starts, 1);
+  EXPECT_EQ(side.state.state, ExecutionState::Running); // The result did not wait.
+  EXPECT_FALSE(send_cup("/pick_cup", "left").second);
+  EXPECT_FALSE(send_cup("/approach_cup", "left").second);
+  EXPECT_FALSE(send_cup("/handover_cup", "left").second);
+  EXPECT_FALSE(send("initial"));
+  side.stall_left = false;
+  for (int i = 0; i < 50 && !manager->can_shutdown(); ++i) pump();
+  EXPECT_TRUE(manager->can_shutdown());
 }
 } // namespace
 } // namespace demo_1f

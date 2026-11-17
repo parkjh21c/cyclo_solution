@@ -6,6 +6,7 @@ handover_demo:
       pick_timeout: 180.0 # Perception, IK search, close and lift; initialization is a separate stage.
       withdraw_cup: false # true: lift both hands out of the cup after release, before PICK_CUP.
       prepare_pick_during_refine: true # Next pick observes and plans during REFINE_CUP; moves only after it.
+      left_return_after_refine: true # Left arm returns to initial (handover.yaml left_return) after REFINE_CUP.
     # /pour_cup: targets from the latest /demo/basket_pose (wrist_basket_init), right-hand hold.
     pour:
       angle_deg: 130.0        # Tilt commanded (cup mouth up = 0).

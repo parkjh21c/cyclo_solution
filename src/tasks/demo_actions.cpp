@@ -52,6 +52,10 @@ void TaskManager::setup_demo_server() {
   demo_max_cell_rounds_ = node_.declare_parameter<int>("demo.max_cell_rounds", 10);
   demo_basket_empty_max_age_ = node_.declare_parameter<double>("demo.basket_empty_max_age", 5.0);
   demo_prepare_pick_ = node_.declare_parameter<bool>("demo.prepare_pick_during_refine", false);
+  rcl_interfaces::msg::ParameterDescriptor read_only;
+  read_only.read_only = true;
+  demo_left_return_ =
+      node_.declare_parameter<bool>("demo.left_return_after_refine", true, read_only);
   // load_approach_config may already own this parameter.
   demo_independent_return_ = node_.has_parameter("demo.independent_return") ?
       node_.get_parameter("demo.independent_return").as_bool() :
@@ -114,6 +118,7 @@ void TaskManager::setup_demo_server() {
         demo_cancel_requested_ = true;
         cancel_demo_motion();
         cancel_side_return(); // Operator cancel stops the side return too.
+        left_return_deferred_ = false;
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](const std::shared_ptr<DemoHandle> handle) {
@@ -139,6 +144,7 @@ void TaskManager::setup_demo_server() {
           demo_basket_ = BasketVerdict::Unknown;
           demo_round_stage_seconds_.clear();
           demo_cell_seconds_ = demo_cup_seconds_ = 0;
+          left_return_seconds_ = -1; // A standalone menu 5 return is not this run's.
           demo_started_ = Clock::now();
         } else {
           demo_pick_only_ = false;
@@ -168,7 +174,7 @@ void TaskManager::start_demo_stage() {
   if (side_waiting_) {
     side_waiting_ = false;
     RCLCPP_INFO(node_.get_logger(), "%s waited %.1f s for the %s arm return",
-        demo_stage_.c_str(), elapsed(side_wait_started_), side_->arm().c_str());
+        demo_stage_.c_str(), elapsed(side_wait_started_), side_->active_arm().c_str());
   }
   std::string reason;
   if (demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "RETURN_INITIAL") {
@@ -544,16 +550,22 @@ void TaskManager::finish_cell_round() {
   char side_text[48] = "not used";
   if (side_return_seconds_ >= 0) {
     std::snprintf(side_text, sizeof(side_text), "%.1f s", side_return_seconds_);
-  } else if (side_active()) {
+  } else if (side_active() && !side_left_return_) {
     std::snprintf(side_text, sizeof(side_text), "still running");
+  }
+  // The left return starts after this summary; it reports the previous round's return.
+  char left_text[48] = "not used";
+  if (left_return_seconds_ >= 0) {
+    std::snprintf(left_text, sizeof(left_text), "%.1f s", left_return_seconds_);
   }
   RCLCPP_INFO(node_.get_logger(),
       "Round %d done in %.1f s: PICK_DYNAMIXEL %.1f s, HANDOVER %.1f s, "
-      "left APPROACH_CUP %.1f s, REFINE_CUP %.1f s, %s arm return %s",
+      "left APPROACH_CUP %.1f s, REFINE_CUP %.1f s, %s arm return %s, "
+      "previous left arm return %s",
       demo_total_rounds_, round_seconds, seconds("PICK_DYNAMIXEL"), seconds("HANDOVER"),
       seconds("APPROACH_CUP"), seconds("REFINE_CUP"), side_ ? side_->arm().c_str() : "side",
-      side_text);
-  side_return_seconds_ = -1;
+      side_text, left_text);
+  side_return_seconds_ = left_return_seconds_ = -1;
   demo_round_stage_seconds_.clear();
   enter_demo_stage("PICK_DYNAMIXEL");
 }
@@ -634,9 +646,9 @@ void TaskManager::tick_demo() {
         side_waiting_ = true;
         side_wait_started_ = Clock::now();
         RCLCPP_INFO(node_.get_logger(), "%s waits for the %s arm return", demo_stage_.c_str(),
-            side_->arm().c_str());
+            side_->active_arm().c_str());
       }
-      demo_detail_ = "Waiting for the " + side_->arm() + " arm return before " + demo_stage_;
+      demo_detail_ = "Waiting for the " + side_->active_arm() + " arm return before " + demo_stage_;
     } else if (demo_stage_ == "PICK_DYNAMIXEL" && (!pick_ || !pick_->early) &&
         pick_release_pending()) {
       if (demo_faulted_) {
@@ -758,6 +770,11 @@ void TaskManager::tick_demo() {
         else if (demo_stage_ == "APPROACH_CUP") enter_demo_stage("REFINE_CUP");
         else if (demo_stage_ == "REFINE_CUP") {
           finish_cell_round(); // Next round picks again; the cup section waits for an empty basket.
+          if (demo_left_return_ && side_) {
+            // A running right return keeps the slot: the left return follows its arrival.
+            left_return_deferred_ = side_active();
+            if (!left_return_deferred_) start_left_return();
+          }
           if (demo_rounds_ >= demo_max_cell_rounds_) {
             demo_round_limit_hit_ = true;
             finish_demo(false, "CELL_ROUND_LIMIT",

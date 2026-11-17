@@ -309,6 +309,42 @@ handover_demo:
           - 0.0
           - 0.35
           - 0.0
+      # Left arm back to the initial pose after REFINE_CUP (demo.left_return_after_refine).
+      left_return:
+        steps:
+        - left_home_via
+        - left_home
+        # Same folded pose as right_return: fold up and away from the cup first.
+        left_home_via:
+          type: joint
+          arm: left
+          velocity_scale: 0.35
+          acceleration_scale: 0.35
+          tolerance: 0.05
+          timeout: 45.0
+          target:
+          - 1.57
+          - 0.0
+          - 0.0
+          - -2.8
+          - 0.0
+          - 0.0
+          - 0.0
+        left_home:
+          type: joint
+          arm: left
+          velocity_scale: 0.35
+          acceleration_scale: 0.35
+          tolerance: 0.01
+          timeout: 45.0
+          target:
+          - 1.05
+          - 0.0
+          - 0.0
+          - -2.27
+          - 0.0
+          - 0.35
+          - 0.0
       # Cup handover (left holds, right receives); see scripts/generate_cup_handover_targets.py.
       cup_left_to_right:
         steps:

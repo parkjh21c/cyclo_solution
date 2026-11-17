@@ -100,6 +100,23 @@ TEST(PlanningConfig, JointLineIsLoadedAndRequiresAPlainDualJointStep) {
   EXPECT_FALSE(Step{}.joint_line);
 }
 
+TEST(PlanningConfig, LeftReturnKeepsItsExplicitLeftArm) {
+  rclcpp::NodeOptions options;
+  const std::string prefix = "motion_sequences.left_return.";
+  options.parameter_overrides({
+      rclcpp::Parameter(prefix + "steps", std::vector<std::string>{"left_home"}),
+      rclcpp::Parameter(prefix + "left_home.type", "joint"),
+      rclcpp::Parameter(prefix + "left_home.arm", "left"),
+      rclcpp::Parameter(prefix + "left_home.target",
+          std::vector<double>{1.05, 0.0, 0.0, -2.27, 0.0, 0.35, 0.0})});
+  auto node = std::make_shared<rclcpp::Node>("left_return_config", options);
+  const auto config = load_config(*node);
+  const auto & sequence = config.motion_sequences.at("left_return");
+  ASSERT_EQ(sequence.steps.size(), 1u);
+  EXPECT_EQ(sequence.steps.front().arm, "left"); // Not resolved through giver/receiver.
+  EXPECT_EQ(sequence.steps.front().type, "joint");
+}
+
 TEST(PlanningConfig, TfSpinThreadDefaultsOff) {
   auto defaults = std::make_shared<rclcpp::Node>("tf_spin_thread_default");
   EXPECT_FALSE(load_config(*defaults).tf_spin_thread);

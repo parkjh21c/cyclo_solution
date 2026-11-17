@@ -53,7 +53,9 @@ private:
   static bool waits_for_side(const std::string & stage);
   bool side_active() const; // Running or stopping.
   bool b2_return_ready(std::string & reason) const;
-  bool start_side_return(std::string & reason);
+  // Empty sequence: the port's configured return; otherwise that sequence in the same slot.
+  bool start_side_return(std::string & reason, const std::string & sequence = {});
+  void start_left_return(); // After REFINE_CUP; a failure before motion only warns.
   void cancel_side_return();
   void watch_side();
   bool side_blocks_cup(const std::string & name, const std::string & arm) const;
@@ -65,6 +67,10 @@ private:
   bool cup_side_{false};              // The standalone cup action owns side failure and operator cancel handling.
   TimePoint side_started_at_{}, side_wait_started_{};
   double side_return_seconds_{-1};
+  bool demo_left_return_{true};      // demo.left_return_after_refine
+  bool side_left_return_{false};     // The side slot's last start was the left return.
+  bool left_return_deferred_{false}; // Starts once the running right return has arrived.
+  double left_return_seconds_{-1};   // Last left return, reported in the next round summary.
   std::optional<SideFailure> side_failure_;
   struct PickRequestId {
     std::uint64_t run;

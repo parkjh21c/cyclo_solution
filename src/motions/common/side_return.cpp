@@ -3,12 +3,12 @@
 
 namespace demo_1f {
 SideReturn::SideReturn(const Config & robot, std::string sequence, ExecutorPort & executor)
-    : robot_(robot), sequence_(std::move(sequence)), executor_(executor) {}
+    : robot_(robot), sequence_(std::move(sequence)), active_(sequence_), executor_(executor) {}
 
-std::vector<Step> SideReturn::steps(std::string & reason) const {
-  const auto found = robot_.motion_sequences.find(sequence_);
+std::vector<Step> SideReturn::steps(const std::string & sequence, std::string & reason) const {
+  const auto found = robot_.motion_sequences.find(sequence);
   if (found == robot_.motion_sequences.end() || !found->second.validation_error.empty()) {
-    reason = "Side sequence " + sequence_ + (found == robot_.motion_sequences.end()
+    reason = "Side sequence " + sequence + (found == robot_.motion_sequences.end()
         ? " is not loaded" : ": " + found->second.validation_error);
     return {};
   }
@@ -16,13 +16,18 @@ std::vector<Step> SideReturn::steps(std::string & reason) const {
   for (const auto & step : found->second.steps) {
     if (step.type == "joint") steps.push_back(step);
   }
-  if (steps.empty()) reason = "Side sequence " + sequence_ + " has no joint steps";
+  if (steps.empty()) reason = "Side sequence " + sequence + " has no joint steps";
   return steps;
 }
 
 bool SideReturn::start(std::string & reason) {
-  const auto steps = this->steps(reason);
+  return start_sequence(sequence_, reason);
+}
+
+bool SideReturn::start_sequence(const std::string & sequence, std::string & reason) {
+  const auto steps = this->steps(sequence, reason);
   if (steps.empty()) return false;
+  active_ = sequence;
   if (executor_.start_side(steps)) return true;
   const auto outcome = executor_.side_result();
   reason = outcome.state == ExecutionState::Failed ? outcome.code + ": " + outcome.detail
@@ -44,7 +49,13 @@ ExecutionResult SideReturn::result() const {
 
 std::string SideReturn::arm() const {
   std::string reason;
-  const auto steps = this->steps(reason);
+  const auto steps = this->steps(sequence_, reason);
+  return steps.empty() ? std::string() : steps.front().arm;
+}
+
+std::string SideReturn::active_arm() const {
+  std::string reason;
+  const auto steps = this->steps(active_, reason);
   return steps.empty() ? std::string() : steps.front().arm;
 }
 } // namespace demo_1f

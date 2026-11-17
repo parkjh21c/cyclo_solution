@@ -145,12 +145,20 @@ void TaskManager::tick_cup_action() {
     side_failure_.reset();
   }
   cup_side_ = false;
+  const bool refined = active_cup_motion_ == demo_cup_module("/refine_cup") &&
+                       cup_goal_->get_goal()->execute && !cup_goal_->is_canceling() &&
+                       outcome.sequence_completed && !side_failed;
   if (cup_goal_->is_canceling()) {
     cup_goal_->canceled(result);
   } else if (outcome.sequence_completed && !side_failed) {
     cup_goal_->succeed(result);
   } else {
     cup_goal_->abort(result);
+  }
+  // Standalone menu 5: the result does not wait for the left return.
+  if (refined && demo_left_return_ && side_ && !shutdown_requested_) {
+    left_return_deferred_ = side_active();
+    if (!left_return_deferred_) start_left_return();
   }
   publish_cup_target();
   RCLCPP_INFO(
