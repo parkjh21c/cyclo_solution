@@ -212,6 +212,8 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_arm_coordination test/test_arm_coordination.cpp TIMEOUT 30)
+  target_include_directories(test_arm_coordination PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME test_gripper_model COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_gripper_model.py")
   add_test(NAME test_initial_pose_check
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_initial_pose_check.py")
