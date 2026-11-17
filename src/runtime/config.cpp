@@ -103,10 +103,15 @@ std::string validate_motion_sequence(const MotionSequence & sequence, const Conf
             step.hold_tolerance > 0.01)) {
       return prefix + "Held arm requires dual_joint, a known arm and tolerance in (0, 0.01] rad";
     }
-    if (step.joint_line && (step.type != "dual_joint" || !step.pipeline.empty() ||
+    if (step.joint_line_replan && !step.joint_line) {
+      return prefix + "Joint line replan requires joint_line";
+    }
+    if (step.joint_line && ((step.type != "dual_joint" && step.type != "dual_joint_gripper") ||
+                               !step.pipeline.empty() ||
                                !step.planner.empty() || fallback_named ||
                                step.fallback_attempts != 0)) {
-      return prefix + "Joint line requires dual_joint without planner or fallback settings";
+      return prefix +
+             "Joint line requires dual_joint(_gripper) without planner or fallback settings";
     }
     if (step.type == "wait") {
       if (step.timeout < step.duration) {
@@ -389,6 +394,8 @@ Config load_config(rclcpp::Node & node) {
       step.hold_arm = text(q + "hold_arm", "");
       step.hold_tolerance = node.declare_parameter<double>(q + "hold_tolerance", 0.001, descriptor);
       step.joint_line = node.declare_parameter<bool>(q + "joint_line", false, descriptor);
+      step.joint_line_replan =
+          node.declare_parameter<bool>(q + "joint_line_replan", false, descriptor);
       sequence.steps.push_back(step);
     }
     sequence.validation_error = validate_motion_sequence(sequence, c);

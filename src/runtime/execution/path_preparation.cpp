@@ -72,6 +72,64 @@ bool TrajectoryExecutor::start_sequence(const std::vector<Step> & steps) {
   return op->result.state == ExecutionState::Running;
 }
 
+bool TrajectoryExecutor::retry_line_bundle(
+    const std::shared_ptr<Operation> & op, const std::string & collision) {
+  const auto & steps = op->steps;
+  const bool any_line = std::any_of(steps.begin(), steps.end(), [](const Step & step) {
+    return step.joint_line;
+  });
+  const bool lines = any_line && std::all_of(steps.begin(), steps.end(), [](const Step & step) {
+    return !step.joint_line || step.joint_line_replan;
+  });
+  std::string why, reason;
+  if (!lines) {
+    why = "joint_line_replan is not set for this bundle";
+  } else if (op->line_replan) {
+    why = "the OMPL replan was already used";
+  } else if (op->cancel_requested || op->result.state != ExecutionState::Running) {
+    why = "cancel requested";
+  } else if (op->executing_path || op->gate) {
+    why = "the path was already dispatched";
+  } else if (!context_.ready(reason)) {
+    why = "robot state invalid: " + reason;
+  } else if (elapsed(op->started) >= op->step.timeout) {
+    why = "operation timeout";
+  } else {
+    const auto snapshot = context_.snapshot();
+    for (const auto & [name, planned] : op->preparation_positions) {
+      const auto joint = snapshot.joints.find(name);
+      if (joint == snapshot.joints.end() ||
+          std::abs(joint->second.position - planned) > config_.continuous_start_tolerance) {
+        why = "robot moved during preparation: " + name;
+        break;
+      }
+    }
+  }
+  if (!why.empty()) {
+    if (any_line) {
+      RCLCPP_WARN(node_.get_logger(), "Joint-line path ending at %s rejected (%s); no OMPL "
+          "replan: %s", op->step.name.c_str(), collision.c_str(), why.c_str());
+    }
+    return false;
+  }
+  std::string names;
+  for (const auto & step : steps) names += (names.empty() ? "" : " + ") + step.name;
+  RCLCPP_WARN(node_.get_logger(), "Joint-line path rejected before motion (%s); planning %s once "
+      "with OMPL from the current scene", collision.c_str(), names.c_str());
+  // Drop every joint-line segment and the prepared path; the scene sets a fresh planned start.
+  op->line_replan = true;
+  op->line_rejection = collision;
+  op->planned_segments.clear();
+  op->path = {};
+  op->progress_point = 0;
+  op->preparation_positions.clear();
+  op->joint_targets.clear();
+  op->planning_scene.reset();
+  op->result.phase = steps.front().name;
+  request_scene(op, false);
+  return true;
+}
+
 bool TrajectoryExecutor::start_paired(const Step & pose, const std::vector<Step> & other_arm) {
   const auto previous = result().state;
   if (previous == ExecutionState::Running || previous == ExecutionState::Cancelling ||

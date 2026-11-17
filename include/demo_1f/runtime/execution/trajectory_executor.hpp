@@ -134,6 +134,9 @@ private:
     int fallback_tries{0};                        // fallback plans sent so far
     std::vector<std::string> plan_attempts;       // "pipeline/planner: MoveIt error N" per failure
     std::map<std::string, double> fallback_start; // arm joints when the step was first sent
+    // Joint-line bundle replanned with OMPL after its smoothed path collided (once per operation).
+    bool line_replan{false};
+    std::string line_rejection; // Collision that rejected the joint-line path.
     // start_paired: the other arm's joint steps joined to the planned pose path before smoothing.
     std::vector<Step> paired_steps;
     std::string paired_log; // "paired approach: left N pts, right M pts"
@@ -165,6 +168,8 @@ private:
   // Plan-only sequence segment: held-arm check, store, advance the start, then next or prepare.
   void accept_segment(const std::shared_ptr<Operation> & op,
       const moveit_msgs::msg::RobotTrajectory & planned);
+  // True: the joint-line bundle is being planned again with OMPL; false: the failure stands.
+  bool retry_line_bundle(const std::shared_ptr<Operation> & op, const std::string & collision);
   void execute_planned_pose(const std::shared_ptr<Operation> & op,
       const moveit_msgs::msg::RobotTrajectory & trajectory);
   void request_scene(const std::shared_ptr<Operation> & op, bool prepare_execution);

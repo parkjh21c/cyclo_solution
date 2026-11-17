@@ -98,7 +98,8 @@ struct Step {
   int fallback_attempts{0};
   std::string hold_arm{}; // Optional dual_joint path corridor around this arm's nominal goal.
   double hold_tolerance{0.001}; // Radians per joint; checked before and after smoothing.
-  bool joint_line{false}; // dual_joint only: straight joint segment from the planned start, no planner.
+  bool joint_line{false}; // dual_joint(_gripper): straight joint segment from the planned start, no planner.
+  bool joint_line_replan{false}; // joint_line: on a smoothed-path collision, plan the bundle once with OMPL.
 };
 
 struct MotionSequence {

@@ -103,6 +103,10 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
     request.pipeline_id = step.fallback_pipeline;
     request.planner_id = step.fallback_planner;
   }
+  if (plan_only && op->line_replan && step.joint_line) {  // retry_line_bundle: same goals by OMPL
+    request.pipeline_id = "ompl";
+    request.planner_id = "RRTConnectkConfigDefault";
+  }
   op->planner_label = request.pipeline_id + "/" + request.planner_id;
   // OMPL ParallelPlan compares candidates inside one allowed_planning_time budget.
   // sg2_moveit.launch.py enables path-length scoring and hybridization, so this
@@ -267,7 +271,7 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
       constraints.orientation_constraints.push_back(orientation);
     }
   }
-  if (plan_only && !op->steps.empty() && step.joint_line) {
+  if (plan_only && !op->steps.empty() && step.joint_line && !op->line_replan) {
     const auto * group = robot_model_ ? robot_model_->getJointModelGroup(config_.coordinated_group)
                                       : nullptr;
     if (!group) throw std::runtime_error("Joint line needs the coordinated group model");
@@ -280,6 +284,11 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
         if (std::find(names.begin(), names.end(), name) == names.end()) {
           throw std::runtime_error("Joint line group lacks " + side + " arm joint " + name);
         }
+      }
+      if (move_gripper && side == step.arm &&
+          std::find(names.begin(), names.end(), settings.gripper_joint) == names.end()) {
+        throw std::runtime_error("Joint line group lacks commanded gripper " +
+                                 settings.gripper_joint);
       }
     }
     const auto & start = op->planned_start.joint_state;
@@ -355,6 +364,7 @@ void TrajectoryExecutor::send_move(const std::shared_ptr<Operation> & op, bool p
         std::string detail = step_name + ": MoveIt error " + std::to_string(result.error_code.val);
         if (!result.error_code.source.empty()) detail += "; source=" + result.error_code.source;
         if (!result.error_code.message.empty()) detail += "; " + result.error_code.message;
+        if (op->line_replan) detail += "; OMPL replan after joint-line rejection: " + op->line_rejection;
         // Diagnose the nominal target only after planning fails. A colliding centre
         // does not prove the entire goal tolerance region is invalid.
         if (plan_only) {

@@ -100,6 +100,38 @@ TEST(PlanningConfig, JointLineIsLoadedAndRequiresAPlainDualJointStep) {
   EXPECT_FALSE(Step{}.joint_line);
 }
 
+TEST(PlanningConfig, JointLineReplanIsLoadedAndGripperLinesAreAccepted) {
+  rclcpp::NodeOptions options;
+  const std::string prefix = "motion_sequences.left_to_right.";
+  options.parameter_overrides({
+      rclcpp::Parameter(prefix + "steps", std::vector<std::string>{"open_approach"}),
+      rclcpp::Parameter(prefix + "open_approach.type", "dual_joint_gripper"),
+      rclcpp::Parameter(prefix + "open_approach.arm", "receiver"),
+      rclcpp::Parameter(prefix + "open_approach.left_target", std::vector<double>(7, .1)),
+      rclcpp::Parameter(prefix + "open_approach.right_target", std::vector<double>(7, -.1)),
+      rclcpp::Parameter(prefix + "open_approach.gripper_target", std::vector<double>{0.0}),
+      rclcpp::Parameter(prefix + "open_approach.joint_line", true),
+      rclcpp::Parameter(prefix + "open_approach.joint_line_replan", true)});
+  auto node = std::make_shared<rclcpp::Node>("joint_line_replan_config", options);
+  auto config = load_config(*node);
+  auto sequence = config.motion_sequences.at("left_to_right");
+  ASSERT_EQ(sequence.steps.size(), 1u);
+  EXPECT_TRUE(sequence.steps.front().joint_line);
+  EXPECT_TRUE(sequence.steps.front().joint_line_replan);
+  EXPECT_TRUE(node->describe_parameter(prefix + "open_approach.joint_line_replan").read_only);
+  EXPECT_TRUE(validate_motion_sequence(sequence, config).empty())
+      << validate_motion_sequence(sequence, config);
+  auto unlined = sequence;
+  unlined.steps.front().joint_line = false; // Replan alone means nothing.
+  EXPECT_NE(validate_motion_sequence(unlined, config).find("replan"), std::string::npos);
+  auto gripper = sequence;
+  gripper.steps.front().type = "gripper";
+  gripper.steps.front().target = {0.0};
+  gripper.steps.front().joint_line_replan = false;
+  EXPECT_NE(validate_motion_sequence(gripper, config).find("Joint line"), std::string::npos);
+  EXPECT_FALSE(Step{}.joint_line_replan);
+}
+
 TEST(PlanningConfig, LeftReturnKeepsItsExplicitLeftArm) {
   rclcpp::NodeOptions options;
   const std::string prefix = "motion_sequences.left_return.";
@@ -2357,6 +2389,218 @@ TEST_F(RosFixture, CupPreparationJointLineSkipsMoveGroupAndKeepsTheHeldArm) {
   ASSERT_NE(right, path.joint_names.end());
   EXPECT_NEAR(path.points.back().positions.at(right - path.joint_names.begin()),
       steps[1].right_target.front(), 1e-6);
+}
+
+// Menu 3 bundles as straight joint lines; a world block sits on the left_joint0 sweep at 0.5 rad.
+class JointLineFixture : public RosFixture {
+protected:
+  void SetUp() override {
+    RosFixture::SetUp();
+    enable_smoothing(true);
+  }
+  // face_each_other + open_approach of left_to_right (receiver right opens its gripper).
+  std::vector<Step> bundle(bool replan, double left0 = 1.0) {
+    auto steps = config.motion_sequences.at("left_to_right").steps;
+    steps.resize(2);
+    for (auto & step : steps) {
+      step.joint_line = true;
+      step.joint_line_replan = replan;
+      step.left_target[0] = left0;
+    }
+    return steps;
+  }
+  void line_everywhere(bool replan, double left0 = 1.0) {
+    for (auto & [direction, sequence] : config.motion_sequences) {
+      (void)direction;
+      for (const size_t i : {size_t(0), size_t(1), size_t(4)}) {
+        sequence.steps[i].joint_line = true;
+        sequence.steps[i].joint_line_replan = replan;
+        if (i < 2) sequence.steps[i].left_target[0] = left0;
+      }
+    }
+  }
+  // which: scene request numbers since arm_block() that carry the block (empty: every one).
+  void arm_block(std::vector<size_t> which = {}) {
+    const size_t base = scene_requests;
+    transform_scene = [this, base, which](moveit_msgs::msg::PlanningScene & scene) {
+      const size_t number = scene_requests - base; // Counted before transform_scene runs.
+      if (!which.empty() && std::find(which.begin(), which.end(), number) == which.end()) return;
+      moveit_msgs::msg::CollisionObject block;
+      block.id = "line_block";
+      block.header.frame_id = "base_link";
+      block.operation = block.ADD;
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = box.BOX;
+      box.dimensions = {.05, .05, .05};
+      geometry_msgs::msg::Pose pose;
+      pose.position.x = .5 * std::cos(.5);
+      pose.position.y = .5 * std::sin(.5);
+      pose.orientation.w = 1;
+      block.primitives.push_back(box);
+      block.primitive_poses.push_back(pose);
+      scene.world.collision_objects.push_back(block);
+    };
+    block_base = base;
+  }
+  ExecutionResult run(TrajectoryExecutor & executor, double timeout = 5.) {
+    until([&] { return executor.result().state != ExecutionState::Running &&
+                       executor.result().state != ExecutionState::Cancelling; },
+        timeout, [&] { executor.tick(); });
+    return executor.result();
+  }
+  // Waits until the first joint-line path is being prepared, without ticking the executor.
+  void wait_first_preparation() {
+    ASSERT_TRUE(until([&] { return scene_requests >= block_base + 2; }));
+    until([] { return false; }, .05);
+  }
+  size_t block_base{0};
+};
+
+TEST_F(JointLineFixture, GripperLineCarriesTheReceiverGripperAndSkipsMoveGroup) {
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(bundle(true, .1)));
+  EXPECT_EQ(run(executor).state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_TRUE(move_goals.empty()); // Checked straight lines need no planner.
+  ASSERT_EQ(execution_goals.size(), 1u);
+  const auto & path = execution_goals[0].trajectory.joint_trajectory;
+  const auto gripper = std::find(path.joint_names.begin(), path.joint_names.end(),
+      config.arms.at("right").gripper_joint);
+  ASSERT_NE(gripper, path.joint_names.end());
+  const auto index = gripper - path.joint_names.begin();
+  EXPECT_NEAR(path.points.front().positions.at(index), .2, 1e-6);
+  EXPECT_NEAR(path.points.back().positions.at(index), 0.0, 1e-6); // gripper_target
+  EXPECT_NEAR(positions.at(config.arms.at("right").gripper_joint), 0.0, 1e-6);
+}
+
+TEST_F(JointLineFixture, CollidingLinesReplanTheWholeBundleOnceWithOmplBeforeMotion) {
+  arm_block({2}); // Only the scene that checks the joint lines has the block.
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(bundle(true)));
+  EXPECT_EQ(run(executor).state, ExecutionState::Succeeded) << executor.result().detail;
+  ASSERT_EQ(move_goals.size(), 2u); // Both steps, in order, from the measured start.
+  for (const auto & goal : move_goals) {
+    EXPECT_TRUE(goal.planning_options.plan_only);
+    EXPECT_EQ(goal.request.pipeline_id, "ompl");
+    EXPECT_EQ(goal.request.planner_id, "RRTConnectkConfigDefault");
+  }
+  const auto & start = move_goals[0].request.start_state.joint_state;
+  const auto left0 = std::find(start.name.begin(), start.name.end(), "left_joint0");
+  ASSERT_NE(left0, start.name.end());
+  EXPECT_NEAR(start.position.at(left0 - start.name.begin()), 0.0, 1e-9); // Not the line end.
+  EXPECT_EQ(scene_requests - block_base, 4u);
+  ASSERT_EQ(execution_goals.size(), 1u);
+  EXPECT_NEAR(positions.at("left_joint0"), 1.0, 1e-6);
+}
+
+TEST_F(JointLineFixture, OmplReplanThatStillCollidesSendsNoPathOrGripper) {
+  arm_block();
+  line_everywhere(true);
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  HandoverMotion motion(config, *context, executor);
+  std::string reason;
+  ASSERT_TRUE(motion.start("left_to_right", reason)) << reason;
+  ASSERT_TRUE(until([&] { return !motion.running(); }, 5., [&] { motion.tick(); }));
+  EXPECT_FALSE(motion.result().sequence_completed);
+  EXPECT_EQ(motion.result().code, "PATH_PREPARATION_FAILED");
+  EXPECT_NE(motion.result().detail.find("OMPL replan also rejected"), std::string::npos)
+      << motion.result().detail;
+  EXPECT_EQ(move_goals.size(), 2u); // One replan of the bundle, no second one.
+  EXPECT_TRUE(execution_goals.empty());
+  EXPECT_TRUE(joint_goals.empty()); // No receiver_close or giver_release.
+}
+
+TEST_F(JointLineFixture, WithoutReplanSettingACollidingLineFailsWithoutPlanning) {
+  arm_block();
+  auto steps = bundle(false);
+  steps[1].type = "dual_joint"; // Menu 7 shape: held left arm, no replan setting.
+  steps[1].arm.clear();
+  steps[1].gripper_target.clear();
+  steps[1].hold_arm = "left";
+  steps[1].left_target = steps[0].left_target; // Hold the left arm at the preceding segment's endpoint.
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(steps));
+  const auto result = run(executor);
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_EQ(result.code, "PATH_PREPARATION_FAILED");
+  EXPECT_NE(result.detail.find("collision"), std::string::npos) << result.detail;
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(JointLineFixture, CancelDuringLinePreparationIsNotReplanned) {
+  arm_block();
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(bundle(true)));
+  wait_first_preparation();
+  executor.cancel();
+  const auto result = run(executor);
+  EXPECT_NE(result.state, ExecutionState::Succeeded);
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(JointLineFixture, StartChangeDuringLinePreparationIsNotReplanned) {
+  arm_block();
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(bundle(true)));
+  wait_first_preparation();
+  positions.at("left_joint1") += .05; // Beyond continuous_start_tolerance.
+  until([] { return false; }, .05);
+  const auto result = run(executor);
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_NE(result.detail.find("collision"), std::string::npos) << result.detail;
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(JointLineFixture, ExhaustedTimeoutIsNotReplannedOrExtended) {
+  arm_block();
+  auto steps = bundle(true);
+  for (auto & step : steps) step.timeout = .1;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(steps));
+  wait_first_preparation();
+  until([] { return false; }, .25); // Past the 0.2 s bundle timeout before the result is read.
+  const auto result = run(executor, 1.);
+  EXPECT_NE(result.state, ExecutionState::Succeeded);
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_TRUE(execution_goals.empty());
+}
+
+TEST_F(JointLineFixture, FailureAfterTheLineWasSentIsNotReplanned) {
+  execute_error = moveit_msgs::msg::MoveItErrorCodes::CONTROL_FAILED;
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_sequence(bundle(true, .1)));
+  const auto result = run(executor);
+  EXPECT_EQ(result.state, ExecutionState::Failed);
+  EXPECT_TRUE(move_goals.empty());
+  EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(JointLineFixture, BothDirectionsKeepReceiverCloseBeforeGiverRelease) {
+  line_everywhere(true, .1);
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  HandoverMotion motion(config, *context, executor);
+  for (const std::string direction : {"left_to_right", "right_to_left"}) {
+    requests.clear();
+    std::string reason;
+    ASSERT_TRUE(motion.start(direction, reason)) << reason;
+    ASSERT_TRUE(until([&] { return !motion.running(); }, 5., [&] { motion.tick(); }));
+    ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+    const auto & sequence = config.motion_sequences.at(direction);
+    EXPECT_EQ(requests, (std::vector<std::string>{"execute:path", "gripper:" + sequence.receiver,
+        "gripper:" + sequence.giver, "execute:path"})) << direction;
+  }
+  EXPECT_TRUE(move_goals.empty());
 }
 
 TEST_F(RosFixture, CurrentLimitedReceiverDoesNotBlockReleaseAndRetreat) {

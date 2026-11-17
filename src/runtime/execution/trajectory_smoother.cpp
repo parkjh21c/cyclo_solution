@@ -409,7 +409,7 @@ void validate_smooth_path(const SmoothPath & path,
         for (const auto & contact : collision.contacts) {
           pairs += "; " + contact.first.first + " / " + contact.first.second;
         }
-        throw std::runtime_error("Smoothed path is in collision" + pairs);
+        throw PathCollisionError("Smoothed path is in collision" + pairs);
       }
       // A giver gripper must stay fixed throughout the entire approach.
       const auto & step = steps[path.point_steps[i]];

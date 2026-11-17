@@ -322,6 +322,10 @@ void TrajectoryExecutor::tick() {
           "Prepared %s in %.3f s",
           op->step.name.c_str(),
           elapsed(op->preparation_started));
+      if (op->line_replan) {
+        RCLCPP_INFO(node_.get_logger(), "OMPL replan of the joint-line bundle ending at %s passed "
+            "smoothing and collision checks", op->step.name.c_str());
+      }
       if (!op->cancel_requested && op->result.state == ExecutionState::Running) {
         std::string reason;
         if (!context_.ready(reason)) {
@@ -421,6 +425,22 @@ void TrajectoryExecutor::tick() {
             }
           });
         }
+      }
+    } catch (const PathCollisionError & error) {
+      // Only a collision of the prepared path may replan a joint-line bundle, before any motion.
+      if (!op->cancel_requested && op->result.state == ExecutionState::Running) {
+        std::string detail = error.what();
+        if (op->line_replan) {
+          detail = "OMPL replan also rejected: " + detail + "; joint line: " + op->line_rejection;
+          RCLCPP_WARN(node_.get_logger(), "%s: %s", op->step.name.c_str(), detail.c_str());
+        }
+        bool retried = false;
+        try {
+          retried = retry_line_bundle(op, error.what());
+        } catch (const std::exception & failure) {
+          detail += std::string("; OMPL replan not started: ") + failure.what();
+        }
+        if (!retried) op->result = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", detail};
       }
     } catch (const std::exception & error) {
       if (!op->cancel_requested && op->result.state == ExecutionState::Running) {
