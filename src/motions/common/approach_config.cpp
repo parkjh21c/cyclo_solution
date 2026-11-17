@@ -55,6 +55,13 @@ std::string ApproachConfig::validate(const std::string & arm) const {
       std::abs(offset_z) > .3) {
     return "Invalid approach dimensions, offset or limits";
   }
+  if (!std::isfinite(forward_offset) || forward_offset < 0 || forward_offset > .06) {
+    return "Forward offset must be 0..0.06 m";
+  }
+  if (fixed_pose && (!std::isfinite(tcp_pitch_deg) || tcp_pitch_deg < tcp_pitch_min_deg ||
+                        tcp_pitch_deg > (tcp_pitch_limit_deg > 0 ? tcp_pitch_limit_deg : 89))) {
+    return "Fixed-pose pitch must be within tcp_pitch_min_deg..tcp_pitch_limit_deg";
+  }
   for (double value : {refine_pitch_step_deg,
            refine_max_correction,
            refine_speed,
@@ -106,6 +113,9 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("tcp_pitch_min_deg", c.tcp_pitch_min_deg);
   number("tcp_yaw_deg", c.tcp_yaw_deg);
   number("tcp_yaw_limit_deg", c.tcp_yaw_limit_deg);
+  number("tcp_pitch_deg", c.tcp_pitch_deg);
+  number("forward_offset", c.forward_offset);
+  c.fixed_pose = node.declare_parameter("approach.fixed_pose", c.fixed_pose, descriptor);
   c.tcp_pitch_downward_only = node.declare_parameter(
       "approach.tcp_pitch_downward_only", c.tcp_pitch_downward_only, descriptor);
   c.tcp_yaw_inward_only =
@@ -154,8 +164,9 @@ std::optional<geometry_msgs::msg::Pose> approach_tcp_target(const geometry_msgs:
     return {};
   }
   auto target = body;
-  target.position.x += config.offset_xy[0];
-  target.position.y += config.offset_xy[1];
+  const double yaw = (arm == "left" ? 1 : -1) * config.tcp_yaw_deg * M_PI / 180;
+  target.position.x += config.offset_xy[0] + config.forward_offset * std::cos(yaw);
+  target.position.y += config.offset_xy[1] + config.forward_offset * std::sin(yaw);
   target.position.z += config.cup_height + config.offset_z;
   target.orientation = geometry_msgs::msg::Quaternion();
   target.orientation.w = 1; // Position goal placeholder; roll/pitch have separate goal constraints.
@@ -167,5 +178,14 @@ std::optional<geometry_msgs::msg::Pose> approach_tcp_target(const geometry_msgs:
   }
   reason.clear();
   return target;
+}
+
+geometry_msgs::msg::Quaternion approach_fixed_orientation(
+    const ApproachConfig & config, const std::string & arm) {
+  // Same convention as cup_grasp_pose: forward is TCP -Z, positive pitch tilts it down.
+  tf2::Quaternion q;
+  q.setRPY(0, -M_PI / 2 + config.tcp_pitch_deg * M_PI / 180,
+      (arm == "left" ? 1 : -1) * config.tcp_yaw_deg * M_PI / 180);
+  return tf2::toMsg(q);
 }
 } // namespace demo_1f

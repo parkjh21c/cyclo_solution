@@ -30,6 +30,36 @@ Step ApproachCupMotion::approach_step(const geometry_msgs::msg::Pose & pose, dou
   return step;
 }
 
+bool ApproachCupMotion::fixed_mode() const {
+  return config_.fixed_pose && config_.independent_return;
+}
+
+Step ApproachCupMotion::fixed_step(const geometry_msgs::msg::Pose & pose, double speed) const {
+  Step step;
+  step.name = phase_;
+  step.type = "pose"; // Full pose without tcp_* goal constraints: Pilz PTP.
+  step.arm = arm_;
+  step.frame = robot_.planning_frame;
+  const auto & p = pose.position;
+  const auto & q = pose.orientation;
+  step.target = {p.x, p.y, p.z, q.x, q.y, q.z, q.w};
+  step.timeout = 45;
+  step.velocity_scale = step.acceleration_scale = speed;
+  return step;
+}
+
+bool ApproachCupMotion::arm_unmoved() const {
+  const auto snapshot = context_.snapshot();
+  for (const auto & [name, position] : start_joints_) {
+    const auto joint = snapshot.joints.find(name);
+    if (joint == snapshot.joints.end() ||
+        std::abs(joint->second.position - position) > robot_.continuous_start_tolerance) {
+      return false;
+    }
+  }
+  return !start_joints_.empty();
+}
+
 bool ApproachCupMotion::dispatch(const geometry_msgs::msg::Pose & pose, double speed) {
   return execute_step(approach_step(pose, speed));
 }
@@ -82,6 +112,22 @@ bool ApproachCupMotion::begin_approach() {
   // Independent return: TaskManager already started the other arm; this moves one arm only.
   other_steps_ = config_.independent_return ? std::vector<Step>{} : other_arm_steps();
   other_next_ = 0;
+  if (fixed_mode()) {
+    start_joints_.clear();
+    const auto snapshot = context_.snapshot();
+    for (const auto & name : robot_.arms.at(arm_).joints) {
+      const auto joint = snapshot.joints.find(name);
+      if (joint == snapshot.joints.end()) {
+        fail("ROBOT_NOT_READY", "Missing joint feedback: " + name);
+        return false;
+      }
+      start_joints_[name] = joint->second.position;
+    }
+    fixed_ = true;
+    method_ = "fixed PTP";
+    return execute_step(fixed_step(approach_target_.pose, config_.travel_scale));
+  }
+  method_ = "OMPL";
   if (other_steps_.empty()) {
     return dispatch(approach_target_.pose, config_.travel_scale);
   }
@@ -151,9 +197,22 @@ void ApproachCupMotion::tick() {
       next_sequential();
       return;
     }
+    if (fixed_ && outcome.state == ExecutionState::Failed && outcome.code != "STOP_UNCONFIRMED" &&
+        result_.state != "CANCELLING" && arm_unmoved()) {
+      // Fixed PTP blocked before motion: one OMPL attempt inside the configured ranges.
+      fixed_ = false;
+      method_ = "OMPL fallback";
+      fixed_failure_ = "; fixed PTP failed first: " + outcome.code + ": " + outcome.detail;
+      RCLCPP_INFO(logger(), "MOVE_TO_OBSERVE: fixed PTP failed before motion (%s: %s); "
+          "falling back to OMPL", outcome.code.c_str(), outcome.detail.c_str());
+      approach_target_.pose = range_target_;
+      dispatch(range_target_, config_.travel_scale);
+      return;
+    }
+    fixed_ = false;
     if (outcome.state == ExecutionState::StopUnconfirmed ||
         outcome.state == ExecutionState::Failed) {
-      fail(outcome.code, outcome.detail);
+      fail(outcome.code, outcome.detail + fixed_failure_);
       return;
     }
     if (result_.state == "CANCELLING" || outcome.state == ExecutionState::Cancelled) {
@@ -170,6 +229,7 @@ void ApproachCupMotion::tick() {
       return;
     }
     paired_ = false;
+    RCLCPP_INFO(logger(), "MOVE_TO_OBSERVE reached by %s", method_.c_str());
     result_.last_completed_step = phase_;
     at_observation_pose_ = true;
     result_.state = "SUCCEEDED";
@@ -197,7 +257,9 @@ void ApproachCupMotion::tick() {
     fail("APPROACH_TARGET_INVALID", reason);
     return;
   }
+  range_target_ = *target;
   approach_target_.pose = *target;
+  if (fixed_mode()) approach_target_.pose.orientation = approach_fixed_orientation(config_, arm_);
   if (!execute_) {
     result_.state = "SUCCEEDED";
     result_.sequence_completed = true;

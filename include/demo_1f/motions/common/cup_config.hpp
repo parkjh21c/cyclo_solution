@@ -14,6 +14,9 @@ struct ApproachConfig {
   double tcp_yaw_deg{-45}, tcp_yaw_limit_deg{0}; // Left-hand heading, mirrored right; 0 = free.
   std::vector<double> offset_xy{0, 0};
   double offset_z{0}; // TCP target offset in planning frame; does not change cup geometry.
+  bool fixed_pose{true};       // MOVE_TO_OBSERVE tries a full-pose Pilz PTP before the OMPL range goal.
+  double tcp_pitch_deg{40};    // Fixed-pose downward pitch.
+  double forward_offset{.025}; // Horizontal TCP target shift along the nominal hand heading, meters.
   std::string cup_source{"head"}; // head (YOLO BODY) or wrist_left_init (initial-pose rim).
   double refine_pitch_step_deg{5.0}, refine_max_correction{.12};
   double refine_view_wait{1.0}; // Fresh images without stability progress before changing view.

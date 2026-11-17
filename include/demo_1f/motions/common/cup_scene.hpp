@@ -10,6 +10,9 @@ std::optional<geometry_msgs::msg::Pose> approach_tcp_target(const geometry_msgs:
     const std::string & arm,
     double uncertainty,
     std::string & reason);
+// Fixed MOVE_TO_OBSERVE hand orientation: tcp_yaw_deg (mirrored right) and tcp_pitch_deg down.
+geometry_msgs::msg::Quaternion approach_fixed_orientation(
+    const ApproachConfig & config, const std::string & arm);
 geometry_msgs::msg::Pose tilt_tcp_target(
     const geometry_msgs::msg::Pose & pose, double degrees, double ceiling_degrees);
 moveit_msgs::msg::PlanningScene make_approach_scene(const Config & robot,

@@ -102,6 +102,7 @@ TEST(HeadCupTracking, SavesOnlyConfiguredSource) {
 TEST(ApproachGeometry, LowersTargetWithoutMovingCupCollisionGeometry) {
   ApproachConfig config;
   config.offset_z = -.05;
+  config.forward_offset = 0; // The heading shift has its own test.
   geometry_msgs::msg::Pose body;
   body.position.x = .5;
   body.position.y = .2;
@@ -144,6 +145,78 @@ TEST(ApproachGeometry, TargetsConfiguredHeadingMirroredForRightHand) {
   }
   config.tcp_yaw_limit_deg = 3;
   EXPECT_FALSE(approach_tcp_target(body, config, "left", .01, reason));
+}
+
+TEST(ApproachGeometry, FixedPosePitchAndForwardOffsetAreValidated) {
+  ApproachConfig config;
+  config.tcp_pitch_min_deg = 20;
+  config.tcp_pitch_limit_deg = 60;
+  EXPECT_TRUE(config.validate("left").empty());
+  for (double pitch : {10., 65., std::numeric_limits<double>::quiet_NaN()}) {
+    config.tcp_pitch_deg = pitch;
+    EXPECT_FALSE(config.validate("left").empty()) << pitch;
+  }
+  config.fixed_pose = false; // The fixed pitch is unused without the fixed pose.
+  config.tcp_pitch_deg = 65;
+  EXPECT_TRUE(config.validate("left").empty());
+  config.fixed_pose = true;
+  config.tcp_pitch_deg = 40;
+  for (double offset : {-.01, .07, std::numeric_limits<double>::quiet_NaN()}) {
+    config.forward_offset = offset;
+    EXPECT_FALSE(config.validate("left").empty()) << offset;
+  }
+  config.forward_offset = .06;
+  EXPECT_TRUE(config.validate("left").empty());
+}
+
+TEST(ApproachGeometry, FixedPoseParametersLoadReadOnly) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("approach.fixed_pose", false),
+      rclcpp::Parameter("approach.tcp_pitch_deg", 30.0),
+      rclcpp::Parameter("approach.forward_offset", .01)});
+  auto node = std::make_shared<rclcpp::Node>("approach_fixed_pose_config", options);
+  const auto config = load_approach_config(*node);
+  EXPECT_FALSE(config.fixed_pose);
+  EXPECT_DOUBLE_EQ(config.tcp_pitch_deg, 30.0);
+  EXPECT_DOUBLE_EQ(config.forward_offset, .01);
+  EXPECT_TRUE(node->describe_parameter("approach.fixed_pose").read_only);
+  auto defaults = std::make_shared<rclcpp::Node>("approach_fixed_pose_defaults");
+  const auto loaded = load_approach_config(*defaults);
+  EXPECT_TRUE(loaded.fixed_pose);
+  EXPECT_DOUBLE_EQ(loaded.tcp_pitch_deg, 40.0);
+  EXPECT_DOUBLE_EQ(loaded.forward_offset, .025);
+}
+
+TEST(ApproachGeometry, FixedPoseShiftsAlongTheHeadingAndMatchesTheGoalBands) {
+  ApproachConfig config; // approach.yaml ranges.
+  config.tcp_roll_limit_deg = 10;
+  config.tcp_pitch_min_deg = 20;
+  config.tcp_pitch_limit_deg = 60;
+  geometry_msgs::msg::Pose body;
+  body.position.x = .5;
+  body.position.y = .2;
+  body.position.z = .8;
+  body.orientation.w = 1;
+  std::string reason;
+  const double shift = .025 * std::cos(M_PI / 4);
+  for (const std::string arm : {"left", "right"}) {
+    const auto target = approach_tcp_target(body, config, arm, .01, reason);
+    ASSERT_TRUE(target) << reason;
+    // Left yaw -45: +x, -y; the right hand mirrors to +x, +y.
+    EXPECT_NEAR(target->position.x, .5 + shift, 1e-9) << arm;
+    EXPECT_NEAR(target->position.y, .2 + (arm == "left" ? -shift : shift), 1e-9) << arm;
+    const auto q = approach_fixed_orientation(config, arm);
+    const auto pitch = tcp_pitch(q);
+    const auto yaw = tcp_yaw(q);
+    const auto roll = tcp_roll(q);
+    ASSERT_TRUE(pitch && yaw && roll);
+    EXPECT_NEAR(*pitch, 40 * M_PI / 180, 1e-9); // Positive: hand forward points down.
+    EXPECT_GE(*pitch, config.tcp_pitch_min_deg * M_PI / 180);
+    EXPECT_LE(*pitch, config.tcp_pitch_limit_deg * M_PI / 180);
+    EXPECT_NEAR(*yaw, (arm == "left" ? -1 : 1) * M_PI / 4, 1e-9);
+    EXPECT_TRUE(tcp_yaw_is_inward(*yaw, arm));
+    EXPECT_LE(std::abs(*roll), config.tcp_roll_limit_deg * M_PI / 180);
+  }
 }
 
 TEST(ApproachGeometry, RejectsInconsistentMinimumPitch) {
@@ -273,6 +346,8 @@ protected:
     config.tcp_roll_limit_deg = 0;
     config.tcp_pitch_limit_deg = 0;
     config.tcp_pitch_downward_only = false;
+    config.fixed_pose = false; // Existing approach tests use the OMPL range goal; fixed tests opt in.
+    config.forward_offset = 0;
     context = std::make_unique<RobotContext>(*node, robot,
         HeadCupTrackConfig{config.inner_radius, config.wall_thickness, config.max_position_error});
     motion = std::make_unique<ApproachCupMotion>(robot, config, *context, executor, scene);
@@ -288,7 +363,7 @@ protected:
     j.header.stamp = node->now();
     for (const auto & [side, a] : robot.arms) {
       j.name.push_back(a.joints[0]);
-      j.position.push_back(0);
+      j.position.push_back(arm_joint);
       j.velocity.push_back(0);
       j.name.push_back(a.gripper_joint);
       j.position.push_back(grip);
@@ -330,6 +405,7 @@ protected:
   }
 
   bool relaxed_pick_arrival = false;
+  double arm_joint = 0; // Measured arm joint position reported by feedback().
 
   void complete() {
     if (executor.current.state == ExecutionState::Running) {
@@ -1153,6 +1229,140 @@ TEST_F(ApproachFixture, PairedReturnStaysAvailableWhenIndependentReturnIsOff) {
   ASSERT_EQ(executor.steps.size(), 2u); // Paired refused: the return, then the approach.
   EXPECT_EQ(executor.steps[0].name, "giver_home");
   EXPECT_EQ(executor.steps[1].arm, "left");
+}
+
+TEST_F(ApproachFixture, FixedPoseIsOneFullPosePtpStepWithoutTcpConstraints) {
+  config.fixed_pose = true;
+  config.forward_offset = .025;
+  ASSERT_TRUE(start("left"));
+  advance("OBSERVATION_READY");
+  ASSERT_EQ(executor.steps.size(), 1u);
+  const auto & step = executor.steps[0];
+  EXPECT_EQ(step.type, "pose");
+  EXPECT_FALSE(step.position_only);
+  EXPECT_EQ(step.tcp_roll_limit, 0);
+  EXPECT_EQ(step.tcp_pitch_limit, 0);
+  EXPECT_EQ(step.tcp_pitch_min, 0);
+  EXPECT_EQ(step.tcp_yaw_limit, 0);
+  EXPECT_FALSE(step.tcp_pitch_downward_only);
+  EXPECT_FALSE(step.tcp_yaw_inward_only);
+  EXPECT_EQ(step.orientation_slack, 0);
+  EXPECT_DOUBLE_EQ(step.velocity_scale, config.travel_scale);
+  EXPECT_EQ(step.timeout, 45);
+  const auto q = approach_fixed_orientation(config, "left");
+  EXPECT_NEAR(step.target[3], q.x, 1e-12);
+  EXPECT_NEAR(step.target[4], q.y, 1e-12);
+  EXPECT_NEAR(step.target[5], q.z, 1e-12);
+  EXPECT_NEAR(step.target[6], q.w, 1e-12);
+  EXPECT_NEAR(step.target[0], .54 + .025 * std::cos(M_PI / 4), 1e-9);
+  EXPECT_NEAR(step.target[1], -.025 * std::sin(M_PI / 4), 1e-9);
+}
+
+TEST_F(ApproachFixture, FixedPosePreviewReportsTheFixedTarget) {
+  config.fixed_pose = true;
+  std::string reason;
+  ASSERT_TRUE(motion->start("left", "cup", reason, false)) << reason;
+  capture_initial();
+  ASSERT_TRUE(motion->result().sequence_completed);
+  const auto q = approach_fixed_orientation(config, "left");
+  const auto & target = motion->approach_target().pose;
+  EXPECT_NEAR(target.orientation.x, q.x, 1e-12);
+  EXPECT_NEAR(target.orientation.y, q.y, 1e-12);
+  EXPECT_NEAR(target.orientation.z, q.z, 1e-12);
+  EXPECT_NEAR(target.orientation.w, q.w, 1e-12);
+  EXPECT_TRUE(executor.steps.empty());
+}
+
+TEST_F(ApproachFixture, FixedPoseFailureBeforeMotionFallsBackToOmplOnce) {
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("MOVE_TO_OBSERVE");
+  ASSERT_EQ(executor.steps.size(), 1u);
+  EXPECT_FALSE(executor.steps[0].position_only);
+  executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no PTP plan"};
+  feedback();
+  motion->tick();
+  ASSERT_EQ(executor.steps.size(), 2u);
+  EXPECT_TRUE(executor.steps[1].position_only);
+  EXPECT_EQ(executor.steps[1].name, "MOVE_TO_OBSERVE");
+  EXPECT_NEAR(executor.steps[1].target[0], executor.steps[0].target[0], 1e-12); // Same position.
+  EXPECT_NEAR(executor.steps[1].target[1], executor.steps[0].target[1], 1e-12);
+  // A failure of the fallback itself ends the motion: only one fallback.
+  executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no OMPL plan"};
+  motion->tick();
+  EXPECT_EQ(motion->result().state, "FAILED");
+  EXPECT_NE(motion->result().detail.find("fixed PTP failed first"), std::string::npos);
+  EXPECT_EQ(executor.steps.size(), 2u);
+}
+
+TEST_F(ApproachFixture, FixedPoseFallbackCanReachTheObservationPose) {
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("MOVE_TO_OBSERVE");
+  executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "no PTP plan"};
+  feedback();
+  motion->tick();
+  advance("OBSERVATION_READY");
+  EXPECT_TRUE(motion->result().sequence_completed);
+  EXPECT_EQ(executor.steps.size(), 2u);
+}
+
+TEST_F(ApproachFixture, FixedPoseFailureAfterMotionDoesNotFallBack) {
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("MOVE_TO_OBSERVE");
+  arm_joint = .1; // The arm left its start before the failure.
+  feedback();
+  executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "aborted"};
+  motion->tick();
+  EXPECT_EQ(motion->result().state, "FAILED");
+  EXPECT_EQ(motion->result().code, "EXECUTION_FAILED");
+  EXPECT_EQ(executor.steps.size(), 1u);
+}
+
+TEST_F(ApproachFixture, FixedPoseUnconfirmedStopDoesNotFallBack) {
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("MOVE_TO_OBSERVE");
+  executor.current = {ExecutionState::StopUnconfirmed, "STOP_UNCONFIRMED", "unknown stop"};
+  feedback();
+  motion->tick();
+  EXPECT_EQ(motion->result().code, "STOP_UNCONFIRMED");
+  EXPECT_EQ(executor.steps.size(), 1u);
+}
+
+TEST_F(ApproachFixture, FixedPoseCancelledDuringPlanningDoesNotFallBack) {
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("MOVE_TO_OBSERVE");
+  motion->cancel();
+  executor.current = {ExecutionState::Failed, "PLANNING_FAILED", "cancelled while planning"};
+  feedback();
+  motion->tick();
+  EXPECT_FALSE(motion->running());
+  EXPECT_EQ(executor.steps.size(), 1u);
+}
+
+TEST_F(ApproachFixture, FixedPoseOffKeepsTheOmplRangeGoalWithTheForwardOffset) {
+  config.fixed_pose = false;
+  config.forward_offset = .025;
+  ASSERT_TRUE(start("left"));
+  advance("OBSERVATION_READY");
+  ASSERT_EQ(executor.steps.size(), 1u);
+  EXPECT_TRUE(executor.steps[0].position_only);
+  EXPECT_NEAR(executor.steps[0].target[6], 1, 1e-12); // Position placeholder orientation.
+  EXPECT_NEAR(executor.steps[0].target[0], .54 + .025 * std::cos(M_PI / 4), 1e-9);
+}
+
+TEST_F(ApproachFixture, FixedPoseLeavesThePairedPathUnchanged) {
+  add_right_return(robot, config);
+  config.independent_return = false;
+  config.fixed_pose = true;
+  ASSERT_TRUE(start("left"));
+  advance("OBSERVATION_READY");
+  EXPECT_EQ(executor.paired_calls, 1);
+  ASSERT_EQ(executor.steps.size(), 2u);
+  EXPECT_TRUE(executor.steps[1].position_only);
 }
 
 TEST_F(ApproachFixture, OutsideRollBandApproachesDirectlyWithoutAlignment) {
