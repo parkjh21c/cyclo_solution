@@ -63,7 +63,8 @@ void TaskManager::cancel_head() {
 
 bool TaskManager::waits_for_side(const std::string & stage) {
   // Stages that move the side arm or both arms start only after the side has arrived.
-  return stage == "PICK_DYNAMIXEL" || stage == "HANDOVER" || stage == "WITHDRAW_CUP" ||
+  // PICK_DYNAMIXEL moves only the right arm: it waits for a right side return (tick_demo).
+  return stage == "HANDOVER" || stage == "WITHDRAW_CUP" ||
          stage == "PICK_CUP" || stage == "HANDOVER_CUP" || stage == "POUR_CUP" || stage == "HANDOVER_CUP_BACK" ||
          stage == "INITIALIZE_ROBOT" || stage == "RETURN_INITIAL";
 }

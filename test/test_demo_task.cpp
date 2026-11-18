@@ -2063,21 +2063,22 @@ TEST_F(DemoTest, LeftReturnFailingAfterMotionStopsTheDemo) {
   EXPECT_EQ(result.get().result->error_code, "SIDE_ARM_FAILED");
   EXPECT_FALSE(result.get().result->can_resume);
   EXPECT_EQ(pick_cup->runs, 0);
-  EXPECT_EQ(picks, 1);
+  EXPECT_LE(picks, 2); // The next pick may have started beside the return; no handover follows.
+  EXPECT_EQ(handovers(executor), 1);
 }
 
 TEST_F(DemoTest, StagesUsingTheLeftArmWaitForTheLeftReturn) {
   EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("PICK_CUP"));
   EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("HANDOVER"));
-  EXPECT_TRUE(TaskManagerTestAccess::waits_for_side("PICK_DYNAMIXEL"));
+  EXPECT_FALSE(TaskManagerTestAccess::waits_for_side("PICK_DYNAMIXEL")); // Right arm only.
   cells = 2;
   side.left_supported = side.stall_left = true;
   auto goal = send(); ASSERT_TRUE(goal);
   for (int i = 0; i < 1500 && side.left_starts == 0; ++i) pump();
   ASSERT_EQ(side.left_starts, 1);
   for (int i = 0; i < 200; ++i) pump();
-  EXPECT_EQ(picks, 1); // The next round waits for the left arm.
-  EXPECT_EQ(handovers(executor), 1);
+  EXPECT_EQ(picks, 2); // The next cell pick runs beside the left return ...
+  EXPECT_EQ(handovers(executor), 1); // ... and its handover waits for the left arm.
   EXPECT_EQ(pick_cup->runs, 0);
   side.stall_left = false;
   auto result = client->async_get_result(goal); wait(result);

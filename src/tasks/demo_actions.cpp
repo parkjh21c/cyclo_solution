@@ -632,6 +632,7 @@ void TaskManager::tick_demo() {
   if (side_failure_ && !demo_cancel_requested_ && !side_stage_stop_sent_) {
     side_stage_stop_sent_ = true; // The stage stops; its end reports the side failure.
     if (active_cup_motion_) active_cup_motion_->cancel();
+    if (demo_stage_ == "PICK_DYNAMIXEL") cancel_pick(); // Runs beside the left return.
   }
   if (demo_prepare_deferred_ && demo_stage_ == "REFINE_CUP" && demo_stage_active_ &&
       !side_active()) {
@@ -641,7 +642,10 @@ void TaskManager::tick_demo() {
   if (demo_retry_wait_) {
     if (Clock::now() >= demo_deadline_) demo_retry_wait_ = false;
   } else if (!demo_stage_active_) {
-    if (waits_for_side(demo_stage_) && side_active()) {
+    // The cell pick runs beside the left return, never beside a right one.
+    const bool pick_waits =
+        side_ && demo_stage_ == "PICK_DYNAMIXEL" && side_->active_arm() != "left";
+    if ((waits_for_side(demo_stage_) || pick_waits) && side_active()) {
       if (!side_waiting_) {
         side_waiting_ = true;
         side_wait_started_ = Clock::now();
