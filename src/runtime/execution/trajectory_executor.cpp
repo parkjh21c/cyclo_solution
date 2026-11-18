@@ -459,15 +459,22 @@ void TrajectoryExecutor::tick() {
     } else if (op->step.type == "wait") {
       if (elapsed(op->started) >= op->step.duration) {
         op->result.state = ExecutionState::Succeeded;
+        RCLCPP_INFO(node_.get_logger(), "Step %s done in %.2f s", op->step.name.c_str(),
+            elapsed(op->started));
       }
     } else {
       const bool finished = op->topic_command ? elapsed(op->started) >= op->step.duration
                                               : op->action_terminal && op->action_success;
+      if (finished && !op->finished_at) op->finished_at = Clock::now();
       const bool wait_only = op->step.type == "gripper" && op->step.gripper_wait_only;
       const bool duration_elapsed = op->gripper_sent &&
           elapsed(*op->gripper_sent) >= op->step.duration;
       if (finished && (wait_only ? duration_elapsed : settled(op, true))) {
         op->result.state = ExecutionState::Succeeded;
+        // Total from the step start; the rest is the completion check (target, stationary).
+        RCLCPP_INFO(node_.get_logger(), "Step %s done in %.2f s (%.2f s after the %s ended)",
+            op->step.name.c_str(), elapsed(op->started), elapsed(*op->finished_at),
+            op->topic_command ? "command duration" : "controller action");
         if (op->fallback_tries > 0) {  // which planner made it, after which failures
           std::string failed;
           for (const auto & attempt : op->plan_attempts) {

@@ -14,6 +14,8 @@
 #include <optional>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <utility>
+#include <vector>
 
 namespace demo_1f {
 // Modules are owned by the composition root and must outlive TaskManager.
@@ -168,6 +170,7 @@ private:
   BasketVerdict demo_basket_{BasketVerdict::Unknown};
   std::map<std::string, double> demo_round_stage_seconds_;
   double demo_cell_seconds_{0}, demo_cup_seconds_{0};
+  std::vector<std::pair<std::string, double>> demo_stage_seconds_; // Non-cell stages, in order.
   TimePoint demo_started_{}, demo_stage_entered_{};
 
   using Action = demo_1f::action::Handover;

@@ -107,6 +107,7 @@ private:
     TimePoint cancelling;
     std::optional<TimePoint> gripper_sent;
     std::optional<TimePoint> stable_since;
+    std::optional<TimePoint> finished_at; // Motion/command ended; completion checks follow.
     std::function<void()> cancel_action;
     bool planning_only{false};
     bool action_terminal{false};

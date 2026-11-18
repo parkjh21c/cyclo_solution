@@ -59,6 +59,7 @@ bool CupMotion::start(
   estimated_cup_pose_ = geometry_msgs::msg::PoseStamped();
   result_ = {};
   result_.state = "RUNNING";
+  phase_.clear(); // The previous run's last phase is not timed into this one.
   phase(initial_phase());
   return true;
 }
@@ -79,6 +80,10 @@ bool CupMotion::execute_step(const Step & step) {
 }
 
 void CupMotion::phase(const std::string & name) {
+  if (!phase_.empty() && phase_ != name) {
+    RCLCPP_INFO(rclcpp::get_logger("handover_demo.cup"), "Cup phase %s -> %s after %.2f s",
+        phase_.c_str(), name.c_str(), elapsed(phase_started_));
+  }
   phase_ = name;
   phase_started_ = Clock::now();
   if (result_.state == "RUNNING") {

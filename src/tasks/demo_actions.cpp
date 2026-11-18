@@ -144,6 +144,7 @@ void TaskManager::setup_demo_server() {
           demo_basket_ = BasketVerdict::Unknown;
           demo_round_stage_seconds_.clear();
           demo_cell_seconds_ = demo_cup_seconds_ = 0;
+          demo_stage_seconds_.clear();
           left_return_seconds_ = -1; // A standalone menu 5 return is not this run's.
           demo_started_ = Clock::now();
         } else {
@@ -508,6 +509,16 @@ void TaskManager::finish_demo_now(bool success, const std::string & code,
     RCLCPP_INFO(node_.get_logger(),
         "Demo summary: rounds %d, cell section %.1f s, cup section %.1f s, total %.1f s",
         demo_total_rounds_, demo_cell_seconds_, demo_cup_seconds_, elapsed(demo_started_));
+    if (!demo_stage_seconds_.empty()) {
+      std::string text; // Each from its stage entry (waits for the other arm included).
+      for (const auto & [stage, value] : demo_stage_seconds_) {
+        char part[64];
+        std::snprintf(part, sizeof(part), "%s%s %.1f s", text.empty() ? "" : ", ", stage.c_str(),
+            value);
+        text += part;
+      }
+      RCLCPP_INFO(node_.get_logger(), "Demo stages outside the cell rounds: %s", text.c_str());
+    }
   }
   demo_goal_.reset();
   active_cup_motion_ = nullptr;
@@ -750,6 +761,7 @@ void TaskManager::tick_demo() {
         const double stage_seconds = elapsed(demo_stage_entered_);
         if (is_cell_stage(demo_stage_)) demo_round_stage_seconds_[demo_stage_] = stage_seconds;
         if (is_cup_stage(demo_stage_)) demo_cup_seconds_ += stage_seconds;
+        if (!is_cell_stage(demo_stage_)) demo_stage_seconds_.emplace_back(demo_stage_, stage_seconds);
         demo_completed_stage_ = demo_stage_;
         demo_stage_active_ = false;
         demo_retries_ = 0;
