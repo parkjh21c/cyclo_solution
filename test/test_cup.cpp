@@ -47,8 +47,24 @@ TEST(ApproachGeometry, PreservesHeightAndCenterAssumptionWithoutExtraPadding) {
   const auto & cup = scene.world.collision_objects.front();
   EXPECT_NEAR(cup.primitives.front().dimensions[0], .165, 1e-10);
   EXPECT_NEAR(cup.primitive_poses.front().position.z, .8, 1e-10);
-  EXPECT_NEAR(cup.primitives.front().dimensions[1], .14, 1e-10);
+  EXPECT_NEAR(cup.primitives.front().dimensions[1], .054, 1e-10); // error capped at the margin
   EXPECT_TRUE(scene.robot_state.attached_collision_objects.empty());
+  const auto small = make_approach_scene({}, config, body, .004);
+  EXPECT_NEAR(small.world.collision_objects.front().primitives.front().dimensions[1], .048, 1e-10);
+}
+
+TEST(ApproachGeometry, RejectsInvalidCupSceneSize) {
+  ApproachConfig config;
+  EXPECT_TRUE(config.validate("left").empty());
+  for (double radius : {0., -.01, .31, std::numeric_limits<double>::quiet_NaN()}) {
+    config.scene_radius = radius;
+    EXPECT_FALSE(config.validate("left").empty()) << radius;
+  }
+  config = ApproachConfig{};
+  for (double margin : {-.001, .11, std::numeric_limits<double>::quiet_NaN()}) {
+    config.scene_margin = margin;
+    EXPECT_FALSE(config.validate("left").empty()) << margin;
+  }
 }
 
 TEST(ApproachGeometry, RejectsInvalidConfiguration) {
@@ -1509,7 +1525,8 @@ TEST_F(ApproachFixture, InitialSamplesAreDistinctAndAveragedWithConservativeGeom
   EXPECT_NEAR(motion->approach_target().pose.position.x, .541, 1e-9);
   const auto & cup = scene.scenes[0].world.collision_objects[0];
   EXPECT_NEAR(cup.primitive_poses[0].position.x, .541, 1e-9);
-  EXPECT_NEAR(cup.primitives[0].dimensions[1], .08 + .005 + .097, 1e-9);
+  // The 0.097 m sample error is capped in the scene; the target still uses it.
+  EXPECT_NEAR(cup.primitives[0].dimensions[1], config.scene_radius + config.scene_margin, 1e-9);
   EXPECT_TRUE(executor.steps.empty()); // Still awaiting scene acknowledgement.
 }
 

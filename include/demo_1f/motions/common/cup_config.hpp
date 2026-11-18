@@ -6,6 +6,7 @@
 namespace demo_1f {
 struct ApproachConfig {
   double cup_height{.165}, inner_radius{.045}, wall_thickness{.005};
+  double scene_radius{.044}, scene_margin{.01}; // MoveIt cup: rim outer radius + min(error, margin).
   double max_age{30.0}, observation_timeout{2}, max_position_error{.15}; // Saved head BODY lifetime.
   double travel_scale{.2}, tcp_roll_limit_deg{30}, tcp_pitch_limit_deg{40};
   double tcp_pitch_min_deg{0};

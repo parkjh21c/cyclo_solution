@@ -33,6 +33,7 @@ std::string ApproachConfig::validate(const std::string & arm) const {
   for (double value : {cup_height,
            inner_radius,
            wall_thickness,
+           scene_radius,
            max_age,
            observation_timeout,
            max_position_error,
@@ -40,6 +41,10 @@ std::string ApproachConfig::validate(const std::string & arm) const {
     if (!std::isfinite(value) || value <= 0) {
       return "Approach dimensions, timing and limits must be positive and finite";
     }
+  }
+  if (scene_radius > .3 || !std::isfinite(scene_margin) || scene_margin < 0 ||
+      scene_margin > .1) {
+    return "Cup scene radius must be at most 0.3 m and its margin 0..0.1 m";
   }
   if (cup_source != "head" && cup_source != "wrist_left_init") {
     return "Cup source must be head or wrist_left_init";
@@ -104,6 +109,8 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("offset_z", c.offset_z);
   number("inner_radius", c.inner_radius);
   number("wall_thickness", c.wall_thickness);
+  number("scene_radius", c.scene_radius);
+  number("scene_margin", c.scene_margin);
   number("max_age", c.max_age);
   number("observation_timeout", c.observation_timeout);
   number("max_position_error", c.max_position_error);

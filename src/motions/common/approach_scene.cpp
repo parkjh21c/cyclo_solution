@@ -1,5 +1,6 @@
 #include "demo_1f/motions/common/cup_scene.hpp"
 #include <moveit/collision_detection/collision_matrix.hpp>
+#include <algorithm>
 
 namespace demo_1f {
 moveit_msgs::msg::PlanningScene make_approach_scene(const Config & robot,
@@ -15,9 +16,10 @@ moveit_msgs::msg::PlanningScene make_approach_scene(const Config & robot,
   cup.operation = cup.ADD;
   shape_msgs::msg::SolidPrimitive cylinder;
   cylinder.type = cylinder.CYLINDER;
-  // Explicit test assumption: BODY Z is the cup middle. Keep lateral uncertainty.
+  // BODY Z is the cup middle. The measured rim radius plus at most scene_margin of the error:
+  // the error gate needs >= inner + wall, which would double the cup.
   cylinder.dimensions = {
-      config.cup_height, config.inner_radius + config.wall_thickness + uncertainty};
+      config.cup_height, config.scene_radius + std::min(uncertainty, config.scene_margin)};
   cup.primitives.push_back(cylinder);
   cup.primitive_poses.push_back(body);
   scene.world.collision_objects.push_back(cup);
