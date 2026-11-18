@@ -26,6 +26,7 @@ Needs bringup (robot_description), pick_demo (grasp planner) and move_group; mov
 """
 import argparse
 import contextlib
+import copy
 import math
 import os
 import sys
@@ -146,6 +147,30 @@ def trajectory_values(traj, now):
         values.update(zip(jt.joint_names, p.positions))
         out.append((p.time_from_start.sec + p.time_from_start.nanosec * 1e-9, values))
     return out
+
+
+def ramp(t, start, end, duration):
+    """(position, velocity, acceleration) at t of a rest-to-rest cosine move start -> end over
+    duration s, held at end afterwards."""
+    if t >= duration:
+        return end, 0.0, 0.0
+    w, d = math.pi / duration, end - start
+    return (start + d * (1 - math.cos(w * t)) / 2, d * w * math.sin(w * t) / 2,
+            d * w * w * math.cos(w * t) / 2)
+
+
+def add_joint_ramp(jt, name, start, end, duration):
+    """Adds joint name to a JointTrajectory, moving it start -> end (ramp) along its time."""
+    jt.joint_names = list(jt.joint_names) + [name]
+    for p in jt.points:
+        q, v, a = ramp(p.time_from_start.sec + p.time_from_start.nanosec * 1e-9,
+                       start, end, duration)
+        p.positions = list(p.positions) + [q]
+        if len(p.velocities):
+            p.velocities = list(p.velocities) + [v]
+        if len(p.accelerations):
+            p.accelerations = list(p.accelerations) + [a]
+    return jt
 
 
 def summary_lines(name, samples, chain, joints, tip_below, floor_z):
@@ -525,6 +550,7 @@ def _main(argv, hooks, resources):
     resources.subscribe(JointTrajectory, arm_cfg.controller_topic,
                         lambda m: commands.append(time.monotonic()), 10)
     scene_opening = {}  # finger boxes currently in the scene
+    finger_state = {}  # URDF fingers: gripper joint value collision checks use ('value')
     spent = {'checks': 0, 'check_s': 0.0, 'scene_s': 0.0}  # collision checks and scene updates
 
     def spin(seconds, until=lambda: False, check_cancel=True):
@@ -665,6 +691,8 @@ def _main(argv, hooks, resources):
 
     def fingers_for(opening, force=False):
         """Finger boxes in the scene match this opening (the scene is re-applied if not)."""
+        if args.no_finger_boxes:  # URDF fingers: checked at the joint the gripper opens to
+            finger_state['value'] = joint_for(gripper.table, opening)
         if force or scene_opening.get('value') != round(opening, 4):
             started = time.time()
             if not apply_scene(scene_opening['basket'][0], scene_opening['basket'][1], opening):
@@ -752,15 +780,25 @@ def _main(argv, hooks, resources):
             return None, f'OMPL error {result.error_code.val}'
         return result.planned_trajectory, None
 
-    def first_bad(states, coarse=4):
+    def checked_state(values, finger=None):
+        """state_of plus the gripper joint (finger, else finger_state) for URDF fingers; without
+        it move_group would check the fingers where the gripper is now."""
+        s = state_of(values)
+        value = finger_state.get('value') if finger is None else finger
+        if value is not None:
+            s.joint_state.name = list(arm_joints) + [arm_cfg.gripper_joint]
+            s.joint_state.position = [float(values[n]) for n in arm_joints] + [float(value)]
+        return s
+
+    def first_bad(states, coarse=4, finger=None):
         """(index, 'pct%: link - object', contact pairs) of the first state move_group finds in
         collision, or (None, '', []). Every coarse-th state first (a collision usually shows
-        there), then the rest."""
+        there), then the rest. finger: gripper joint value checked (default finger_state)."""
         order = list(range(0, len(states), coarse)) + [i for i in range(len(states)) if i % coarse]
         for i in order:
             started = time.time()
-            result = call(valid_client, GetStateValidity.Request(robot_state=state_of(states[i]),
-                                                                 group_name=arm_cfg.group))
+            result = call(valid_client, GetStateValidity.Request(
+                robot_state=checked_state(states[i], finger), group_name=arm_cfg.group))
             spent['checks'] += 1
             spent['check_s'] += time.time() - started
             if result is None:
@@ -935,6 +973,30 @@ def _main(argv, hooks, resources):
                                label)
         if result.error_code.val != 1:
             raise RuntimeError(f'{label}: MoveIt execution error code {result.error_code.val}')
+
+    def gripper_in_approach(approach, how, open_joint, now):
+        """approach with the gripper opening during its first gripper_time s (one controller
+        drives both: a separate gripper goal would preempt the arm), or None: open first.
+        The rest was checked at open_joint; the opening part is checked at the wider end."""
+        start = gripper_now()
+        seconds = args.gripper_time
+        seg = approach[0]
+        end = seg.joint_trajectory.points[-1].time_from_start
+        if (not args.no_finger_boxes or how.startswith('OMPL') or not math.isfinite(start)
+                or end.sec + end.nanosec * 1e-9 < 2 * seconds):
+            return None
+        wide = min(start, open_joint)  # smaller joint = wider fingers
+        if wide < open_joint - 1e-3:
+            early = [v for t, v in trajectory_values(seg, now) if t <= seconds + 0.1]
+            bad = first_bad(early, finger=wide)[1]
+            if bad:
+                note(f'gripper opening during the approach collides ({bad}): opening first')
+                return None
+        merged = copy.deepcopy(seg)
+        add_joint_ramp(merged.joint_trajectory, arm_cfg.gripper_joint, start, open_joint, seconds)
+        note(f'gripper {start:.3f} -> {open_joint:.3f} rad during the first {seconds:.1f} s'
+             ' of the approach')
+        return [merged] + approach[1:]
 
     def run_gripper(value, label):
         goal = FollowJointTrajectory.Goal()
@@ -1407,8 +1469,12 @@ def _main(argv, hooks, resources):
               f' {close_joint:.3f} rad ({verification}), speed scaling {args.speed:.2f}')
 
         ask('open the gripper?')
-        with timing.measure('open'):
-            run_gripper(open_joint, 'open')
+        merged = gripper_in_approach(approach, how, open_joint, now)
+        if merged is None:
+            with timing.measure('open'):
+                run_gripper(open_joint, 'open')
+        else:
+            approach = merged
         for i, seg in enumerate(approach, 1):
             ask(f'approach {i}/{len(approach)}?')
             with timing.measure('approach'):
