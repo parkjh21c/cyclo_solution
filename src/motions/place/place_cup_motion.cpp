@@ -97,6 +97,8 @@ bool PlaceCupMotion::open_gripper() {
   s.target = {0.0};
   s.duration = 1.0;
   s.timeout = 8;
+  s.velocity_scale = config_.gripper_scale;
+  s.acceleration_scale = config_.gripper_scale;
   phase(s.name);
   return execute_step(s);
 }

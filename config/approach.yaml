@@ -42,6 +42,7 @@ handover_demo:
       refine_correction_acceleration: 0.12
       refine_lower_distance: 0.03
       refine_gripper_open: 0.0
+      gripper_scale: 1.0
       refine_clearance: 0.05
       refine_wait: 3.0
       refine_view_wait: 1.0

@@ -95,6 +95,9 @@ std::string ApproachConfig::validate(const std::string & arm) const {
       !std::isfinite(refine_gripper_open) || refine_gripper_open < 0 || refine_gripper_open > .8) {
     return "Invalid refinement release or speed settings";
   }
+  if (!std::isfinite(gripper_scale) || gripper_scale <= 0 || gripper_scale > 1) {
+    return "Invalid gripper_scale (0 < scale <= 1)";
+  }
   return {};
 }
 
@@ -135,6 +138,7 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   number("refine_correction_acceleration", c.refine_correction_acceleration);
   number("refine_lower_distance", c.refine_lower_distance);
   number("refine_gripper_open", c.refine_gripper_open);
+  number("gripper_scale", c.gripper_scale);
 
   number("refine_clearance", c.refine_clearance);
   number("refine_wait", c.refine_wait);

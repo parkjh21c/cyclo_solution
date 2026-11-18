@@ -74,6 +74,8 @@ bool PickCupMotion::open_gripper() {
   s.target = {0.0};
   s.duration = 1.0;
   s.timeout = 8;
+  s.velocity_scale = config_.gripper_scale;
+  s.acceleration_scale = config_.gripper_scale;
   phase(s.name);
   return execute_step(s);
 }
@@ -86,6 +88,8 @@ bool PickCupMotion::close_gripper() {
   s.target = {pick_.close_target};
   s.duration = pick_.close_duration;
   s.timeout = 12;
+  s.velocity_scale = config_.gripper_scale;
+  s.acceleration_scale = config_.gripper_scale;
   s.gripper_wait_only = true; // Fingers stop on the cup before the target; grasp unverified.
   phase(s.name);
   return execute_step(s);

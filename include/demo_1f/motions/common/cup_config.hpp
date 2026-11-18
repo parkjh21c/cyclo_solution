@@ -26,6 +26,7 @@ struct ApproachConfig {
   double refine_correction_speed{.20}, refine_correction_acceleration{.12};
   double refine_lower_distance{.03};
   double refine_gripper_open{0.0};
+  double gripper_scale{.15};
   double refine_pitch_ceiling_deg{75.0};
   bool refine_observe{true}; // false: open at the approach pose without wrist rim observation.
   std::string other_arm_return_sequence{}; // motion_sequences name; empty: approach arm moves alone

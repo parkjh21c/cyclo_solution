@@ -289,6 +289,8 @@ bool RefineCupMotion::open_gripper() {
   release.target = {config_.refine_gripper_open};
   release.duration = .6;
   release.timeout = 12;
+  release.velocity_scale = config_.gripper_scale;
+  release.acceleration_scale = config_.gripper_scale;
   phase("OPEN_GRIPPER");
   return execute_step(release);
 }
