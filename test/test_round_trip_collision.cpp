@@ -153,6 +153,20 @@ TEST_F(PourCollisionTest, SharedBoundarySamplesAreCheckedOnlyOnce) {
   EXPECT_EQ(checks.samples, 11u);
 }
 
+TEST_F(PourCollisionTest, CollisionStepChecksFewerSamplesWithBothEnds) {
+  config.collision_check_step = .02; // 0.05 of travel: start, about every 0.02, end
+  const auto checks = validate_round_trip_collision(trajectory, {"right"}, config, *scene);
+  EXPECT_GE(checks.samples, 3u);
+  EXPECT_LE(checks.samples, 5u);
+}
+
+TEST_F(PourCollisionTest, CollisionStepStillFindsAnObstacleWiderThanTheStep) {
+  config.collision_check_step = .005; // the contact window is 0.016 wide
+  obstacle();
+  EXPECT_THROW(validate_round_trip_collision(trajectory, {"right"}, config, *scene),
+      std::runtime_error);
+}
+
 TEST_F(PourCollisionTest, InterpolatedJointBoundsAreStillChecked) {
   auto & points = trajectory.joint_trajectory.points;
   points.back().positions = {.99};

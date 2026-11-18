@@ -346,6 +346,9 @@ void validate_smooth_path(const SmoothPath & path,
     planning_scene::PlanningScene & scene) {
   const auto & trajectory = path.trajectory.joint_trajectory;
   auto state = scene.getCurrentState();
+  // Limits and held joints are checked at every sample; collisions once any joint moved
+  // collision_check_step since the last checked sample, and always at the first and last.
+  std::vector<double> sampled(trajectory.joint_names.size()), checked;
   for (size_t i = 1; i < trajectory.points.size(); ++i) {
     const auto & first = trajectory.points[i - 1];
     const auto & last = trajectory.points[i];
@@ -393,23 +396,32 @@ void validate_smooth_path(const SmoothPath & path,
               std::to_string(bound.jerk));
         }
         state.setVariablePosition(name, value.position);
+        sampled[joint] = value.position;
       }
       state.update();
       if (!state.satisfiesBounds(1e-8)) {
         throw std::runtime_error("Smoothed path exceeds joint bounds");
       }
-      collision_detection::CollisionRequest request;
-      request.group_name = config.coordinated_group;
-      request.contacts = true;
-      request.max_contacts = 10;
-      collision_detection::CollisionResult collision;
-      scene.checkCollision(request, collision, state);
-      if (collision.collision) {
-        std::string pairs;
-        for (const auto & contact : collision.contacts) {
-          pairs += "; " + contact.first.first + " / " + contact.first.second;
+      bool check = config.collision_check_step <= 0 || checked.empty() ||
+                   (i + 1 == trajectory.points.size() && sample == samples);
+      for (size_t joint = 0; !check && joint < sampled.size(); ++joint) {
+        check = std::abs(sampled[joint] - checked[joint]) >= config.collision_check_step;
+      }
+      if (check) {
+        checked = sampled;
+        collision_detection::CollisionRequest request;
+        request.group_name = config.coordinated_group;
+        request.contacts = true;
+        request.max_contacts = 10;
+        collision_detection::CollisionResult collision;
+        scene.checkCollision(request, collision, state);
+        if (collision.collision) {
+          std::string pairs;
+          for (const auto & contact : collision.contacts) {
+            pairs += "; " + contact.first.first + " / " + contact.first.second;
+          }
+          throw PathCollisionError("Smoothed path is in collision" + pairs);
         }
-        throw PathCollisionError("Smoothed path is in collision" + pairs);
       }
       // A giver gripper must stay fixed throughout the entire approach.
       const auto & step = steps[path.point_steps[i]];

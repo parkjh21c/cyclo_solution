@@ -294,6 +294,12 @@ Config load_config(rclcpp::Node & node) {
   c.trajectory_sample_period = number("trajectory_sample_period", c.trajectory_sample_period);
   c.continuous_start_tolerance = number("continuous_start_tolerance", c.continuous_start_tolerance);
   c.side_pair_step = number("side_pair_step", c.side_pair_step);
+  c.collision_check_step = node.declare_parameter<double>(
+      "collision_check_step", c.collision_check_step, descriptor);
+  if (!std::isfinite(c.collision_check_step) || c.collision_check_step < 0 ||
+      c.collision_check_step > 0.02) {
+    throw std::invalid_argument("collision_check_step must be 0 (every sample) to 0.02 rad");
+  }
   c.held_gripper_start_tolerance = node.declare_parameter<double>(
       "held_gripper_start_tolerance", c.held_gripper_start_tolerance, descriptor);
   if (!std::isfinite(c.held_gripper_start_tolerance) || c.held_gripper_start_tolerance < 0) {

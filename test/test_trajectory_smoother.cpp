@@ -155,6 +155,8 @@ TEST_F(SmootherTest, CupAttachmentIsStillCollisionCheckedAfterPreparationSmoothi
   cup.object.primitive_poses = {pose};
   ASSERT_TRUE(scene->processAttachedCollisionObjectMsg(cup));
   EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
+  config.collision_check_step = .005; // fewer collision samples find it too
+  EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
 }
 
 TEST_F(SmootherTest, HeldArmCorridorRejectsAnOmplDetourWithoutCorrectingThePlan) {

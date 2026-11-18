@@ -1,6 +1,8 @@
 #include "demo_1f/runtime/execution/round_trip_collision.hpp"
 #include "demo_1f/runtime/execution/round_trip_path.hpp"
 #include <array>
+#include <cmath>
+#include <vector>
 
 namespace demo_1f {
 namespace {
@@ -62,6 +64,9 @@ RoundTripCollisionChecks validate_round_trip_collision(
   request.contacts = false;
   collision_detection::CollisionResult collision;
   RoundTripCollisionChecks checks;
+  // Collisions once any joint moved collision_check_step since the last check (0 = every
+  // sample), and always at the first and last sample; bounds at every sample.
+  std::vector<double> sampled(indices.size()), checked;
   for (size_t i = 0; i < segments.size(); ++i) {
     const auto & segment = segments[i];
     // The preceding segment already checked each shared boundary with identical PVA.
@@ -75,12 +80,20 @@ RoundTripCollisionChecks validate_round_trip_collision(
           throw std::runtime_error("Nonfinite round-trip interpolated position");
         }
         state.setVariablePosition(indices[joint], position);
+        sampled[joint] = position;
       }
       state.update();
-      ++checks.samples;
       if (!state.satisfiesBounds(1e-8)) {
         throw std::runtime_error("Round-trip path exceeds joint bounds");
       }
+      bool check = config.collision_check_step <= 0 || checked.empty() ||
+                   (i + 1 == segments.size() && sample == segment.samples);
+      for (size_t joint = 0; !check && joint < sampled.size(); ++joint) {
+        check = std::abs(sampled[joint] - checked[joint]) >= config.collision_check_step;
+      }
+      if (!check) continue;
+      checked = sampled;
+      ++checks.samples; // Collision-checked samples.
       collision.clear();
       scene.checkCollision(request, collision, state);
       if (collision.collision) {

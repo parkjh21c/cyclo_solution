@@ -148,6 +148,7 @@ struct Config {
   double continuous_start_tolerance{0.01};
   double held_gripper_start_tolerance{0}; // Zero inherits continuous_start_tolerance.
   double side_pair_step{0.05}; // rad: largest joint change between pair-checked path samples.
+  double collision_check_step{0}; // rad between collision-checked path samples; 0 = every sample.
   std::map<std::string, MotionLimits> motion_limits;
   std::map<std::string, ArmConfig> arms;
   std::map<std::string, MotionSequence> motion_sequences;
