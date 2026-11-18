@@ -63,6 +63,9 @@ BAN_TRIES = 30  # colliding solutions left out of one line before it is given up
 BOUND_SLACK = 0.02  # rad: a grasp option is skipped once its least possible joint motion is
 # this much above the best found (the search grid may undercut it by about that)
 GRIPPER_KEYS = 6  # searched line points solved at a time while looking for a gripper contact
+CHECK_BATCH = 8  # state validity requests in flight at once (first_bad); the service queue
+# keeps 10 (2026-11-18: 16 lost requests, each batch waited out its timeout)
+CHECK_WAIT = 2.0  # s for a batch; requests still unanswered are sent again one at a time
 WALL_SAMPLE = 0.01  # m between gripper positions checked against the basket walls (wall_gap)
 WALL_FINGER_LENGTH = 0.128  # m of finger in wall_gap: URDF rh_p12_rn (MoveIt checks that one)
 COMMAND_WINDOW = 1.0  # s with no arm controller command before a pick moves
@@ -604,7 +607,7 @@ def _main(argv, hooks, resources):
                         lambda m: commands.append(time.monotonic()), 10)
     scene_opening = {}  # finger boxes currently in the scene
     finger_state = {}  # URDF fingers: gripper joint value collision checks use ('value')
-    spent = {'checks': 0, 'check_s': 0.0, 'scene_s': 0.0}  # collision checks and scene updates
+    spent = {'checks': 0, 'check_s': 0.0, 'scene_s': 0.0, 'resent': 0}  # collision checks, scene
 
     def spin(seconds, until=lambda: False, check_cancel=True):
         end = time.monotonic() + seconds
@@ -846,20 +849,40 @@ def _main(argv, hooks, resources):
     def first_bad(states, coarse=4, finger=None):
         """(index, 'pct%: link - object', contact pairs) of the first state move_group finds in
         collision, or (None, '', []). Every coarse-th state first (a collision usually shows
-        there), then the rest. finger: gripper joint value checked (default finger_state)."""
+        there), then the rest. finger: gripper joint value checked (default finger_state).
+        CHECK_BATCH requests are sent at once and read in order (same verdict as one by one)."""
         order = list(range(0, len(states), coarse)) + [i for i in range(len(states)) if i % coarse]
-        for i in order:
+
+        def request(i):
+            return GetStateValidity.Request(robot_state=checked_state(states[i], finger),
+                                            group_name=arm_cfg.group)
+        for at in range(0, len(order), CHECK_BATCH):
+            batch = order[at:at + CHECK_BATCH]
             started = time.time()
-            result = call(valid_client, GetStateValidity.Request(
-                robot_state=checked_state(states[i], finger), group_name=arm_cfg.group))
-            spent['checks'] += 1
-            spent['check_s'] += time.time() - started
-            if result is None:
-                return i, 'no answer from /check_state_validity', []
-            if not result.valid:
-                pairs = sorted({(c.contact_body_1, c.contact_body_2) for c in result.contacts})
-                names = ', '.join(f'{a} - {b}' for a, b in pairs) or 'invalid'
-                return i, f'{i * 100 // max(len(states) - 1, 1)}%: {names}', pairs
+            futures = [valid_client.call_async(request(i)) for i in batch]
+            try:
+                spin(CHECK_WAIT, lambda: all(f.done() for f in futures))
+            finally:
+                for f in futures:
+                    if not f.done():
+                        valid_client.remove_pending_request(f)
+            spent['checks'] += len(batch)
+            try:
+                for i, f in zip(batch, futures):
+                    if f.done():
+                        result = f.result()
+                    else:  # dropped: asked again on its own
+                        spent['resent'] += 1
+                        result = call(valid_client, request(i))
+                    if result is None:
+                        return i, 'no answer from /check_state_validity', []
+                    if not result.valid:
+                        pairs = sorted({(c.contact_body_1, c.contact_body_2)
+                                        for c in result.contacts})
+                        names = ', '.join(f'{a} - {b}' for a, b in pairs) or 'invalid'
+                        return i, f'{i * 100 // max(len(states) - 1, 1)}%: {names}', pairs
+            finally:
+                spent['check_s'] += time.time() - started
         return None, '', []
 
     def bad_states(states, coarse=4):
@@ -1116,8 +1139,10 @@ def _main(argv, hooks, resources):
                         for ln in lines)
             return (f' [{time.time() - started:.1f} s: IK {ik:.1f}, paths {paths:.1f},'
                     f' {spent["checks"] - before["checks"]} checks'
-                    f' {spent["check_s"] - before["check_s"]:.1f}, scene'
-                    f' {spent["scene_s"] - before["scene_s"]:.1f}]')
+                    f' {spent["check_s"] - before["check_s"]:.1f}'
+                    + (f' ({spent["resent"] - before["resent"]} resent)'
+                       if spent['resent'] > before['resent'] else '')
+                    + f', scene {spent["scene_s"] - before["scene_s"]:.1f}]')
         found, why, ompl = attempt(option, rotation, now, lift, deadline, bound, lines)
         if found:
             return (found[0], found[1] + timing()) + found[2:], '', ompl
