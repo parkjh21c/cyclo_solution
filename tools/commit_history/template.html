@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PAGE_TITLE__</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='4' cy='8' r='2.5' fill='%232a78d6'/%3E%3Ccircle cx='12' cy='8' r='2.5' fill='%232a78d6'/%3E%3Cpath d='M6.5 8h3' stroke='%232a78d6' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f6f4;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e3e2dd;
+  --border-strong: #cfcdc6;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --text-3: #7a7973;
+  --accent: #2a78d6;
+  --accent-soft: #e4effc;
+  --accent-text: #1c5cab;
+  --dot: #2a78d6;
+  --dot-dim: #cfd9e6;
+  --add: #1a7f37;
+  --del: #c4332f;
+  --band: rgba(42, 120, 214, 0.10);
+  --row-alt: rgba(0, 0, 0, 0.025);
+  --k-feature: #2a78d6;
+  --k-fix: #eb6834;
+  --k-change: #1baf7a;
+  --k-chore: #eda100;
+  --k-docs: #e87ba4;
+  --k-refactor: #6250d6;
+  --k-remove: #e34948;
+  --k-merge: #8a8983;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --border: #2e2e2b;
+    --border-strong: #42423e;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --text-3: #8f8e86;
+    --accent: #3987e5;
+    --accent-soft: #1d2d42;
+    --accent-text: #86b6ef;
+    --dot: #3987e5;
+    --dot-dim: #33404f;
+    --add: #4ac26b;
+    --del: #f0726e;
+    --band: rgba(57, 135, 229, 0.16);
+    --row-alt: rgba(255, 255, 255, 0.025);
+    --k-feature: #3987e5;
+    --k-fix: #d95926;
+    --k-change: #199e70;
+    --k-chore: #c98500;
+    --k-docs: #d55181;
+    --k-refactor: #9085e9;
+    --k-remove: #e66767;
+    --k-merge: #8f8e86;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --border: #2e2e2b;
+  --border-strong: #42423e;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --text-3: #8f8e86;
+  --accent: #3987e5;
+  --accent-soft: #1d2d42;
+  --accent-text: #86b6ef;
+  --dot: #3987e5;
+  --dot-dim: #33404f;
+  --add: #4ac26b;
+  --del: #f0726e;
+  --band: rgba(57, 135, 229, 0.16);
+  --row-alt: rgba(255, 255, 255, 0.025);
+  --k-feature: #3987e5;
+  --k-fix: #d95926;
+  --k-change: #199e70;
+  --k-chore: #c98500;
+  --k-docs: #d55181;
+  --k-refactor: #9085e9;
+  --k-remove: #e66767;
+  --k-merge: #8f8e86;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard",
+    "Noto Sans KR", "Malgun Gothic", "Segoe UI", Roboto, sans-serif;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; color: inherit; }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+code { background: var(--surface-2); padding: .08em .35em; border-radius: 4px; }
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+
+/* Header */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.top-inner { display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; margin-right: auto; }
+.brand h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; white-space: nowrap; }
+.brand a { font-size: 13px; color: var(--text-3); }
+.tabs { display: flex; gap: 4px; background: var(--surface-2); padding: 3px; border-radius: 9px;
+  overflow-x: auto; max-width: 100%; }
+.tab { border: 0; background: transparent; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+  font-size: 13.5px; color: var(--text-2); white-space: nowrap; }
+.tab .n { color: var(--text-3); margin-left: 4px; font-size: 12px; }
+.tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+  font-weight: 600; }
+.theme-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 8px;
+  width: 34px; height: 32px; cursor: pointer; display: grid; place-items: center; color: var(--text-2); }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0 8px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.stat .k { font-size: 12.5px; color: var(--text-3); }
+.stat .v { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px;
+  font-variant-numeric: tabular-nums; }
+.stat .s { font-size: 12.5px; color: var(--text-2); }
+.stat .v .add { color: var(--add); } .stat .v .del { color: var(--del); }
+.branch-note { font-size: 13px; color: var(--text-3); margin: 6px 0 0; }
+
+section { margin-top: 32px; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px; }
+.sec-head h2 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
+.sec-head p { margin: 0; font-size: 13px; color: var(--text-3); }
+
+/* Feature map */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+.map-card { padding: 12px 0 8px; position: relative; }
+.map-grid-wrap { display: flex; }
+.map-labels { flex: none; }
+.map-labels svg { display: block; }
+.map-scroll { overflow-x: auto; overscroll-behavior-x: contain; flex: 1 1 auto; min-width: 0; }
+.map-scroll svg { display: block; }
+.map-label { font-size: 12.5px; fill: var(--text-2); cursor: pointer; }
+.map-label.active { fill: var(--accent-text); font-weight: 650; }
+.map-label:hover { fill: var(--text); }
+.map-tick { font-size: 11px; fill: var(--text-3); font-variant-numeric: tabular-nums; }
+.map-grid { stroke: var(--border); stroke-width: 1; }
+.map-dot { fill: var(--dot); stroke: var(--surface); stroke-width: 2; transition: fill .15s; }
+.map-dot.dim { fill: var(--dot-dim); }
+.map-col { fill: transparent; cursor: pointer; }
+.map-col:hover, .map-col.sel { fill: var(--band); }
+.map-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 6px 16px 2px;
+  font-size: 12px; color: var(--text-3); }
+.map-legend svg { vertical-align: middle; margin-right: 4px; }
+.tip { position: fixed; z-index: 50; pointer-events: none; max-width: 340px; background: var(--surface);
+  color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.5; box-shadow: 0 6px 24px rgba(0,0,0,.14); opacity: 0;
+  transition: opacity .1s; }
+.tip.on { opacity: 1; }
+.tip .t-sub { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.tip .t-meta { color: var(--text-3); margin-bottom: 6px; }
+.tip table { border-collapse: collapse; width: 100%; }
+.tip td { padding: 1px 0; } .tip td.r { text-align: right; color: var(--text-2);
+  font-variant-numeric: tabular-nums; padding-left: 12px; }
+.tip tr.hl td { color: var(--accent-text); font-weight: 600; }
+
+/* Area cards */
+.areas { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.area { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.area:hover { border-color: var(--border-strong); }
+.area[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset;
+  background: var(--accent-soft); }
+.area .a-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.area .a-name { font-weight: 650; }
+.area .a-count { font-size: 12.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.area .a-desc { font-size: 12.5px; color: var(--text-3); }
+.area .a-last { font-size: 13px; color: var(--text-2); margin-top: 4px; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.area .a-last span { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.area .a-spark { display: block; margin-top: 6px; }
+.area .a-spark rect { fill: var(--dot); }
+.area .a-spark rect.z { fill: var(--border); }
+
+/* Filters */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.search { flex: 1 1 220px; min-width: 0; position: relative; }
+.search input { width: 100%; border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 9px; padding: 8px 12px 8px 32px; font: inherit; font-size: 14px; }
+.search input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+.search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-3); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 4px 11px;
+  font-size: 13px; cursor: pointer; color: var(--text-2); display: inline-flex; align-items: center; gap: 6px; }
+.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+.chip .x { font-size: 14px; line-height: 1; }
+.kdot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.result-count { font-size: 13px; color: var(--text-3); margin: 0 0 8px; }
+
+/* Commit list */
+.day { margin-top: 18px; }
+.day-h { font-size: 13px; color: var(--text-3); font-weight: 600; margin: 0 0 6px 2px;
+  font-variant-numeric: tabular-nums; }
+.commits { display: flex; flex-direction: column; gap: 8px; }
+details.commit { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  scroll-margin-top: 80px; }
+details.commit[open] { border-color: var(--border-strong); box-shadow: var(--shadow); }
+details.commit.flash { animation: flash 1.4s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+summary { list-style: none; cursor: pointer; padding: 12px 14px; display: grid;
+  grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: start; }
+summary::-webkit-details-marker { display: none; }
+summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 12px; }
+.kind { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2);
+  background: var(--surface-2); padding: 2px 8px 2px 7px; border-radius: 6px; white-space: nowrap; margin-top: 1px; }
+.subject { font-weight: 600; line-height: 1.45; }
+.sha { font-family: var(--mono); font-size: 12.5px; color: var(--text-3); white-space: nowrap; margin-top: 2px; }
+.meta { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+  font-size: 12.5px; color: var(--text-3); }
+.meta .add { color: var(--add); font-variant-numeric: tabular-nums; }
+.meta .del { color: var(--del); font-variant-numeric: tabular-nums; }
+.tag { font-size: 12px; color: var(--text-2); border: 1px solid var(--border); border-radius: 6px; padding: 0 7px;
+  background: transparent; cursor: pointer; }
+.tag:hover { border-color: var(--border-strong); color: var(--text); }
+.tag.main { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.body { padding: 0 14px 14px; border-top: 1px solid var(--border); }
+.body p { margin: 10px 0 0; color: var(--text-2); }
+.body ul { margin: 8px 0 0; padding-left: 20px; color: var(--text-2); }
+.body .empty { color: var(--text-3); font-style: italic; }
+.validation { margin-top: 12px; border-left: 3px solid var(--k-change); background: var(--surface-2);
+  border-radius: 0 8px 8px 0; padding: 8px 12px; }
+.validation h4, .files h4 { margin: 0; font-size: 12.5px; color: var(--text-3); font-weight: 600; }
+.validation p { margin: 4px 0 0; color: var(--text); }
+.files { margin-top: 14px; }
+.files table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12.5px; }
+.files td { padding: 4px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+.files td.path { font-family: var(--mono); word-break: break-all; padding-right: 10px; }
+.files td.area-c { color: var(--text-3); white-space: nowrap; padding-right: 10px; }
+.files td.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; width: 1%; padding-left: 6px; }
+.files td.n .add { color: var(--add); } .files td.n .del { color: var(--del); }
+.bar { display: inline-flex; width: 60px; height: 6px; border-radius: 3px; overflow: hidden;
+  background: var(--surface-2); vertical-align: middle; margin-left: 8px; gap: 1px; }
+.bar i { display: block; height: 100%; }
+.bar i.a { background: var(--add); } .bar i.d { background: var(--del); }
+.more-files { font-size: 12.5px; color: var(--text-3); margin-top: 6px; }
+.body .links { margin-top: 12px; font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
+.empty-state { text-align: center; padding: 40px 16px; color: var(--text-3); }
+footer { margin: 48px 0 32px; font-size: 12.5px; color: var(--text-3); text-align: center; }
+
+@media (max-width: 720px) {
+  header.top { position: static; }
+  .brand { flex-wrap: wrap; }
+  .brand h1 { white-space: normal; }
+  .brand a { display: none; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  summary { grid-template-columns: 1fr auto; }
+  summary .kind { grid-column: 1 / 2; justify-self: start; }
+  summary .subject { grid-column: 1 / 3; grid-row: 2; }
+  summary .sha { grid-column: 2 / 3; grid-row: 1; justify-self: end; }
+  .meta { grid-column: 1 / 3; }
+  .files td.area-c { display: none; }
+  .bar { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-inner">
+    <div class="brand"><h1 id="title"></h1><a id="repo-link" target="_blank" rel="noopener"></a></div>
+    <div class="tabs" role="tablist" id="tabs" aria-label="브랜치"></div>
+    <button class="theme-btn" id="theme" type="button" aria-label="밝기 모드 전환" title="밝기 모드 전환">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.5v10a5 5 0 0 1 0-10Z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="stats" id="stats"></div>
+  <p class="branch-note" id="branch-note"></p>
+
+  <section aria-labelledby="map-h">
+    <div class="sec-head">
+      <h2 id="map-h">기능 지도</h2>
+      <p>열 하나가 커밋 하나입니다. 점 크기는 그 영역에서 바뀐 줄 수입니다. 열을 누르면 커밋으로 이동하고, 영역 이름을 누르면 걸러 봅니다.</p>
+    </div>
+    <div class="card map-card">
+      <div class="map-grid-wrap"><div class="map-labels" id="map-labels"></div><div class="map-scroll" id="map-scroll"></div></div>
+      <div class="map-legend" id="map-legend"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="areas-h">
+    <div class="sec-head">
+      <h2 id="areas-h">기능별 변화</h2>
+      <p>영역마다 커밋 수, 변경 줄 수, 마지막 변경입니다. 막대는 시간 순서의 커밋입니다.</p>
+    </div>
+    <div class="areas" id="areas"></div>
+  </section>
+
+  <section aria-labelledby="list-h">
+    <div class="sec-head"><h2 id="list-h">커밋</h2><p>최신 순</p></div>
+    <div class="filters">
+      <label class="search">
+        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M7 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11Zm4-1.5 3.5 3.5"/></svg>
+        <input id="q" type="search" placeholder="제목, 내용, 파일 경로, SHA 검색" aria-label="커밋 검색">
+      </label>
+      <div class="chips" id="kind-chips" aria-label="변경 종류"></div>
+      <div class="chips" id="area-chip"></div>
+    </div>
+    <p class="result-count" id="count" aria-live="polite"></p>
+    <div id="list"></div>
+  </section>
+
+  <footer id="footer"></footer>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script id="history-data" type="application/json">/*__HISTORY_DATA__*/null</script>
+<script>
+(() => {
+  "use strict";
+  const DATA = JSON.parse(document.getElementById("history-data").textContent);
+  const KINDS = {
+    feature: "추가", fix: "수정", change: "개선", refactor: "리팩터",
+    remove: "제거", docs: "문서", chore: "유지보수", merge: "병합",
+  };
+  const AREA = Object.fromEntries(DATA.areas.map((a) => [a.id, a]));
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+  const num = (n) => n.toLocaleString("ko-KR");
+  const dfDay = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
+  const dfTime = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const dfShort = new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric" });
+  const dfFull = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "numeric", day: "numeric" });
+  const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const KIND_ORDER = Object.keys(KINDS);
+
+  const state = { branch: null, area: null, kind: null, q: "", sel: null };
+
+  // ---------- URL state ----------
+  function readHash() {
+    const p = new URLSearchParams(location.hash.slice(1));
+    state.branch = DATA.branches.some((b) => b.name === p.get("b")) ? p.get("b") : DATA.branches[0].name;
+    state.area = AREA[p.get("a")] ? p.get("a") : null;
+    state.kind = KINDS[p.get("k")] ? p.get("k") : null;
+    state.q = p.get("q") || "";
+    state.sel = p.get("c") || null;
+  }
+  function writeHash() {
+    const p = new URLSearchParams();
+    p.set("b", state.branch);
+    if (state.area) p.set("a", state.area);
+    if (state.kind) p.set("k", state.kind);
+    if (state.q) p.set("q", state.q);
+    if (state.sel) p.set("c", state.sel.slice(0, 7));
+    history.replaceState(null, "", "#" + p.toString());
+  }
+
+  // ---------- theme ----------
+  try { const t = localStorage.getItem("history-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  $("theme").addEventListener("click", () => {
+    const dark = document.documentElement.dataset.theme
+      ? document.documentElement.dataset.theme === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = dark ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("history-theme", next); } catch (e) {}
+    renderMap();
+  });
+
+  const branch = () => DATA.branches.find((b) => b.name === state.branch);
+
+  // ---------- derived ----------
+  function areaStats(commits) {
+    const m = new Map();
+    commits.forEach((c, i) => {
+      c.areas.forEach((a) => {
+        if (!m.has(a.id)) m.set(a.id, { id: a.id, commits: 0, lines: 0, last: null, first: null, idx: [] });
+        const s = m.get(a.id);
+        s.commits += 1;
+        s.lines += a.lines;
+        if (!s.last) s.last = c;   // commits are newest first
+        s.first = c;
+        s.idx.push(i);
+      });
+    });
+    return [...m.values()].sort((a, b) => b.commits - a.commits || b.lines - a.lines);
+  }
+
+  function matches(c) {
+    if (state.area && !c.areas.some((a) => a.id === state.area)) return false;
+    if (state.kind && c.kind !== state.kind) return false;
+    if (state.q) {
+      const q = state.q.toLowerCase();
+      const hay = [c.sha, c.subject, c.author, ...c.description.flat(), ...c.validation.flat(),
+        ...c.files.map((f) => f.path)].join("\n").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }
+
+  // ---------- header / stats ----------
+  function renderHeader() {
+    $("title").textContent = `${DATA.title} 커밋 히스토리`;
+    if (DATA.repoUrl) {
+      $("repo-link").href = DATA.repoUrl;
+      $("repo-link").textContent = DATA.repoUrl.replace(/^https:\/\//, "");
+    }
+    $("tabs").innerHTML = DATA.branches.map((b) =>
+      `<button class="tab" role="tab" data-b="${esc(b.name)}" aria-selected="${b.name === state.branch}">${esc(b.name)}<span class="n">${b.commits.length}</span></button>`).join("");
+    $("footer").innerHTML = `${esc(dfFull.format(new Date(DATA.generated)))} ${esc(dfTime.format(new Date(DATA.generated)))} 생성 · ` +
+      `커밋 메시지와 변경 파일로 자동 생성한 페이지입니다.`;
+  }
+
+  function renderStats() {
+    const cs = branch().commits;
+    const authors = new Map();
+    cs.forEach((c) => authors.set(c.author, (authors.get(c.author) || 0) + 1));
+    const top = [...authors.entries()].sort((a, b) => b[1] - a[1]);
+    const add = cs.reduce((s, c) => s + c.add, 0), del = cs.reduce((s, c) => s + c.del, 0);
+    const first = new Date(cs[cs.length - 1].date), last = new Date(cs[0].date);
+    const days = Math.max(1, Math.round((last - first) / 864e5) + 1);
+    $("stats").innerHTML = [
+      ["커밋", num(cs.length), (() => { const m = cs.filter((c) => c.kind === "merge").length; return m ? `병합 ${m}개 포함` : `하루 평균 ${(cs.length / days).toFixed(1)}개`; })()],
+      ["기간", `${days}일`, `${dfFull.format(first)} – ${dfFull.format(last)}`],
+      ["기여자", num(top.length), top.slice(0, 2).map(([n, k]) => `${esc(n)} ${k}`).join(", ")],
+      ["변경 줄", `<span class="add">+${num(add)}</span> <span class="del">−${num(del)}</span>`, `파일 ${num(new Set(cs.flatMap((c) => c.files.map((f) => f.path))).size)}개`],
+    ].map(([k, v, s]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+    const head = cs[0];
+    $("branch-note").innerHTML = `<b>${esc(state.branch)}</b> 최신 커밋 ` +
+      `${linkSha(head.sha)} · ${esc(head.subject)}`;
+  }
+
+  const linkSha = (sha) => DATA.repoUrl
+    ? `<a class="mono" href="${esc(DATA.repoUrl)}/commit/${sha}" target="_blank" rel="noopener">${sha.slice(0, 7)}</a>`
+    : `<span class="mono">${sha.slice(0, 7)}</span>`;
+
+  // ---------- feature map ----------
+  const tip = $("tip");
+  function showTip(html, ev) {
+    tip.innerHTML = html;
+    tip.classList.add("on");
+    const pad = 14, r = tip.getBoundingClientRect();
+    let x = ev.clientX + pad, y = ev.clientY + pad;
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+    if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+    tip.style.left = Math.max(8, x) + "px";
+    tip.style.top = Math.max(8, y) + "px";
+  }
+  const hideTip = () => tip.classList.remove("on");
+
+  function renderMap() {
+    const cs = branch().commits.slice().reverse(); // oldest → newest, left → right
+    const rows = areaStats(branch().commits).map((s) => s.id);
+    const box = $("map-scroll");
+    const padR = 16, top = 26, rowH = 32;
+    const longest = Math.max(...rows.map((id) => [...AREA[id].label].reduce((w, ch) => w + (ch.charCodeAt(0) > 0x2fff ? 13 : 7.4), 0)));
+    const LW = Math.ceil(Math.min(innerWidth < 720 ? 110 : 160, longest + 26));
+    const avail = Math.max(200, box.clientWidth) - padR;
+    const colW = Math.max(16, Math.min(44, avail / cs.length));
+    const W = colW * cs.length + padR;
+    const H = top + rowH * rows.length + 6;
+    const maxR = Math.min(colW / 2 - 1.5, rowH / 2 - 3);
+    const radius = (lines) => Math.min(maxR, 2.5 + Math.sqrt(lines) * 0.42);
+    const filtered = new Set(branch().commits.filter(matches).map((c) => c.sha));
+
+    let L = `<svg width="${LW}" height="${H}" viewBox="0 0 ${LW} ${H}" aria-hidden="false">`;
+    let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="기능 영역별 커밋 분포">`;
+    rows.forEach((id, r) => {
+      const y = top + r * rowH;
+      if (r % 2 === 0) {
+        L += `<rect x="0" y="${y}" width="${LW}" height="${rowH}" fill="var(--row-alt)"/>`;
+        s += `<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="var(--row-alt)"/>`;
+      }
+      L += `<text class="map-label${state.area === id ? " active" : ""}" data-area="${id}" x="14" y="${y + rowH / 2 + 4}" role="button" tabindex="0">${esc(AREA[id].label)}</text>`;
+    });
+    L += `</svg>`;
+    $("map-labels").innerHTML = L;
+    // day ticks
+    let prevKey = null, prevX = -1e9;
+    cs.forEach((c, i) => {
+      const d = new Date(c.date), k = dayKey(d), x = i * colW;
+      if (k !== prevKey) {
+        s += `<line class="map-grid" x1="${x}" x2="${x}" y1="${top - 6}" y2="${H - 6}"/>`;
+        if (x - prevX >= 40 && x < W - 30) { s += `<text class="map-tick" x="${x + 3}" y="${top - 10}">${esc(dfShort.format(d))}</text>`; prevX = x; }
+        prevKey = k;
+      }
+    });
+    // column hit targets (behind dots, still receive hover through pointer-events on dots: none)
+    cs.forEach((c, i) => {
+      const x = i * colW;
+      s += `<rect class="map-col${state.sel === c.sha ? " sel" : ""}" data-i="${i}" x="${x}" y="${top - 4}" width="${colW}" height="${H - top}" rx="4"/>`;
+    });
+    cs.forEach((c, i) => {
+      const cx = i * colW + colW / 2;
+      const dim = !filtered.has(c.sha);
+      c.areas.forEach((a) => {
+        const r = rows.indexOf(a.id);
+        if (r < 0) return;
+        const cy = top + r * rowH + rowH / 2;
+        const isDim = dim || (state.area && state.area !== a.id);
+        s += `<circle class="map-dot${isDim ? " dim" : ""}" cx="${cx}" cy="${cy}" r="${radius(a.lines).toFixed(1)}" pointer-events="none"/>`;
+      });
+    });
+    s += `</svg>`;
+    box.innerHTML = s;
+
+    $("map-labels").querySelectorAll(".map-label").forEach((el) => {
+      el.addEventListener("click", () => setArea(el.dataset.area));
+      el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setArea(el.dataset.area); } });
+    });
+    box.querySelectorAll(".map-col").forEach((el) => {
+      const c = cs[+el.dataset.i];
+      el.addEventListener("mousemove", (ev) => {
+        const rowsHtml = c.areas.map((a) =>
+          `<tr class="${a.id === state.area ? "hl" : ""}"><td>${esc(AREA[a.id].label)}</td><td class="r">${num(a.lines)}줄 · 파일 ${a.files}</td></tr>`).join("");
+        showTip(`<div class="t-sub">${esc(c.subject)}</div><div class="t-meta">${c.short} · ${esc(dfFull.format(new Date(c.date)))} ${esc(dfTime.format(new Date(c.date)))} · ${KINDS[c.kind]}</div><table>${rowsHtml || '<tr><td>변경 파일 없음</td></tr>'}</table>`, ev);
+      });
+      el.addEventListener("mouseleave", hideTip);
+      el.addEventListener("click", () => { hideTip(); openCommit(c.sha); });
+    });
+
+    // size legend
+    const ex = [10, 100, 1000].map((l) => {
+      const r = radius(l);
+      return `<span><svg width="${2 * maxR + 4}" height="${2 * maxR + 4}" aria-hidden="true"><circle cx="${maxR + 2}" cy="${maxR + 2}" r="${r}" fill="var(--dot)"/></svg>${num(l)}줄</span>`;
+    }).join("");
+    $("map-legend").innerHTML = `<span>점 크기</span>${ex}<span>· 흐린 점은 현재 필터에 맞지 않는 커밋</span>`;
+  }
+
+  // ---------- area cards ----------
+  function renderAreas() {
+    const cs = branch().commits;
+    const n = cs.length;
+    const stats = areaStats(cs);
+    const sw = 200, sh = 18;
+    $("areas").innerHTML = stats.map((s) => {
+      const a = AREA[s.id];
+      const bw = sw / n;
+      const set = new Set(s.idx);
+      let bars = "";
+      for (let i = 0; i < n; i++) {
+        const idx = n - 1 - i; // oldest left
+        const on = set.has(idx);
+        const h = on ? Math.max(4, Math.min(sh, 4 + Math.sqrt(cs[idx].areas.find((x) => x.id === s.id).lines) * 0.6)) : 2;
+        bars += `<rect class="${on ? "" : "z"}" x="${(i * bw).toFixed(2)}" y="${sh - h}" width="${Math.max(1, bw - 1).toFixed(2)}" height="${h.toFixed(1)}" rx="1"/>`;
+      }
+      return `<button class="area" type="button" data-area="${s.id}" aria-pressed="${state.area === s.id}">
+        <span class="a-top"><span class="a-name">${esc(a.label)}</span><span class="a-count">커밋 ${s.commits} · ${num(s.lines)}줄</span></span>
+        <span class="a-desc">${esc(a.description)}</span>
+        <svg class="a-spark" width="100%" height="${sh}" viewBox="0 0 ${sw} ${sh}" preserveAspectRatio="none" aria-hidden="true">${bars}</svg>
+        <span class="a-last"><span>${esc(dfShort.format(new Date(s.last.date)))}</span> ${esc(s.last.subject)}</span>
+      </button>`;
+    }).join("");
+    $("areas").querySelectorAll(".area").forEach((el) => el.addEventListener("click", () => setArea(el.dataset.area)));
+  }
+
+  // ---------- filters ----------
+  function renderFilters() {
+    const cs = branch().commits;
+    const counts = {};
+    cs.forEach((c) => (counts[c.kind] = (counts[c.kind] || 0) + 1));
+    $("kind-chips").innerHTML = KIND_ORDER.filter((k) => counts[k]).map((k) =>
+      `<button class="chip" type="button" data-kind="${k}" aria-pressed="${state.kind === k}"><span class="kdot" style="background:var(--k-${k})"></span>${KINDS[k]} ${counts[k]}</button>`).join("");
+    $("kind-chips").querySelectorAll(".chip").forEach((el) => el.addEventListener("click", () => {
+      state.kind = state.kind === el.dataset.kind ? null : el.dataset.kind;
+      update();
+    }));
+    $("area-chip").innerHTML = state.area
+      ? `<button class="chip" type="button" aria-pressed="true" id="clear-area" aria-label="영역 필터 해제">${esc(AREA[state.area].label)} <span class="x" aria-hidden="true">×</span></button>`
+      : "";
+    if (state.area) $("clear-area").addEventListener("click", () => setArea(state.area));
+    if ($("q").value !== state.q) $("q").value = state.q;
+  }
+
+  // ---------- commit list ----------
+  function commitHtml(c) {
+    const date = new Date(c.date);
+    const main = c.areas[0] && c.areas[0].id;
+    const tags = c.areas.map((a) =>
+      `<button type="button" class="tag${a.id === main ? " main" : ""}" data-area="${a.id}" title="${esc(AREA[a.id].label)} 영역만 보기">${esc(AREA[a.id].label)}</button>`).join("");
+    return `<details class="commit" id="c-${c.sha}" data-sha="${c.sha}"${state.sel === c.sha ? " open" : ""}>
+      <summary>
+        <span class="kind"><span class="kdot" style="background:var(--k-${c.kind})"></span>${KINDS[c.kind]}</span>
+        <span class="subject">${inline(c.subject)}</span>
+        <span class="sha">${c.short}</span>
+        <span class="meta"><span>${esc(c.author)}</span><span>${esc(dfTime.format(date))}</span>
+          ${c.files.length ? `<span><span class="add">+${num(c.add)}</span> <span class="del">−${num(c.del)}</span></span>` : ""}
+          ${tags}</span>
+      </summary>
+      <div class="body" data-lazy="1"></div>
+    </details>`;
+  }
+
+  function bodyHtml(c) {
+    let h = "";
+    if (c.description.length) {
+      h += c.description.map((para) => {
+        const items = para.filter((l) => /^\s*([-*•]|\d+[.)])\s+/.test(l));
+        if (items.length === para.length) return `<ul>${para.map((l) => `<li>${inline(l.replace(/^\s*([-*•]|\d+[.)])\s+/, ""))}</li>`).join("")}</ul>`;
+        return `<p>${para.map(inline).join("<br>")}</p>`;
+      }).join("");
+    } else {
+      h += `<p class="empty">본문 설명이 없는 커밋입니다.</p>`;
+    }
+    if (c.validation.length) {
+      h += `<div class="validation"><h4>검증</h4>${c.validation.map((p) => `<p>${p.map(inline).join("<br>")}</p>`).join("")}</div>`;
+    }
+    if (c.files.length) {
+      const LIMIT = 30;
+      const max = Math.max(...c.files.map((f) => f.add + f.del), 1);
+      const rows = c.files.slice(0, LIMIT).map((f) => {
+        const t = f.add + f.del, w = 60 * Math.sqrt(t / max);
+        const bar = `<span class="bar" aria-hidden="true"><i class="a" style="width:${t ? (w * f.add / t).toFixed(1) : 0}px"></i><i class="d" style="width:${t ? (w * f.del / t).toFixed(1) : 0}px"></i></span>`;
+        const n = f.binary ? "바이너리" : `<span class="add">+${num(f.add)}</span> <span class="del">−${num(f.del)}</span>`;
+        return `<tr><td class="path">${esc(f.path)}</td><td class="area-c">${esc(AREA[f.area].label)}</td><td class="n">${n}${bar}</td></tr>`;
+      }).join("");
+      h += `<div class="files"><h4>변경 파일 ${c.files.length}개</h4><table>${rows}</table>${c.files.length > LIMIT ? `<div class="more-files">외 ${c.files.length - LIMIT}개 파일</div>` : ""}</div>`;
+    }
+    if (DATA.repoUrl) {
+      h += `<div class="links"><a href="${esc(DATA.repoUrl)}/commit/${c.sha}" target="_blank" rel="noopener">GitHub에서 diff 보기 ↗</a>` +
+        `<a href="${esc(DATA.repoUrl)}/tree/${c.sha}" target="_blank" rel="noopener">이 시점의 코드 ↗</a></div>`;
+    }
+    return h;
+  }
+
+  function fillBody(det) {
+    const b = det.querySelector(".body");
+    if (b.dataset.lazy) {
+      const c = branch().commits.find((x) => x.sha === det.dataset.sha);
+      b.innerHTML = bodyHtml(c);
+      delete b.dataset.lazy;
+    }
+  }
+
+  function renderList() {
+    const cs = branch().commits.filter(matches);
+    const total = branch().commits.length;
+    $("count").textContent = cs.length === total ? `커밋 ${total}개` : `커밋 ${total}개 중 ${cs.length}개`;
+    if (!cs.length) {
+      $("list").innerHTML = `<div class="card empty-state">조건에 맞는 커밋이 없습니다.</div>`;
+      return;
+    }
+    let html = "", prev = null;
+    cs.forEach((c) => {
+      const d = new Date(c.date), k = dayKey(d);
+      if (k !== prev) {
+        if (prev !== null) html += `</div></div>`;
+        html += `<div class="day"><h3 class="day-h">${esc(dfDay.format(d))}</h3><div class="commits">`;
+        prev = k;
+      }
+      html += commitHtml(c);
+    });
+    html += `</div></div>`;
+    $("list").innerHTML = html;
+    $("list").querySelectorAll("details.commit").forEach((det) => {
+      if (det.open) fillBody(det);
+      det.addEventListener("toggle", () => {
+        if (det.open) {
+          fillBody(det);
+          state.sel = det.dataset.sha;
+        } else if (state.sel === det.dataset.sha) {
+          state.sel = null;
+        }
+        writeHash();
+        highlightColumn();
+      });
+    });
+    $("list").querySelectorAll(".tag").forEach((el) => el.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      setArea(el.dataset.area, true);
+    }));
+  }
+
+  function highlightColumn() {
+    const cs = branch().commits.slice().reverse();
+    $("map-scroll").querySelectorAll(".map-col").forEach((el) => {
+      el.classList.toggle("sel", cs[+el.dataset.i].sha === state.sel);
+    });
+  }
+
+  // ---------- actions ----------
+  function setArea(id, force) {
+    state.area = !force && state.area === id ? null : id;
+    update();
+  }
+
+  function openCommit(sha) {
+    const c = branch().commits.find((x) => x.sha === sha);
+    if (c && !matches(c)) { state.area = null; state.kind = null; state.q = ""; }
+    state.sel = sha;
+    update();
+    const det = document.getElementById("c-" + sha);
+    if (det) {
+      det.open = true;
+      fillBody(det);
+      det.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+      det.classList.remove("flash"); void det.offsetWidth; det.classList.add("flash");
+    }
+  }
+
+  function update() {
+    writeHash();
+    renderHeader();
+    renderStats();
+    renderMap();
+    renderAreas();
+    renderFilters();
+    renderList();
+  }
+
+  $("tabs").addEventListener("click", (ev) => {
+    const t = ev.target.closest(".tab");
+    if (!t || t.dataset.b === state.branch) return;
+    state.branch = t.dataset.b;
+    state.area = null; state.kind = null; state.sel = null;
+    update();
+  });
+  let qTimer;
+  $("q").addEventListener("input", (ev) => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { state.q = ev.target.value.trim(); writeHash(); renderMap(); renderList(); }, 120);
+  });
+
+  let lastW = 0;
+  new ResizeObserver(() => {
+    const w = $("map-scroll").clientWidth;
+    if (Math.abs(w - lastW) > 4) { lastW = w; renderMap(); }
+  }).observe($("map-scroll"));
+
+  readHash();
+  // Expand a short SHA from the URL to the full one.
+  if (state.sel) {
+    const hit = branch().commits.find((c) => c.sha.startsWith(state.sel));
+    state.sel = hit ? hit.sha : null;
+  }
+  update();
+  if (state.sel) openCommit(state.sel);
+  else {
+    const scroll = $("map-scroll");
+    scroll.scrollLeft = scroll.scrollWidth; // newest commits in view on narrow screens
+  }
+})();
+</script>
+</body>
+</html>

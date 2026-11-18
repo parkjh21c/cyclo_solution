@@ -8,3 +8,4 @@ ai_worker/
 models/*.engine
 *.before-*
 .ruff_cache/
+_site/
