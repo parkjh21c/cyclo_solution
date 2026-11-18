@@ -63,6 +63,8 @@ BAN_TRIES = 30  # colliding solutions left out of one line before it is given up
 BOUND_SLACK = 0.02  # rad: a grasp option is skipped once its least possible joint motion is
 # this much above the best found (the search grid may undercut it by about that)
 GRIPPER_KEYS = 6  # searched line points solved at a time while looking for a gripper contact
+WALL_SAMPLE = 0.01  # m between gripper positions checked against the basket walls (wall_gap)
+WALL_FINGER_LENGTH = 0.128  # m of finger in wall_gap: URDF rh_p12_rn (MoveIt checks that one)
 COMMAND_WINDOW = 1.0  # s with no arm controller command before a pick moves
 COMMAND_DRAIN = 0.05  # s always spun before that check so queued commands are counted
 
@@ -136,6 +138,57 @@ def finger_boxes(task, opening):
         boxes += [((w, t, high - low), np.array([0.0, side * (opening / 2 + t / 2), z]))
                   for side in (1, -1)]
     return boxes
+
+
+def box_gaps(a_center, a_rot, a_half, b_centers, b_rot, b_half):
+    """Separating-axis gap (m) of box a to box b at each of b_centers (one rotation; b_half one
+    row or one per center): > 0 = apart by at least that, <= 0 = overlapping."""
+    axes = np.vstack([a_rot.T, b_rot.T, np.cross(a_rot.T[:, None], b_rot.T[None]).reshape(9, 3)])
+    norms = np.linalg.norm(axes, axis=1)
+    axes = axes[norms > 1e-9] / norms[norms > 1e-9, None]
+    reach = (np.abs(axes @ a_rot) @ a_half)[None] + np.atleast_2d(b_half) @ np.abs(axes @ b_rot).T
+    return (np.abs((np.asarray(b_centers) - a_center) @ axes.T) - reach).max(axis=1)
+
+
+def finger_layers(task, opening, length=WALL_FINGER_LENGTH):
+    """[(half dims, center)] of the two fingers from the tip to length up in the end effector
+    frame (y closes, z up the fingers): the tip taper, then the rest at its widest."""
+    below = task['tip_below_end_effector']
+    tip, thick, taper = task['finger_tip'], task['finger_thick'], task['taper_height']
+    width, root = task['finger_width'], task.get('finger_width_root') or task['finger_width']
+    out = []
+    for low, high in ((0.0, taper), (taper, length)):
+        t = min(tip + (thick - tip) * high / taper, task['finger_max'])
+        w = width + (root - width) * min(high / length, 1.0)
+        out += [(np.array([w, t, high - low]) / 2,
+                 np.array([0.0, side * (opening / 2 + t / 2), -below + (low + high) / 2]))
+                for side in (1, -1)]
+    return out
+
+
+def wall_gap(option, rotation, lift, basket, task):
+    """Least gap (m) between the finger boxes and the basket walls from the hover down to the
+    grasp and lift m up; < 0 = a finger overlaps a wall there (MoveIt likely rejects it)."""
+    grasp = option['position']
+    points = line_points(option['hover'], grasp, WALL_SAMPLE)
+    if lift:
+        points += line_points(grasp, grasp + np.array([0.0, 0.0, lift]), WALL_SAMPLE)[1:]
+    points = np.array(points)
+    layers = finger_layers(task, option['opening'])
+    centers = np.vstack([points + rotation @ offset for _, offset in layers])
+    halves = np.vstack([np.tile(half, (len(points), 1)) for half, _ in layers])
+    position, base = basket
+    gaps = [box_gaps(position + base @ center, base @ wall_rot, np.array(dims) / 2, centers,
+                     rotation, halves).min()
+            for name, dims, center, wall_rot in basket_boxes(task) if name.startswith('wall')]
+    return min(gaps) if gaps else math.inf
+
+
+def wall_order(entries, gaps):
+    """(entries with those of an option whose wall gap is < 0 moved to the end, both parts in
+    their order; index where those start). Only the order changes: MoveIt still decides."""
+    clear = [e for e in entries if gaps.get(e[1], math.inf) >= 0]
+    return clear + [e for e in entries if gaps.get(e[1], math.inf) < 0], len(clear)
 
 
 def trajectory_values(traj, now):
@@ -1154,28 +1207,41 @@ def _main(argv, hooks, resources):
         of the least turn is solved and the least joint motion of those that pass wins (user
         2026-11-02); past the window the first that passes. Within one, the least joint motion
         (try_approach). Backups (narrow openings, rolls) only when no normal one passes: first
-        that passes, in ffw_grasp's order (2026-11-03). OMPL only after every one failed so."""
+        that passes, in ffw_grasp's order (2026-11-03). OMPL only after every one failed so.
+        In each tier, options whose fingers overlap a basket wall (wall_gap) go last, and are
+        not tried once one passed."""
         deadline = time.time() + args.budget
         normal, backups = search_tiers(options, home_rot)
+        started, gaps = time.time(), {}
+        for oi, o in enumerate(options):
+            try:
+                gaps[oi] = wall_gap(o, o['rotation'], lift, scene_opening['basket'], task)
+            except Exception as e:  # ordering only: a failed estimate keeps the option in place
+                print(f'note: wall gap of {o["label"]}: {e}')
+        late = sum(1 for g in gaps.values() if g < 0)
+        log.append(f'wall order: {late} of {len(options)} options overlap a wall in the box'
+                   f' model: tried last ({time.time() - started:.2f} s)')
         retry, best = [], None
         for tier, entries in (('normal', normal), ('backup', backups)):
             if best is not None or time.time() > deadline:
                 break
+            entries, clear = wall_order(entries, gaps)
             if tier == 'backup' and entries:
                 log.append(f'backups: {len(entries) // 2} options')
             window = entries[0][0] + math.radians(args.turn_window) if entries else 0.0
-            for turn, oi, flip in entries:
+            for k, (turn, oi, flip) in enumerate(entries):
                 if hooks:
                     hooks.check_cancel()
-                if best is not None and (tier == 'backup' or turn > window):
+                if best is not None and (tier == 'backup' or turn > window or k >= clear):
                     break
                 if time.time() > deadline:
                     log.append(f'search budget {args.budget:.0f} s used up')
                     break
                 o = options[oi]
                 rotation = o['rotation'] @ FLIP if flip else o['rotation']
+                gap = f', wall gap {gaps[oi] * 1000:+.0f} mm' if oi in gaps else ''
                 name = (f'{o["label"]}{" flip" if flip else ""}'
-                        f' (TCP turn {math.degrees(turn):.0f} deg)')
+                        f' (TCP turn {math.degrees(turn):.0f} deg{gap})')
                 found, why, ompl = try_approach(o, rotation, now, lift, deadline,
                                                 best[2][4] if best else math.inf)
                 log.append(f'{name}: ' + (f'OK - {found[1]}' if found else why))
