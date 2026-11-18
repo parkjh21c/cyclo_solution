@@ -38,7 +38,7 @@ from ffw_pick.config import (
     ArmConfig, COMMAND_LINE, from_file, PickConfig, require, ros_parameters)
 from ffw_pick.gripper import joint_for, load_gripper
 from ffw_pick.hold import (
-    HOLD_MAX_AGE, HOLD_TIMEOUT, joints_moved, PathStateWatch, wait_for_release)
+    HOLD_MAX_AGE, HOLD_TIMEOUT, joints_moved, wait_for_release)
 from ffw_pick.kinematics import Chain, FLIP, pose_parts, tip, urdf_links
 from ffw_pick.resources import PickResources
 import numpy as np
@@ -64,8 +64,6 @@ BOUND_SLACK = 0.02  # rad: a grasp option is skipped once its least possible joi
 GRIPPER_KEYS = 6  # searched line points solved at a time while looking for a gripper contact
 COMMAND_WINDOW = 1.0  # s with no arm controller command before a pick moves
 COMMAND_DRAIN = 0.05  # s always spun before that check so queued commands are counted
-LEFT_ARM_JOINTS = tuple(f'arm_l_joint{i}' for i in range(1, 8))
-PATH_DEPENDENCY_JOINTS = LEFT_ARM_JOINTS  # the head moves independently and is not in the path
 
 
 def pick_result_code(status, hooks=None):
@@ -481,15 +479,12 @@ def _main(argv, hooks, resources):
               f' {args.task}, calibration {args.calibration}; joint limits {limits[0]:.2f} rad/s'
               f' {limits[1]:.2f} rad/s^2, fingertip {limits[2]:.2f} m/s')
     from rclpy.qos import qos_profile_sensor_data
-    path_watch = {'active': None}
 
     def receive_joints(message):
         got.setdefault('joints', {}).update(zip(message.name, message.position))
         now = time.monotonic()
         for name in message.name:
             got.setdefault('joint_times', {})[name] = now
-        if path_watch['active'] is not None:
-            path_watch['active'].update(got['joints'], got['joint_times'], now)
     resources.subscribe(JointState, '/joint_states', receive_joints, qos_profile_sensor_data)
     for name in ('grasp', 'hover', 'basket'):
         resources.subscribe(PoseStamped, f'{args.ns}/{name}_pose',
@@ -1235,8 +1230,8 @@ def _main(argv, hooks, resources):
 
     hold_state = {'done': False}  # hold_before_motion: held once in this request
 
-    def hold_and_recheck(option, approach, lift, now, passive_watch):
-        """Hold until released, then recheck: '' (move on), 'again' or 'stop'."""
+    def hold_and_recheck(option, now):
+        """Hold until released, then check the right arm: '' (move on), 'again' or 'stop'."""
         hooks.begin_hold()  # before PICK_HOLD: a release sent on that feedback must find it holding
         try:
             hooks.phase('PICK_HOLD', f'Path ready ({option["label"]}); waiting for release')
@@ -1253,22 +1248,11 @@ def _main(argv, hooks, resources):
         if verdict == 'replan':
             note(f'hold: released after more than {HOLD_MAX_AGE:.0f} s: observing again')
             return 'again'
-        hooks.phase('PICK_RECHECK', 'Checking the held path in the current scene')
         moved = joints_moved(now, current(), chain.moving(), pick_cfg.state_tolerance)
         if moved:
             note('hold: the arm moved while held (' + ', '.join(moved) + '): observing again')
             return 'again'
-        if not passive_watch.update(got.get('joints', {}), got.get('joint_times', {}),
-                                    time.monotonic()):
-            note('hold: left arm unchanged since the search; path recheck skipped')
-            return ''
-        fingers_for(option['opening'])
-        for seg in [s for s in approach + [lift] if s is not None]:
-            bad = bad_states(traj_states(seg, now))
-            if bad:
-                note(f'hold: the held path collides now ({bad}): observing again')
-                return 'again'
-        note('hold: arm and path unchanged; moving')
+        note('hold: right arm unchanged; moving (left arm not rechecked)')
         return ''
 
     def pick_held():
@@ -1324,10 +1308,6 @@ def _main(argv, hooks, resources):
         # the controller topic is watched from here: the search time counts toward the check
         commands.clear()
         watched_from = time.monotonic()
-        # Any passive joint change or feedback gap invalidates the held collision checks.
-        passive_watch = PathStateWatch(got.get('joints', {}), got.get('joint_times', {}),
-                                       PATH_DEPENDENCY_JOINTS, pick_cfg.state_tolerance, watched_from)
-        path_watch['active'] = passive_watch
         options = read_options()
 
         for client, name in ((scene_client, '/apply_planning_scene'),
@@ -1392,10 +1372,9 @@ def _main(argv, hooks, resources):
         if hooks is not None and getattr(hooks, 'hold', False) and not hold_state['done']:
             hold_state['done'] = True  # one hold per request: later passes move on
             # commands during the hold are recorded (spin): the watch keeps its search start
-            verdict = hold_and_recheck(option, approach, lift, now, passive_watch)
+            verdict = hold_and_recheck(option, now)
             if verdict:
                 return verdict
-        path_watch['active'] = None
         # bringup's cyclo_teleoperation publishes there only while teleoperating: count messages
         spin(max(command_wait(watched_from, time.monotonic()), COMMAND_DRAIN))
         arrived = recent_commands(commands, time.monotonic())

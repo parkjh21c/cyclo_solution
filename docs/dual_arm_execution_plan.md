@@ -46,7 +46,7 @@ Decision: the head is not an arm resource and is outside the ownership policy. I
 - Each task commands its head pose when it starts and never waits for or checks the result. The LOOK stages and the standalone head wait are removed.
 - A head command failure is logged and does not stop, fault or delay the arm operation.
 - Head moves are not planned or collision-checked; the targets are the fixed look_* poses.
-- The prepared pick watches the left arm only again; head movement no longer forces a path recheck.
+- On release, left arm changes are not checked (user decision 2026-11-18); only right arm movement and a hold over 10 s cause re-observation.
 - The initial pose sequence commands the head itself through MoveIt, so no separate head command is sent for it.
 
 This step is implemented before 2-B2 so the stage machine that 2-B2 connects to has no head stages.
@@ -75,7 +75,7 @@ The target flow is the user's task table: the arms act together only in the thre
 
 Head routing applies to both the full demo and standalone executed actions. PickDynamixel and PourCup use look_right; ApproachCup, RefineCup, PickCup and PlaceCup use look_left; initialization, handovers, withdrawal and return use look_middle. Preview requests do not move the head. Fresh stationary feedback at the configured target skips a redundant head move. Otherwise the head must finish successfully before the requested arm operation starts, and cancellation during head preparation never starts the arm operation. Head stages retain the last completed task checkpoint, including pick-only resume, and their cell-round durations are logged separately.
 
-Prepared pick paths watch the left arm and head from search through release. Movement beyond tolerance, missing feedback or a feedback gap invalidates the collision-check skip, including movement followed by a return to the original pose. The existing current-scene path recheck and re-observation behavior then applies. The prepare_pick_during_refine setting remains unchanged. Current source contains 56 demo tests and 14 hold tests. On 2026-11-17 the user built this change in the container and reported `test_demo_task` 56 passed (67.65 s), `test_cup` 110, `test_handover` 118 and `test_hold.py` 14 passed, after correcting one test's withdraw arm, widening two wait loops and raising the `test_demo_task` ctest timeout from 60 to 120 s. The user also confirmed the head directions on the robot; timing with the head stages has not been measured.
+On release, prepared pick paths do not check left arm changes (user decision 2026-11-18); only right arm movement and a hold over 10 s cause re-observation. The prepare_pick_during_refine setting remains unchanged. Current source contains 56 demo tests and 6 hold tests. On 2026-11-17 the user built this change in the container and reported `test_demo_task` 56 passed (67.65 s), `test_cup` 110, `test_handover` 118 and `test_hold.py` 14 passed, after correcting one test's withdraw arm, widening two wait loops and raising the `test_demo_task` ctest timeout from 60 to 120 s. The user also confirmed the head directions on the robot; timing with the head stages has not been measured.
 
 The user reports a successful container build and all 25 `test_arm_coordination` cases passing for the revised 2-A policy before 2-B1. This is supplied validation evidence, not a run performed during this change. The three warned single-line `if` statements now have braces; their expectations are unchanged.
 
