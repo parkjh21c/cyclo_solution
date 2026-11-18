@@ -68,6 +68,7 @@ private:
   bool demo_prepare_deferred_{false}; // REFINE_CUP early pick waits for the side to arrive.
   bool cup_side_{false};              // The standalone cup action owns side failure and operator cancel handling.
   TimePoint side_started_at_{}, side_wait_started_{};
+  std::string side_wait_arm_; // Arm whose return the stage waited for (logged at the end).
   double side_return_seconds_{-1};
   bool demo_left_return_{true};      // demo.left_return_after_refine
   bool side_left_return_{false};     // The side slot's last start was the left return.

@@ -175,7 +175,7 @@ void TaskManager::start_demo_stage() {
   if (side_waiting_) {
     side_waiting_ = false;
     RCLCPP_INFO(node_.get_logger(), "%s waited %.1f s for the %s arm return",
-        demo_stage_.c_str(), elapsed(side_wait_started_), side_->active_arm().c_str());
+        demo_stage_.c_str(), elapsed(side_wait_started_), side_wait_arm_.c_str());
   }
   std::string reason;
   if (demo_stage_ == "INITIALIZE_ROBOT" || demo_stage_ == "RETURN_INITIAL") {
@@ -660,6 +660,7 @@ void TaskManager::tick_demo() {
       if (!side_waiting_) {
         side_waiting_ = true;
         side_wait_started_ = Clock::now();
+        side_wait_arm_ = side_->active_arm(); // The next return may start before the log.
         RCLCPP_INFO(node_.get_logger(), "%s waits for the %s arm return", demo_stage_.c_str(),
             side_->active_arm().c_str());
       }
