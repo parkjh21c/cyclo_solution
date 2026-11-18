@@ -252,8 +252,19 @@ class PickTiming:
         return f'pick timing: {", ".join(parts)}, total {total:.1f} s, result {result}'
 
 
-def first_gripper_hit(line, contacts, chunk=GRIPPER_KEYS):
-    """(searched point, contacts(q[0])) at the first point not '', else None (or line.why)."""
+def first_gripper_hit(line, contacts, chunk=GRIPPER_KEYS, first=0):
+    """(searched point, contacts(q)) at the first point not '', else None (or line.why).
+    One IK solution per point is enough (pose-only contacts): when Line.probe finds one for
+    every point, points from line point first on are checked before the ones above it and a
+    no-hit line is left for path() to solve; otherwise the line is solved in order as before."""
+    probe = None if line.why else line.probe()
+    if probe is not None:  # every point reachable: a full solve would not set line.why
+        order = sorted(range(len(line.keys)), key=lambda n: line.keys[n] < first)
+        for n in order:
+            text = contacts(probe[n])
+            if text:
+                return line.keys[n], text
+        return None
     checked = 0
     while not line.why and checked < len(line.keys):
         line.solve(checked + chunk)  # a few points at a time: stops at the first hit
@@ -966,14 +977,14 @@ def _main(argv, hooks, resources):
             o['hover'] = o['position'] + task['hover_height'] * o['rotation'][:, 2]
         return out
 
-    def gripper_blocked(line, base):
-        """(point index, contacts) of the first searched point where the gripper itself hits
-        the scene (one IK solution tells: every other one puts it in the same place), or None.
-        Solves the line on the way (all of it unless the gripper hits); see line.why after."""
+    def gripper_blocked(line, base, first=0):
+        """(point index, contacts) of a searched point where the gripper itself hits the scene
+        (one IK solution tells: every other one puts it in the same place), or None. Points
+        from first on are checked first (first_gripper_hit); see line.why after."""
         def contacts(q):
             i, text, pairs = first_bad([with_arm(base, q)], coarse=1)
             return text.split(': ', 1)[-1] if i is not None and pose_only(pairs) else ''
-        return first_gripper_hit(line, contacts)
+        return first_gripper_hit(line, contacts, first=first)
 
     def try_approach(option, rotation, now, lift, deadline, bound=math.inf):
         """(found, why, ompl) for one grasp option at one gripper yaw. found = (segments, how,
@@ -1012,6 +1023,7 @@ def _main(argv, hooks, resources):
             up = line_points(grasp, grasp + np.array([0.0, 0.0, lift]), LINE_STEP)[1:] \
                 if lift else []
             g = len(approach) - 1
+            hover_at = len(line_points(begin, option['hover'], LINE_STEP)) - 1
             line = Line(arm, now, approach + up, rotation)
             lines.append(line)
             blocked = None
@@ -1019,7 +1031,8 @@ def _main(argv, hooks, resources):
                 least = line.start_bound(start)
                 if least - BOUND_SLACK >= bound:
                     return None, f'skipped: move to the {target} at least {least:.2f} rad', ompl
-                blocked = gripper_blocked(line, now)  # solves the line as line.solve() did
+                # a hit from the hover down rejects this option without the line from the hover
+                blocked = gripper_blocked(line, now, first=hover_at)
             if line.why:
                 why = line.why
                 continue  # the hover is only for a line with no IK solution from the above
@@ -1028,7 +1041,7 @@ def _main(argv, hooks, resources):
                 why = (f'the gripper hits {contacts} at'
                        f' {point * 100 // max(len(line.points) - 1, 1)}% of the line from the'
                        f' {target} (every arm solution)')
-                if point < len(line_points(begin, option['hover'], LINE_STEP)) - 1:
+                if point < hover_at:
                     continue  # only above the hover: from the hover may pass
                 return None, why, ompl
             for _ in range(START_TRIES):

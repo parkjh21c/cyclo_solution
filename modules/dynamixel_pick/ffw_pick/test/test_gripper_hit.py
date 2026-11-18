@@ -10,12 +10,16 @@ GRASP = np.array([0.42, -0.25, 0.80])
 WALL = 'basket_wall_x+ - gripper_r_rh_p12_rn_r2'
 
 
-def wall_below(z):
-    """Fake pose-only contact: the fingertip under z touches a wall."""
+def wall_where(hits):
+    """Fake pose-only contact: the fingertip z for which hits(z) touches a wall."""
     def contacts(q):
         tip = CHAIN.fk({**NOW, **dict(zip(ARM_JOINTS, q))})[:3, 3]
-        return WALL if tip[2] < z else ''
+        return WALL if hits(tip[2]) else ''
     return contacts
+
+
+def wall_below(z):
+    return wall_where(lambda tip_z: tip_z < z)
 
 
 def old_hit(line, contacts):
@@ -43,20 +47,46 @@ class TestFirstGripperHit(unittest.TestCase):
         self.assertEqual(after.why, '')
         self.assertLess(len(after.layers), len(after.keys))  # stopped early
 
-    def test_no_hit_solves_every_point_bit_identically(self):
+    def test_no_hit_leaves_the_solve_to_path_with_the_same_result(self):
         before, after = self.lines(grasp_line(GRASP, ROTATION))
         self.assertIsNone(old_hit(before, wall_below(0.0)))
         self.assertIsNone(first_gripper_hit(after, wall_below(0.0)))
-        self.assertEqual(len(after.layers), len(before.layers))
-        for (qa, ba), (qb, bb) in zip(after.layers, before.layers):
-            np.testing.assert_array_equal(qa, qb)
-            np.testing.assert_array_equal(ba, bb)
-        # the same path follows
+        self.assertEqual(after.why, '')
+        self.assertEqual(len(after.layers), 1)  # only the constructor's first point
         start = np.array([NOW[n] for n in ARM_JOINTS])
         pa, why_a = after.path(start, False, 0.15)
         pb, why_b = before.path(start, False, 0.15)
         self.assertEqual((why_a, why_b), ('', ''))
         np.testing.assert_array_equal(pa, pb)
+        self.assertEqual(len(after.layers), len(before.layers))
+        for (qa, ba), (qb, bb) in zip(after.layers, before.layers):
+            np.testing.assert_array_equal(qa, qb)
+            np.testing.assert_array_equal(ba, bb)
+
+    def test_points_from_first_are_checked_first(self):
+        # walls at the top of the approach and near the grasp: from first on, the lower hit
+        hits = wall_where(lambda tip_z: tip_z > 0.96 or tip_z < 0.85)
+        before, after = self.lines(grasp_line(GRASP, ROTATION))
+        first = 20  # the hover of the 20 cm approach in 5 mm steps
+        top = old_hit(Line(ARM, NOW, before.points, ROTATION), hits)
+        self.assertLess(top[0], first)  # in line order the top hit comes first
+        before.solve()
+        expected = next((k, hits(q[0])) for k, (q, _) in zip(before.keys, before.layers)
+                        if k >= first and hits(q[0]))
+        self.assertEqual(first_gripper_hit(after, hits, first=first), expected)
+        self.assertEqual(first_gripper_hit(Line(ARM, NOW, before.points, ROTATION), hits), top)
+
+    def test_probe_solutions_are_among_the_full_solve(self):
+        line = Line(ARM, NOW, grasp_line(GRASP, ROTATION), ROTATION)
+        probe = line.probe()
+        self.assertIsNotNone(probe)
+        line.solve()
+        for q, (rows, _) in zip(probe, line.layers):
+            self.assertTrue(np.isclose(rows, q, atol=1e-9).all(axis=1).any())
+
+    def test_probe_gives_up_where_a_point_is_out_of_reach(self):
+        far = Line(ARM, NOW, line_points(GRASP, [1.2, -0.25, 0.80], 0.01), np.eye(3))
+        self.assertIsNone(far.probe())
 
     def test_no_solution_later_wins_over_an_earlier_hit(self):
         # a hit on the way down, then points out of reach: a full solve said 'no IK solution'

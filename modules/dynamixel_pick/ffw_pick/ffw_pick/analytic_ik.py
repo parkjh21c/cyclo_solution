@@ -125,6 +125,21 @@ class ArmIK:
         cuts = np.searchsorted(owner[order], np.arange(1, len(positions)))
         return [(r, b) for r, b in zip(np.split(rows[order], cuts), np.split(branch[order], cuts))]
 
+    def solve_any(self, values, positions, rotation, stride=REACH_STRIDE):
+        """[(7,) joints or None]: one solution inside the limits per position at every
+        stride-th q7 grid value. That grid is part of solve()'s, so solve() finds it too."""
+        positions = np.asarray(positions, float).reshape(-1, 3)
+        q7 = self.q7[::stride]
+        q, state = self.branches(values, np.repeat(positions, len(q7), axis=0), rotation,
+                                 np.tile(q7, len(positions)))
+        q = q.reshape(8, len(positions), len(q7), 7)
+        inside = (state == 2).reshape(8, len(positions), len(q7))
+        out = []
+        for n in range(len(positions)):
+            k, c = np.nonzero(inside[:, n])
+            out.append(q[k[0], n, c[0]] if len(k) else None)
+        return out
+
     def solve_at(self, values, position, rotation, q7):
         """solve() at the given q7 values only."""
         q, state = self.branches(values, position, rotation, q7)
@@ -345,6 +360,14 @@ class Line:
                 where = i * 100 // max(len(self.points) - 1, 1)
                 self.why = f'no IK solution at {where}% of the line'
                 break
+
+    def probe(self, stride=REACH_STRIDE):
+        """One solution per searched point (ArmIK.solve_any) without solving the line, or None
+        when a point has none on that grid (only solve() can tell then)."""
+        started = time.time()
+        found = self.arm.solve_any(self.values, self.points[self.keys], self.rotation, stride)
+        self.times['ik'] += time.time() - started
+        return None if any(q is None for q in found) else found
 
     def reachable(self, stride=REACH_STRIDE):
         """True if every searched point not solved yet is inside the limits at a q7 grid value
