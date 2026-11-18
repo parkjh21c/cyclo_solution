@@ -22,7 +22,8 @@
     # and its fingertip rotation ranks the grasp options
     home: [1.05, 0.0, 0.0, -2.27, 0.0, 0.35, 0.0]
     home_tolerance: 0.05  # rad: --release-home starts only this close to home
-    joint_margin: 0.003  # rad kept from the URDF joint limits by every IK solution
+    joint_margin: 0.05  # rad kept from the URDF joint limits by every IK solution (was 0.003:
+    # chosen paths sat 0.003-0.004 rad from a limit, where tracking error can cross it)
     # joint speed is the URDF limit (4.8 rad/s); these two match ffw_moveit_config
     max_acceleration: 5.0  # rad/s^2, joint_limits.yaml
     max_fingertip_speed: 1.0  # m/s, pilz_cartesian_limits.yaml max_trans_vel

@@ -6,8 +6,9 @@
     lift: 0.15  # m straight up after closing
     speed: 0.35  # velocity scaling 0-1
     accel: 0.35  # acceleration scaling 0-1
-    turn_window: 15.0  # deg: options turned up to this much more than the least turned one are
-    # all solved, the least joint motion wins
+    turn_window: 5.0  # deg: options turned up to this much more than the least turned one are
+    # all solved, the least joint motion wins (was 15; 2026-11-18 the extra ones cost
+    # 1.6-2.0 s each and never won)
     budget: 30.0  # s of approach search before giving up (stops early on success)
     hold: 2.0  # s held up before --put-back or --release-home
     home_lift: 0.10  # m straight up before --home and --release-home go to HOME (0 = none)
