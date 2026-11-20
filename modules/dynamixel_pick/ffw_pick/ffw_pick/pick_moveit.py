@@ -52,6 +52,7 @@ TASK_KEYS = ('basket_length', 'basket_width', 'basket_height', 'basket_wall', 'f
              'basket_inner_top', 'basket_inner_floor', 'table_margin', 'table_thick',
              'tip_below_end_effector', 'finger_tip', 'finger_thick', 'taper_height',
              'finger_max', 'finger_width', 'finger_overlap', 'finger_layers', 'hover_height')
+WALL_BOXES = ('wall', 'slope')  # basket_boxes ids the fingers are checked against
 LINE_STEP = 0.005  # m between IK points on a straight line
 JOINT_STEP = 0.02  # rad between states of a joint-space path
 LINE_JUMP = 0.15  # rad: a bigger joint change between line points = wrist flip
@@ -91,30 +92,35 @@ def pick_result_code(status, hooks=None):
 
 def basket_boxes(task):
     """[(id, dims, center, rotation)] in the basket frame (x long side, z up, origin = outer
-    bottom center on the table). Walls are slabs sloping from the inner floor size (on the floor)
-    to the inner rim size (at the rim), continued on the same slope up to basket_wall_height."""
+    bottom center on the table). Each side: a vertical wall_* (inner face at the inner rim size,
+    floor to basket_wall_height) and a slope_* slab from the inner floor edge (on the floor) up to
+    the inner rim size at basket_slope_height; both thick inward by basket_wall_margin."""
     length, width, height = task['basket_length'], task['basket_width'], task['basket_height']
     wall, floor = task['basket_wall'], task['floor_height']
     wall_height = task.get('basket_wall_height', height)
+    slope_height = task.get('basket_slope_height', height)
     margin = task.get('basket_wall_margin', 0.0)  # walls grow inward by this much
     wall += margin
     top_l, top_w = (v - 2 * margin for v in task['basket_inner_top'])
     floor_l, floor_w = (v - 2 * margin for v in task['basket_inner_floor'])
     boxes = [('floor', (length, width, floor), np.array([0.0, 0.0, floor / 2]), np.eye(3))]
     up = np.array([0.0, 0.0, 1.0])
-    for name, out, top_half, floor_half, span in (
-            ('wall_x+', np.array([1.0, 0, 0]), top_l / 2, floor_l / 2, width),
-            ('wall_x-', np.array([-1.0, 0, 0]), top_l / 2, floor_l / 2, width),
-            ('wall_y+', np.array([0, 1.0, 0]), top_w / 2, floor_w / 2, length),
-            ('wall_y-', np.array([0, -1.0, 0]), top_w / 2, floor_w / 2, length)):
+    sides = (('x+', np.array([1.0, 0, 0]), top_l / 2, floor_l / 2, width),
+             ('x-', np.array([-1.0, 0, 0]), top_l / 2, floor_l / 2, width),
+             ('y+', np.array([0, 1.0, 0]), top_w / 2, floor_w / 2, length),
+             ('y-', np.array([0, -1.0, 0]), top_w / 2, floor_w / 2, length))
+    for side, out, top_half, _, span in sides:
+        center = out * (top_half + wall / 2) + up * (floor + wall_height) / 2
+        boxes.append((f'wall_{side}', (wall, span, wall_height - floor), center,
+                      np.column_stack((out, np.cross(up, out), up))))
+    for side, out, top_half, floor_half, span in sides:
         bottom = out * floor_half + up * floor
-        rise = (wall_height - floor) / (height - floor)
-        top = out * (floor_half + (top_half - floor_half) * rise) + up * wall_height
+        top = out * top_half + up * slope_height
         z = (top - bottom) / np.linalg.norm(top - bottom)
-        x = out - (out @ z) * z
+        x = out - (out @ z) * z  # slab thickness points outward and down, under the slope
         x /= np.linalg.norm(x)
         rotation = np.column_stack((x, np.cross(z, x), z))
-        boxes.append((name, (wall, span, float(np.linalg.norm(top - bottom))),
+        boxes.append((f'slope_{side}', (wall, span, float(np.linalg.norm(top - bottom))),
                       (bottom + top) / 2 + x * wall / 2, rotation))
     margin, thick = task['table_margin'], task['table_thick']
     table = (length + 2 * margin, width + 2 * margin, thick)
@@ -183,7 +189,7 @@ def wall_gap(option, rotation, lift, basket, task):
     position, base = basket
     gaps = [box_gaps(position + base @ center, base @ wall_rot, np.array(dims) / 2, centers,
                      rotation, halves).min()
-            for name, dims, center, wall_rot in basket_boxes(task) if name.startswith('wall')]
+            for name, dims, center, wall_rot in basket_boxes(task) if name.startswith(WALL_BOXES)]
     return min(gaps) if gaps else math.inf
 
 
@@ -723,7 +729,7 @@ def _main(argv, hooks, resources):
             return False
         acm = result.scene.allowed_collision_matrix
         known = len(acm.entry_names)
-        walls = [f'basket_{n}' for n, *_ in basket_boxes(task) if n.startswith('wall')]
+        walls = [f'basket_{n}' for n, *_ in basket_boxes(task) if n.startswith(WALL_BOXES)]
         for name in finger_parts + walls:
             if name not in acm.entry_names:
                 for row in acm.entry_values:

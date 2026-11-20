@@ -33,7 +33,7 @@
     link_half_y: 0.039
     link_x_min: -0.060
     link_x_max: 0.148
-    known_short: 0.034  # DYNAMIXEL 28.5 x 34 x 46.5 mm (user 2026-10-29): opening never
+    known_short: 0.034  # DYNAMIXEL 28.5 x 34 x 46.5 mm
     known_long: 0.0465  # narrower than the real object (measured tops are eroded)
     max_roll_deg: 25.0  # only when every upright grasp is blocked (thick finger top vs a wall)
     roll_step_deg: 5.0
@@ -59,15 +59,13 @@
     veil_jump: 0.008  # m  object edges lands in empty space
     min_depth: 0.07
     max_depth: 1.0
-    # blue basket outer size (notes/PLAN.md): its pose is measured from the rim each plan
-    # (wrist2 recordings: rim 321-332 x 239-243 mm)
+    # blue basket outer size
     basket_length: 0.32
     basket_width: 0.24
-    basket_height: 0.075
-    # the walls slope from the inner size at the floor to the inner size at the rim (ruler, user
-    # 2026-10-30; depth could not see the near walls' inner faces), floor thickness = floor_height
-    basket_inner_top: [0.295, 0.210]
-    basket_inner_floor: [0.260, 0.180]
+    basket_height: 0.035
+    # inner size at the rim and at the flat floor (v2 drawing), floor thickness = floor_height
+    basket_inner_top: [0.300, 0.220]
+    basket_inner_floor: [0.2523, 0.1723]
     wall_band: 0.0  # wall points block the fingers again (user 2026-11-02, fingers hit the basket);
     # 0.02 = wall points within 2 cm of the model do not block them (walls bulge, depth wavers)
     basket_rim_band: 0.008  # rim = blue points this close to the top level
@@ -79,8 +77,10 @@
     basket_cut_margin: 0.01  # m: an extent this much under the known size may be cut off ...
     basket_cut_window: 0.02  # m: ... when rim points this near its end touch the image border
     # MoveIt scene for ffw_pick (not grasp_planner parameters)
+    # v2 basket (2026-11-20 drawing): 40 deg slope floor edge -> rim size at 25 mm, then vertical
     basket_wall: 0.010
-    basket_wall_height: 0.08  # scene walls a little above the real rim (user 2026-10-30)
+    basket_wall_height: 0.035  # vertical wall top = real rim (user 2026-11-20)
+    basket_slope_height: 0.025  # slope_* slabs end at the rim size this high
     basket_wall_margin: 0.0  # scene walls this much thicker inward (measured basket error)
     table_margin: 0.0  # table box reaches this far beyond the basket
     table_thick: 0.04

@@ -1,13 +1,14 @@
 import math
 import unittest
 
-from ffw_pick.pick_moveit import box_gaps, finger_layers, wall_gap, wall_order
+from ffw_pick.pick_moveit import basket_boxes, box_gaps, finger_layers, wall_gap, wall_order
 import numpy as np
 
-# dynamixel_top_grasp.yaml + robot_calibration.yaml values (2026-11-18)
-TASK = {'basket_length': 0.32, 'basket_width': 0.24, 'basket_height': 0.075,
-        'basket_wall': 0.010, 'floor_height': 0.005, 'basket_inner_top': [0.295, 0.210],
-        'basket_inner_floor': [0.260, 0.180], 'basket_wall_height': 0.08,
+# dynamixel_top_grasp.yaml + robot_calibration.yaml values (2026-11-20, v2 35 mm basket)
+TASK = {'basket_length': 0.32, 'basket_width': 0.24, 'basket_height': 0.035,
+        'basket_wall': 0.010, 'floor_height': 0.005, 'basket_inner_top': [0.300, 0.220],
+        'basket_inner_floor': [0.2523, 0.1723], 'basket_wall_height': 0.035,
+        'basket_slope_height': 0.025,
         'basket_wall_margin': 0.0, 'table_margin': 0.0, 'table_thick': 0.04,
         'tip_below_end_effector': 0.0, 'finger_tip': 0.005, 'finger_thick': 0.025,
         'taper_height': 0.030, 'finger_max': 0.030, 'finger_width': 0.015,
@@ -24,6 +25,33 @@ def option(x, y, opening=0.06, rotation=np.eye(3)):
     position = np.array([x, y, 0.025])  # tip 2 cm above the floor
     return {'position': position, 'rotation': rotation, 'opening': opening,
             'hover': position + TASK['hover_height'] * rotation[:, 2]}
+
+
+def inner_face(task, name):
+    """(low end, high end, angle from horizontal deg) of a basket box's inner face center line."""
+    dims, center, rotation = next(b[1:] for b in basket_boxes(task) if b[0] == name)
+    face = np.array(center) - rotation[:, 0] * dims[0] / 2
+    along = rotation[:, 2] * dims[2] / 2
+    return face - along, face + along, 90 - math.degrees(math.acos(abs(rotation[2, 2])))
+
+
+class TestBasketBoxes(unittest.TestCase):
+
+    def test_v2_drawing_section(self):
+        low, high, angle = inner_face(TASK, 'wall_x+')
+        np.testing.assert_allclose(low, [0.15, 0, 0.005], atol=1e-9)
+        np.testing.assert_allclose(high, [0.15, 0, 0.035], atol=1e-9)
+        self.assertAlmostEqual(angle, 90.0)
+        low, high, angle = inner_face(TASK, 'slope_y-')
+        np.testing.assert_allclose(low, [0, -0.08615, 0.005], atol=1e-9)
+        np.testing.assert_allclose(high, [0, -0.11, 0.025], atol=1e-9)
+        self.assertAlmostEqual(angle, 40.0, places=0)
+
+    def test_outer_face_stays_with_margin(self):
+        task = dict(TASK, basket_wall_margin=0.002)
+        dims, center, _ = next(b[1:] for b in basket_boxes(task) if b[0] == 'wall_y+')
+        self.assertAlmostEqual(center[1] - dims[0] / 2, 0.108)  # inner face 2 mm in
+        self.assertAlmostEqual(center[1] + dims[0] / 2, 0.12)  # outer size unchanged
 
 
 class TestBoxGaps(unittest.TestCase):
@@ -52,7 +80,8 @@ class TestWallGap(unittest.TestCase):
 
     def test_center_clear_near_wall_overlaps(self):
         self.assertGreater(wall_gap(option(0.0, 0.0), np.eye(3), 0.15, BASKET, TASK), 0.03)
-        self.assertLess(wall_gap(option(0.135, 0.0), np.eye(3), 0.15, BASKET, TASK), 0.0)
+        self.assertGreater(wall_gap(option(0.135, 0.0), np.eye(3), 0.15, BASKET, TASK), 0.0)
+        self.assertLess(wall_gap(option(0.145, 0.0), np.eye(3), 0.15, BASKET, TASK), 0.0)
 
     def test_closing_across_the_near_wall_is_worse(self):
         along = wall_gap(option(0.0, 0.07), np.eye(3), 0.0, BASKET, TASK)  # closes along y
