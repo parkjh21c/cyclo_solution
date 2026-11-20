@@ -4,8 +4,8 @@
     ns: /ffw_grasp/right_wrist  # ffw_grasp grasp_planner namespace (plan service, poses)
     above: 0.10  # m: the joint path ends this far behind the hover along the finger axis
     lift: 0.15  # m straight up after closing
-    speed: 0.35  # velocity scaling 0-1
-    accel: 0.35  # acceleration scaling 0-1
+    speed: 0.25  # velocity scaling 0-1
+    accel: 0.2  # acceleration scaling 0-1
     turn_window: 5.0  # deg: options turned up to this much more than the least turned one are
     # all solved, the least joint motion wins (was 15; 2026-11-18 the extra ones cost
     # 1.6-2.0 s each and never won)
