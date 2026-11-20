@@ -1593,7 +1593,11 @@ def _main(argv, hooks, resources):
         held = holding('closed') if hooks is None else False
         # from where the arm really stopped: MoveIt refuses a start 0.01 rad off the plan
         with timing.measure('lift'):
-            lift, lift_how = plan_line(current(), lift_end, rotation, 'lift')
+            finger_walls(True)  # fingers already hold the wall: contact is expected while lifting
+            try:
+                lift, lift_how = plan_line(current(), lift_end, rotation, 'lift')
+            finally:
+                finger_walls(args.allow_finger_walls)  # move_group keeps the matrix: restore it
         ask(f'lift {args.lift * 100:.0f} cm ({lift_how})?')
         with timing.measure('lift'):
             run_trajectory(lift, 'lift')
