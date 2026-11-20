@@ -262,6 +262,7 @@ public:
   }
 
   bool start_sequence(const std::vector<Step> & sequence) override {
+    if (!sequence_supported) return false; // As the port default: nothing started.
     continuous.push_back(sequence);
     steps.insert(steps.end(), sequence.begin(), sequence.end());
     current = {ExecutionState::Running, {}, {}, sequence.front().name};
@@ -303,6 +304,7 @@ public:
   }
 
   bool stationary = true;
+  bool sequence_supported = true;
   int paired_calls = 0;
   ExecutionResult current;
   std::vector<Step> steps;
@@ -476,6 +478,17 @@ protected:
       motion->tick();
     }
     ASSERT_EQ(context->snapshot().phase, desired) << motion->result().detail;
+  }
+
+  // initial_pose sequence: the left arm joint at 0 (feedback() reports arm_joint).
+  void initial_pose_at_zero() {
+    Step observe;
+    observe.name = "observe_robot";
+    observe.type = "joint";
+    observe.arm = "left";
+    observe.target = {0};
+    observe.tolerance = .02;
+    robot.motion_sequences["initial_pose"].steps = {observe};
   }
 
   void shoulder_for_pick() {
@@ -2055,6 +2068,185 @@ TEST_F(ApproachFixture, PickInsertFailureNeverClosesGripper) {
   for (const auto & update : scene.scenes) {
     EXPECT_TRUE(update.robot_state.attached_collision_objects.empty());
   }
+}
+
+TEST_F(ApproachFixture, PickContinuousRunsPregraspAndInsertAsOnePath) {
+  tcp_for_refinement("left");
+  initial_pose_at_zero();
+  PickCupConfig pc;
+  pc.continuous_insert = true;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  size_t scenes_at_start = 0;
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!scenes_at_start && !executor.continuous.empty()) scenes_at_start = scene.scenes.size();
+    complete();
+    pick.tick();
+  }
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  const auto & bundle = executor.continuous[0];
+  ASSERT_EQ(bundle.size(), 2u);
+  EXPECT_EQ(bundle[0].name, "PICK_PREGRASP");
+  EXPECT_EQ(bundle[0].type, "pose");
+  EXPECT_EQ(bundle[0].strict_objects, std::vector<std::string>{"demo_place_cup"});
+  EXPECT_EQ(bundle[1].name, "PICK_INSERT");
+  EXPECT_EQ(bundle[1].type, "linear");
+  EXPECT_TRUE(bundle[1].strict_objects.empty());
+  EXPECT_FALSE(bundle[0].endpoints_only);
+  EXPECT_TRUE(bundle[1].endpoints_only); // Executed as a checked straight joint line.
+  EXPECT_DOUBLE_EQ(bundle[1].tcp_line_tolerance, pc.insert_line_tolerance);
+  EXPECT_DOUBLE_EQ(bundle[1].tcp_drop_tolerance, pc.insert_drop_tolerance);
+  ASSERT_EQ(executor.steps.size(), 5u); // OPEN, bundle(PREGRASP, INSERT), CLOSE, LIFT
+  EXPECT_EQ(executor.steps[0].name, "PICK_OPEN");
+  EXPECT_EQ(executor.steps[3].name, "PICK_CLOSE");
+  EXPECT_EQ(executor.steps[4].name, "PICK_LIFT");
+  // Finger contact is allowed before the bundle is planned.
+  ASSERT_EQ(scenes_at_start, 2u);
+  const auto & contact = scene.scenes[1].allowed_collision_matrix;
+  ASSERT_FALSE(contact.entry_values.empty());
+  EXPECT_TRUE(contact.entry_values[0].enabled[1]);
+  // Insert comes from the planned pregrasp heading, not a measured arrival.
+  geometry_msgs::msg::Pose pregrasp;
+  const auto & t = bundle[0].target;
+  pregrasp.position.x = t[0];
+  pregrasp.position.y = t[1];
+  pregrasp.position.z = t[2];
+  pregrasp.orientation.x = t[3];
+  pregrasp.orientation.y = t[4];
+  pregrasp.orientation.z = t[5];
+  pregrasp.orientation.w = t[6];
+  geometry_msgs::msg::Point rim;
+  rim.x = .54;
+  rim.z = .84 + config.cup_height / 2;
+  const auto expected = cup_insert_pose(pregrasp, rim, config.cup_height, pc);
+  ASSERT_TRUE(expected);
+  EXPECT_NEAR(bundle[1].target[0], expected->position.x, 1e-9);
+  EXPECT_NEAR(bundle[1].target[1], expected->position.y, 1e-9);
+  EXPECT_NEAR(bundle[1].target[2], expected->position.z, 1e-9);
+}
+
+TEST_F(ApproachFixture, PickContinuousFallsBackToStepsWhenRejectedBeforeMotion) {
+  tcp_for_refinement("left");
+  initial_pose_at_zero();
+  PickCupConfig pc;
+  pc.continuous_insert = true;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  bool rejected = false;
+  size_t scenes_at_reject = 0;
+  for (int i = 0; i < 80 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!rejected && executor.continuous.size() == 1 && executor.steps.size() == 3 &&
+        executor.current.state == ExecutionState::Running) {
+      executor.current = {ExecutionState::Failed, "PATH_PREPARATION_FAILED",
+          "Smoothed path is in collision; gripper_l_rh_p12_rn_r2 / demo_place_cup"};
+      rejected = true;
+      scenes_at_reject = scene.scenes.size();
+    } else {
+      complete();
+    }
+    pick.tick();
+  }
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  ASSERT_EQ(executor.steps.size(), 7u);
+  EXPECT_EQ(executor.steps[3].name, "PICK_PREGRASP");
+  EXPECT_EQ(executor.steps[3].type, "pose");
+  EXPECT_TRUE(executor.steps[3].strict_objects.empty());
+  EXPECT_EQ(executor.steps[4].name, "PICK_INSERT");
+  EXPECT_EQ(executor.steps[5].name, "PICK_CLOSE");
+  // The separate PTP runs only after cup/finger checks are restored.
+  ASSERT_GT(scene.scenes.size(), scenes_at_reject);
+  const auto & restored = scene.scenes[scenes_at_reject];
+  EXPECT_FALSE(restored.world.collision_objects.empty());
+  for (const auto & row : restored.allowed_collision_matrix.entry_values) {
+    EXPECT_TRUE(std::none_of(row.enabled.begin(), row.enabled.end(), [](bool value) {
+      return value;
+    }));
+  }
+}
+
+TEST_F(ApproachFixture, PickContinuousOnlyFromTheInitialPose) {
+  tcp_for_refinement("left");
+  initial_pose_at_zero();
+  arm_joint = .1; // Outside the initial pose tolerance.
+  PickCupConfig pc;
+  pc.continuous_insert = true;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    complete();
+    pick.tick();
+  }
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  EXPECT_TRUE(executor.continuous.empty());
+  ASSERT_EQ(executor.steps.size(), 5u);
+  EXPECT_EQ(executor.steps[1].name, "PICK_PREGRASP");
+  EXPECT_EQ(executor.steps[2].name, "PICK_INSERT");
+  EXPECT_FALSE(executor.steps[2].endpoints_only);
+}
+
+TEST_F(ApproachFixture, PickContinuousFallsBackWhenTheExecutorRefusesTheBundle) {
+  tcp_for_refinement("left");
+  executor.sequence_supported = false;
+  initial_pose_at_zero();
+  PickCupConfig pc;
+  pc.continuous_insert = true;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    complete();
+    pick.tick();
+  }
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  EXPECT_TRUE(executor.continuous.empty());
+  ASSERT_EQ(executor.steps.size(), 5u);
+  EXPECT_EQ(executor.steps[1].name, "PICK_PREGRASP");
+  EXPECT_EQ(executor.steps[2].name, "PICK_INSERT");
+}
+
+TEST_F(ApproachFixture, PickContinuousFailureAfterMotionNeverClosesGripper) {
+  tcp_for_refinement("left");
+  initial_pose_at_zero();
+  PickCupConfig pc;
+  pc.continuous_insert = true;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 60 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (executor.continuous.size() == 1 && executor.steps.size() == 3 &&
+        executor.current.state == ExecutionState::Running) {
+      sensor_msgs::msg::JointState moved;
+      moved.header.stamp = node->now();
+      moved.name = {"left_joint", "left_grip", "right_joint", "right_grip"};
+      moved.position = {.1, 0, 0, 0};
+      moved.velocity = {0, 0, 0, 0};
+      context->observe_joints(moved);
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "controller aborted"};
+      pick.tick();
+      break;
+    }
+    complete();
+    pick.tick();
+  }
+  EXPECT_EQ(pick.result().state, "FAILED");
+  EXPECT_EQ(pick.result().code, "EXECUTION_FAILED");
+  EXPECT_EQ(executor.steps.size(), 3u);
+  EXPECT_EQ(executor.steps.back().name, "PICK_INSERT");
 }
 
 TEST(PickGeometry, InsertKeepsMeasuredOrientationAndGraspHeight) {

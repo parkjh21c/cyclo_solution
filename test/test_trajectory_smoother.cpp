@@ -267,6 +267,77 @@ TEST_F(SmootherTest, RejectsCollisionIntroducedOnTheExecutedPath) {
   EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
 }
 
+TEST_F(SmootherTest, StrictObjectsIgnoreSceneContactAllowance) {
+  auto path = smooth_segments({segment({{0, 0}, {0.4, 0.2}}), segment({{0.4, 0.2}, {0.8, 0.4}})},
+      {first, second}, config, model);
+  moveit_msgs::msg::CollisionObject cup;
+  cup.header.frame_id = "base";
+  cup.id = "demo_place_cup";
+  cup.operation = cup.ADD;
+  shape_msgs::msg::SolidPrimitive box;
+  box.type = box.BOX;
+  box.dimensions = {10, 10, 10};
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1;
+  cup.primitives.push_back(box);
+  cup.primitive_poses.push_back(pose);
+  ASSERT_TRUE(scene->processCollisionObjectMsg(cup));
+  scene->getAllowedCollisionMatrixNonConst().setEntry("demo_place_cup", "two", true);
+  EXPECT_NO_THROW(validate_smooth_path(path, {first, second}, config, *scene));
+  first.strict_objects = {"demo_place_cup"};
+  EXPECT_THROW(validate_smooth_path(path, {first, second}, config, *scene), PathCollisionError);
+  // The scene allowance itself is unchanged for later planning.
+  collision_detection::AllowedCollision::Type type;
+  ASSERT_TRUE(scene->getAllowedCollisionMatrix().getEntry("demo_place_cup", "two", type));
+  EXPECT_EQ(type, collision_detection::AllowedCollision::ALWAYS);
+}
+
+TEST_F(SmootherTest, EndpointsOnlySegmentIsEnteredMovingAndStaysOnItsJointLine) {
+  second.endpoints_only = true;
+  // Dense planned points off the endpoint line are dropped.
+  auto path = smooth_segments({segment({{0, 0}, {0.4, 0.1}}),
+      segment({{0.4, 0.1}, {0.5, 0.15}, {0.55, 0.3}, {0.6, 0.5}})}, {first, second}, config, model);
+  const auto & points = path.trajectory.joint_trajectory.points;
+  bool crossed = false;
+  for (size_t i = 0; i < points.size(); ++i) {
+    const auto & p = points[i].positions;
+    if (std::abs(rclcpp::Duration(points[i].time_from_start).seconds() -
+            path.segment_end_times[0]) < 1e-8) {
+      // Moving at the boundary, along the next segment's direction (0.2, 0.4).
+      const auto & v = points[i].velocities;
+      EXPECT_GT(std::hypot(v[0], v[1]), 0.01);
+      EXPECT_NEAR(v[0] * 0.4 - v[1] * 0.2, 0.0, 1e-6);
+      crossed = true;
+    }
+    if (path.point_steps[i] == 1) {
+      EXPECT_NEAR((p[0] - 0.4) * 0.4 - (p[1] - 0.1) * 0.2, 0.0, 1e-6) << "point " << i;
+    }
+  }
+  EXPECT_TRUE(crossed);
+  EXPECT_NEAR(points.back().positions[0], 0.6, 1e-8);
+  EXPECT_NEAR(points.back().positions[1], 0.5, 1e-8);
+  EXPECT_NO_THROW(validate_smooth_path(path, {first, second}, config, *scene));
+}
+
+TEST_F(SmootherTest, TcpLineToleranceChecksTheExecutedTcpPath) {
+  // Link "two" sits 0.5 m out on j1: a j1-only joint line is a TCP arc, ~10 mm off its chord.
+  config.arms["left"].tcp = "two";
+  first.arm = "left";
+  first.tcp_line_tolerance = .003;
+  auto path = smooth_segments({segment({{0, 0}, {0.4, 0}})}, {first}, config, model);
+  try {
+    validate_smooth_path(path, {first}, config, *scene);
+    FAIL() << "A 10 mm arc passed a 3 mm line tolerance";
+  } catch (const std::runtime_error & error) {
+    EXPECT_NE(std::string(error.what()).find("straight line"), std::string::npos) << error.what();
+  }
+  first.tcp_line_tolerance = .015;
+  first.tcp_drop_tolerance = .001; // The arc stays level.
+  EXPECT_NO_THROW(validate_smooth_path(path, {first}, config, *scene));
+  first.arm = "right"; // No TCP for this arm.
+  EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);
+}
+
 TEST_F(SmootherTest, RejectsBoundsAndDiscontinuousPlanningStarts) {
   auto path = smooth_segments({segment({{0, 0}, {2.1, 0.2}})}, {first}, config, model);
   EXPECT_THROW(validate_smooth_path(path, {first}, config, *scene), std::runtime_error);

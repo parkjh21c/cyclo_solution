@@ -3,6 +3,10 @@
 #include "demo_1f/motions/common/sequence_motion.hpp"
 
 namespace demo_1f {
+// One arm (and the lift) within the initial_pose sequence's tolerance and stationary.
+bool arm_at_initial_pose(const Config & config, const RobotContext & context,
+    const std::string & arm, std::string & reason);
+
 // Initial pose sequence. With a scene port, a held cup model is released before the grippers open.
 class InitialPoseMotion : public SequenceMotion {
 public:

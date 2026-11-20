@@ -1,4 +1,5 @@
 #include "demo_1f/motions/pick/pick_cup_motion.hpp"
+#include "demo_1f/motions/initial/initial_pose_motion.hpp"
 #include "demo_1f/runtime/geometry/tcp_roll.hpp"
 #include <cmath>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -30,40 +31,94 @@ void PickCupMotion::record_pick() {
   last_pick_ = record;
 }
 
-bool PickCupMotion::move(const std::string & name, const geometry_msgs::msg::Pose & pose) {
+Step PickCupMotion::pose_step(
+    const std::string & name, const geometry_msgs::msg::Pose & pose) const {
   Step s;
   s.name = name;
   s.type = "pose"; // Full pose: Pilz PTP from the nearest IK solution; no wide arm swings.
   s.arm = arm_;
   s.frame = robot_.planning_frame;
   s.velocity_scale = pick_.speed;
-  s.acceleration_scale = .08;
+  s.acceleration_scale = .4;
   s.timeout = 45;
   const auto & p = pose.position;
   const auto & q = pose.orientation;
   s.target = {p.x, p.y, p.z, q.x, q.y, q.z, q.w};
-  phase(name);
-  approach_target_.header.frame_id = robot_.planning_frame;
-  approach_target_.pose = pose;
-  return execute_step(s);
+  return s;
 }
 
-bool PickCupMotion::linear(const std::string & name, const geometry_msgs::msg::Pose & pose) {
+Step PickCupMotion::linear_step(
+    const std::string & name, const geometry_msgs::msg::Pose & pose) const {
   Step s;
   s.name = name;
   s.type = "linear";
   s.arm = arm_;
   s.frame = robot_.planning_frame;
   s.velocity_scale = pick_.insert_speed;
-  s.acceleration_scale = s.velocity_scale * .25; // Same LIN ratio as refine/withdraw.
+  s.acceleration_scale = pick_.insert_acceleration;
   s.timeout = 30;
   const auto & p = pose.position;
   const auto & q = pose.orientation;
   s.target = {p.x, p.y, p.z, q.x, q.y, q.z, q.w};
+  return s;
+}
+
+bool PickCupMotion::move(const std::string & name, const geometry_msgs::msg::Pose & pose) {
   phase(name);
   approach_target_.header.frame_id = robot_.planning_frame;
   approach_target_.pose = pose;
-  return execute_step(s);
+  return execute_step(pose_step(name, pose));
+}
+
+bool PickCupMotion::linear(const std::string & name, const geometry_msgs::msg::Pose & pose) {
+  phase(name);
+  approach_target_.header.frame_id = robot_.planning_frame;
+  approach_target_.pose = pose;
+  return execute_step(linear_step(name, pose));
+}
+
+void PickCupMotion::prepare_continuous() {
+  // Planned pregrasp heading: nothing waits for a measured arrival.
+  auto rim = body_.position;
+  rim.z += config_.cup_height / 2;
+  const auto insert = cup_insert_pose(pregrasp_, rim, config_.cup_height, pick_);
+  if (!insert) {
+    fail("PICK_GEOMETRY_INVALID", "Cannot determine planned pregrasp heading");
+    return;
+  }
+  insert_ = *insert;
+  allow_contact("PICK_CONTINUOUS_SCENE");
+}
+
+void PickCupMotion::start_continuous() {
+  auto approach = pose_step("PICK_PREGRASP", pregrasp_);
+  approach.strict_objects = {"demo_place_cup"}; // Contact is allowed only after the pregrasp.
+  // Pilz plans give the endpoint joints; the executed insert is a checked straight joint line.
+  auto insert = linear_step("PICK_INSERT", insert_);
+  insert.endpoints_only = true;
+  insert.tcp_line_tolerance = pick_.insert_line_tolerance;
+  insert.tcp_drop_tolerance = pick_.insert_drop_tolerance;
+  const std::vector<Step> steps = {approach, insert};
+  phase("PICK_CONTINUOUS");
+  approach_target_.header.frame_id = robot_.planning_frame;
+  approach_target_.pose = insert_;
+  std::string reason;
+  if (!context_.ready(reason) || !executor_.ready(MotionSequence{"", "", "", steps, ""}, reason)) {
+    step_by_step("; continuous approach not ready: " + reason);
+    return;
+  }
+  if (!executor_.start_sequence(steps)) {
+    step_by_step("; continuous approach not started: " + executor_.result().detail);
+    return;
+  }
+  moving_ = true;
+}
+
+void PickCupMotion::step_by_step(const std::string & why) {
+  direct_failure_ += why;
+  RCLCPP_WARN(rclcpp::get_logger("handover_demo.cup"), "Pick falls back to separate steps%s",
+      why.c_str());
+  apply_scene("PICK_STEP_SCENE"); // Restore cup/finger checks before the separate PTP.
 }
 
 bool PickCupMotion::open_gripper() {
@@ -107,7 +162,7 @@ std::vector<std::string> PickCupMotion::finger_links(bool with_base) const {
   return links;
 }
 
-bool PickCupMotion::apply_scene() {
+bool PickCupMotion::apply_scene(const std::string & name) {
   moveit_msgs::msg::PlanningScene scene;
   scene.is_diff = true;
   scene.robot_state.is_diff = true;
@@ -128,7 +183,7 @@ bool PickCupMotion::apply_scene() {
   table.operation = table.ADD;
   shape_msgs::msg::SolidPrimitive box;
   box.type = box.BOX;
-  box.dimensions = {.4, .4, .04};
+  box.dimensions = {.2, .2, .04};
   auto pose = body_;
   pose.position.z -= config_.cup_height / 2 + .02;
   table.primitives = {box};
@@ -144,7 +199,7 @@ bool PickCupMotion::apply_scene() {
   for (auto & row : scene.allowed_collision_matrix.entry_values) {
     row.enabled.resize(entries, false);
   }
-  phase("PICK_SCENE");
+  phase(name);
   scene_pending_ = scene_.apply(scene);
   if (!scene_pending_) {
     fail("SCENE_UNAVAILABLE", "Cannot update cup grasp scene");
@@ -152,7 +207,7 @@ bool PickCupMotion::apply_scene() {
   return scene_pending_;
 }
 
-bool PickCupMotion::allow_contact() {
+bool PickCupMotion::allow_contact(const std::string & name) {
   moveit_msgs::msg::PlanningScene scene;
   scene.is_diff = true;
   scene.robot_state.is_diff = true;
@@ -170,7 +225,7 @@ bool PickCupMotion::allow_contact() {
       row[j] = (i == 0) != (j == 0); // Cup-finger pairs only.
     }
   }
-  phase("PICK_CONTACT_SCENE");
+  phase(name);
   scene_pending_ = scene_.apply(scene);
   if (!scene_pending_) {
     fail("SCENE_UNAVAILABLE", "Cannot allow finger contact with cup");
@@ -360,6 +415,10 @@ void PickCupMotion::tick() {
       open_gripper();
     } else if (phase_ == "PICK_CONTACT_SCENE") {
       linear("PICK_INSERT", insert_);
+    } else if (phase_ == "PICK_CONTINUOUS_SCENE") {
+      start_continuous();
+    } else if (phase_ == "PICK_STEP_SCENE") {
+      move("PICK_PREGRASP", pregrasp_);
     } else if (phase_ == "PICK_ATTACH") {
       lift();
     }
@@ -381,9 +440,14 @@ void PickCupMotion::tick() {
       return;
     }
     if (r.state != ExecutionState::Succeeded) {
+      // Continuous path rejected before motion: the separate PTP -> LIN steps.
+      if (phase_ == "PICK_CONTINUOUS" && r.state == ExecutionState::Failed && arm_unmoved()) {
+        step_by_step("; continuous approach failed first: " + r.detail);
+        return;
+      }
       // Direct PTP blocked before motion: clear above the pregrasp, then lower straight down.
       if (phase_ == "PICK_PREGRASP" && r.state == ExecutionState::Failed && arm_unmoved()) {
-        direct_failure_ = "; direct PTP failed first: " + r.detail;
+        direct_failure_ += "; direct PTP failed first: " + r.detail;
         clear_above();
         return;
       }
@@ -393,7 +457,17 @@ void PickCupMotion::tick() {
     result_.last_completed_step = phase_;
     if (phase_ == "PICK_OPEN") {
       if (capture_arm_joints()) {
-        move("PICK_PREGRASP", pregrasp_);
+        std::string away;
+        if (pick_.continuous_insert && !pick_.stop_at_pregrasp &&
+            arm_at_initial_pose(robot_, context_, arm_, away)) {
+          prepare_continuous();
+        } else {
+          if (pick_.continuous_insert && !pick_.stop_at_pregrasp) {
+            RCLCPP_INFO(rclcpp::get_logger("handover_demo.cup"),
+                "Pick uses separate steps: %s", away.c_str());
+          }
+          move("PICK_PREGRASP", pregrasp_);
+        }
       }
     } else if (phase_ == "PICK_CLEAR") {
       linear("PICK_LOWER", pregrasp_);
@@ -403,7 +477,7 @@ void PickCupMotion::tick() {
       } else {
         prepare_insert();
       }
-    } else if (phase_ == "PICK_INSERT") {
+    } else if (phase_ == "PICK_INSERT" || phase_ == "PICK_CONTINUOUS") {
       close_gripper();
     } else if (phase_ == "PICK_CLOSE") {
       attach_cup();

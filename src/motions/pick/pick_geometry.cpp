@@ -15,6 +15,7 @@ std::string PickCupConfig::validate(double height) const {
     return "Invalid cup pregrasp geometry or speed";
   }
   if (!std::isfinite(insert_speed) || insert_speed <= 0 || insert_speed > .2 ||
+      !std::isfinite(insert_acceleration) || insert_acceleration <= 0 || insert_acceleration > .2 ||
       !std::isfinite(lift_height) || lift_height < .02 || lift_height > .15 ||
       !std::isfinite(close_target) || close_target <= 0 || close_target > 1.1 ||
       !std::isfinite(close_duration) || close_duration <= 0 || close_duration > 3 ||
@@ -26,6 +27,11 @@ std::string PickCupConfig::validate(double height) const {
   }
   if (!std::isfinite(place_clearance) || place_clearance < 0 || place_clearance > .03) {
     return "Place clearance must be 0..0.03 m";
+  }
+  for (double x : {insert_line_tolerance, insert_drop_tolerance}) {
+    if (!std::isfinite(x) || x <= 0 || x > .01) {
+      return "Continuous insert TCP tolerances must be in (0, 0.01] m";
+    }
   }
   return {};
 }
@@ -42,6 +48,7 @@ PickCupConfig load_pick_config(rclcpp::Node & node) {
   number("speed", c.speed);
   number("tcp_forward_offset", c.tcp_forward_offset);
   number("insert_speed", c.insert_speed);
+  number("insert_acceleration", c.insert_acceleration);
   number("lift_height", c.lift_height);
   number("insert_depth", c.insert_depth);
   number("clear_height", c.clear_height);
@@ -50,7 +57,10 @@ PickCupConfig load_pick_config(rclcpp::Node & node) {
   number("close_target", c.close_target);
   number("close_duration", c.close_duration);
   number("place_clearance", c.place_clearance);
+  number("insert_line_tolerance", c.insert_line_tolerance);
+  number("insert_drop_tolerance", c.insert_drop_tolerance);
   c.stop_at_pregrasp = node.declare_parameter("pick.stop_at_pregrasp", c.stop_at_pregrasp, d);
+  c.continuous_insert = node.declare_parameter("pick.continuous_insert", c.continuous_insert, d);
   return c;
 }
 

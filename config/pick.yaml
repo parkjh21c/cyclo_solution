@@ -1,17 +1,25 @@
 handover_demo:
   ros__parameters:
     pick:
-      grasp_height: 0.075 # Above inferred cup bottom; assumes upright 16.5cm cup. +10 mm for table clearance.
+      # Above inferred cup bottom; assumes upright 16.5cm cup. +10 mm table clearance, +4 mm for
+      # the continuous insert dip (insert_drop_tolerance), so it never goes below the old LIN.
+      grasp_height: 0.079
       stand_off: 0.12
-      speed: 0.12 # Pilz PTP to pregrasp and fallback clear waypoint.
+      speed: 0.2 # Pilz PTP to pregrasp and fallback clear waypoint.
       tcp_forward_offset: -0.03 # Initial URDF-based pad center behind TCP; tune on hardware.
-      insert_speed: 0.06 # Pilz LIN insert and lift velocity scale.
+      insert_speed: 0.1 # Pilz LIN insert and lift velocity scale.
+      insert_acceleration: 0.05 # Pilz LIN acceleration scale; was insert_speed * 0.25 = 0.025.
       insert_depth: 0.025 # Past pads-on-cup-axis toward the palm; ~0.027 touches the 5 cm cup model.
       clear_height: 0.05 # Fallback when direct PTP is blocked: above rim, then LIN down.
-      approach_yaw_deg: -45.0 # Fixed heading, robot +X = 0, left +; sweep 2026-11-10: -45..+30 all ok.
-      approach_pitch_deg: 15.0 # Fingers tilted down; level (0) hits the arm reach limit.
+      approach_yaw_deg: -45.0 # Fixed heading, robot +X = 0, left +
+      approach_pitch_deg: 15.0 # Fingers tilted down
       close_target: 0.8 # Fingers stop on the cup before this; grasp is not sensor-verified.
       close_duration: 1.0
       lift_height: 0.08
       place_clearance: 0.005 # /place_cup releases this far above the recorded grasp height.
       stop_at_pregrasp: false # true: old behavior, stop before contact.
+      # From the initial pose only: initial -> pregrasp -> insert as one joint path, no stop.
+      # Rejected before motion (TCP checks, collision) -> the separate PTP -> LIN steps.
+      continuous_insert: true
+      insert_line_tolerance: 0.006 # Continuous insert TCP off the straight line (m); mostly the dip.
+      insert_drop_tolerance: 0.006 # Continuous insert TCP below its lower end (m); see grasp_height.

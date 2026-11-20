@@ -12,6 +12,8 @@ struct PickRecord {
 };
 
 // Side grasp: PTP pregrasp (or clear + lower) -> insert -> close -> attach -> lift.
+// continuous_insert, from the initial pose: initial -> pregrasp -> insert as one smoothed joint
+// path; the separate steps when not at the initial pose or when rejected before motion.
 // Preview never moves.
 class PickCupMotion final : public CupMotion {
 public:
@@ -34,12 +36,17 @@ private:
   }
 
   void reset() override;
+  Step pose_step(const std::string & name, const geometry_msgs::msg::Pose & pose) const;
+  Step linear_step(const std::string & name, const geometry_msgs::msg::Pose & pose) const;
   bool move(const std::string & phase, const geometry_msgs::msg::Pose & pose);
   bool linear(const std::string & phase, const geometry_msgs::msg::Pose & pose);
+  void prepare_continuous();
+  void start_continuous();
+  void step_by_step(const std::string & why); // Fallback before motion; why joins the failure.
   bool open_gripper();
   bool close_gripper();
-  bool apply_scene();
-  bool allow_contact();
+  bool apply_scene(const std::string & name = "PICK_SCENE");
+  bool allow_contact(const std::string & name = "PICK_CONTACT_SCENE");
   bool attach_cup();
   void prepare_insert();
   void lift();

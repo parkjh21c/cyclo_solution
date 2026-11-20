@@ -30,8 +30,8 @@ struct ExecutionResult {
   ExecutionState state{ExecutionState::Idle};
   std::string code;
   std::string detail;
-  std::string phase{};
-  std::string last_completed_step{};
+  std::string phase;
+  std::string last_completed_step;
   bool retryable_before_motion{false};
 };
 
@@ -100,6 +100,12 @@ struct Step {
   double hold_tolerance{0.001}; // Radians per joint; checked before and after smoothing.
   bool joint_line{false}; // dual_joint(_gripper): straight joint segment from the planned start, no planner.
   bool joint_line_replan{false}; // joint_line: on a smoothed-path collision, plan the bundle once with OMPL.
+  // Smoothed-path validation only: scene ACM allowances for these objects are ignored here.
+  std::vector<std::string> strict_objects{};
+  // Smoothing: keep only the planned segment's endpoints; enter it straight in joint space.
+  bool endpoints_only{false};
+  double tcp_line_tolerance{0}; // >0: smoothed TCP stays this close to the start-goal line.
+  double tcp_drop_tolerance{0}; // >0: smoothed TCP never this far below the lower segment end.
 };
 
 struct MotionSequence {

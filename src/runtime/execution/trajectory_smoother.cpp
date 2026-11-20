@@ -1,9 +1,12 @@
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <moveit/utils/logger.hpp>
+#include <optional>
 #include <rclcpp/duration.hpp>
+#include <rclcpp/logging.hpp>
 #include <rcutils/logging.h>
 #include <ruckig/ruckig.hpp>
 #include <set>
@@ -95,6 +98,38 @@ Sample quintic(const Point & first, const Point & last, size_t joint, double u) 
       (c1 + u * (2 * c2 + u * (3 * c3 + u * (4 * c4 + u * 5 * c5)))) / dt,
       (2 * c2 + u * (6 * c3 + u * (12 * c4 + u * 20 * c5))) / (dt * dt),
       (6 * c3 + u * (24 * c4 + u * 60 * c5)) / (dt * dt * dt)};
+}
+
+struct TcpLine {
+  std::string link;
+  Eigen::Vector3d start, end;
+  double off{0}, drop{0}; // Largest seen over the whole segment.
+};
+
+std::string millimeters(double meters) {
+  char text[32];
+  std::snprintf(text, sizeof(text), "%.1f", meters * 1000);
+  return text;
+}
+
+// Track distance from the straight start-end segment and depth below the lower end.
+void measure_tcp_line(TcpLine & line, const Eigen::Vector3d & tcp) {
+  const Eigen::Vector3d span = line.end - line.start;
+  const double length = span.squaredNorm();
+  const double u = length > 0 ? std::clamp((tcp - line.start).dot(span) / length, 0.0, 1.0) : 0.0;
+  line.off = std::max(line.off, (tcp - (line.start + u * span)).norm());
+  line.drop = std::max(line.drop, std::min(line.start.z(), line.end.z()) - tcp.z());
+}
+
+// After the whole segment: reject with both maxima so tolerances can be tuned from one log.
+void check_tcp_line(const Step & step, const TcpLine & line) {
+  if ((step.tcp_line_tolerance > 0 && line.off > step.tcp_line_tolerance) ||
+      (step.tcp_drop_tolerance > 0 && line.drop > step.tcp_drop_tolerance)) {
+    throw std::runtime_error(step.name + ": smoothed TCP leaves the straight line by up to " +
+        millimeters(line.off) + " mm (limit " + millimeters(step.tcp_line_tolerance) +
+        " mm) and dips up to " + millimeters(line.drop) + " mm below its lower end (limit " +
+        millimeters(step.tcp_drop_tolerance) + " mm)");
+  }
 }
 } // namespace
 
@@ -218,8 +253,11 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
       throw std::runtime_error("Discontinuous planning start between segments");
     }
     planned_endpoint = reordered.back();
-    std::set<std::string> held_joints;
     const auto & step = steps[segment];
+    if (step.endpoints_only && reordered.size() > 2) {
+      reordered = {reordered.front(), reordered.back()};
+    }
+    std::set<std::string> held_joints;
     for (const auto & [side, arm] : config.arms) {
       if (step.type == "joint_gripper" && side != step.arm) {
         held_joints.insert(arm.joints.begin(), arm.joints.end());
@@ -272,6 +310,19 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
   }
   std::vector<Positions> velocities(positions.size(), Positions(dofs, 0.0));
   for (size_t i = 1; i + 1 < positions.size(); ++i) {
+    if (steps[owners[i + 1]].endpoints_only) {
+      // Enter a straight segment along its own joint direction, so it stays straight.
+      double scale = 1 / estimates[i + 1];
+      for (size_t j = 0; j < dofs; ++j) {
+        const double delta = std::abs(positions[i + 1][j] - positions[i][j]);
+        const double cap = 0.5 * std::min(limits[i][j].velocity, limits[i + 1][j].velocity);
+        if (delta > 0) scale = std::min(scale, cap / delta);
+      }
+      for (size_t j = 0; j < dofs; ++j) {
+        velocities[i][j] = (positions[i + 1][j] - positions[i][j]) * scale;
+      }
+      continue;
+    }
     for (size_t j = 0; j < dofs; ++j) {
       const double before = (positions[i][j] - positions[i - 1][j]) / estimates[i];
       const double after = (positions[i + 1][j] - positions[i][j]) / estimates[i + 1];
@@ -306,6 +357,10 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
     }
     if (steps[owners[i]].type == "gripper") {
       input.minimum_duration = steps[owners[i]].duration;
+    }
+    if (steps[owners[i]].endpoints_only) {
+      // Scaled copies of one profile: a straight joint line (Ruckig falls back if impossible).
+      input.synchronization = ruckig::Synchronization::Phase;
     }
     ruckig::Trajectory<ruckig::DynamicDOFs> curve(dofs);
     if (generator.calculate(input, curve) < ruckig::Result::Working) {
@@ -349,6 +404,36 @@ void validate_smooth_path(const SmoothPath & path,
   // Limits and held joints are checked at every sample; collisions once any joint moved
   // collision_check_step since the last checked sample, and always at the first and last.
   std::vector<double> sampled(trajectory.joint_names.size()), checked;
+  std::vector<std::optional<collision_detection::AllowedCollisionMatrix>> strict(steps.size());
+  for (size_t s = 0; s < steps.size(); ++s) {
+    if (steps[s].strict_objects.empty()) continue;
+    strict[s] = scene.getAllowedCollisionMatrix();
+    for (const auto & id : steps[s].strict_objects) strict[s]->setEntry(id, false);
+  }
+  // TCP line per checked step: from the point before its first sample to its last sample.
+  std::vector<std::optional<TcpLine>> lines(steps.size());
+  const auto & owners = path.point_steps;
+  for (size_t s = 0; s < steps.size(); ++s) {
+    if (steps[s].tcp_line_tolerance <= 0 && steps[s].tcp_drop_tolerance <= 0) continue;
+    const auto arm = config.arms.find(steps[s].arm);
+    if (arm == config.arms.end() || !scene.getRobotModel()->hasLinkModel(arm->second.tcp)) {
+      throw std::runtime_error("TCP line check needs a known arm TCP: " + steps[s].name);
+    }
+    const auto begin = std::find(owners.begin(), owners.end(), s);
+    if (begin == owners.end()) throw std::runtime_error("No smoothed samples for " + steps[s].name);
+    const size_t start = begin == owners.begin() ? 0 : begin - owners.begin() - 1;
+    const size_t end = owners.rend() - std::find(owners.rbegin(), owners.rend(), s) - 1;
+    const auto tcp_at = [&](size_t point) {
+      auto probe = state;
+      const auto & positions = trajectory.points.at(point).positions;
+      for (size_t j = 0; j < trajectory.joint_names.size(); ++j) {
+        probe.setVariablePosition(trajectory.joint_names[j], positions[j]);
+      }
+      probe.update();
+      return Eigen::Vector3d(probe.getGlobalLinkTransform(arm->second.tcp).translation());
+    };
+    lines[s] = TcpLine{arm->second.tcp, tcp_at(start), tcp_at(end)};
+  }
   for (size_t i = 1; i < trajectory.points.size(); ++i) {
     const auto & first = trajectory.points[i - 1];
     const auto & last = trajectory.points[i];
@@ -402,6 +487,9 @@ void validate_smooth_path(const SmoothPath & path,
       if (!state.satisfiesBounds(1e-8)) {
         throw std::runtime_error("Smoothed path exceeds joint bounds");
       }
+      if (auto & line = lines[path.point_steps[i]]) {
+        measure_tcp_line(*line, state.getGlobalLinkTransform(line->link).translation());
+      }
       bool check = config.collision_check_step <= 0 || checked.empty() ||
                    (i + 1 == trajectory.points.size() && sample == samples);
       for (size_t joint = 0; !check && joint < sampled.size(); ++joint) {
@@ -414,7 +502,12 @@ void validate_smooth_path(const SmoothPath & path,
         request.contacts = true;
         request.max_contacts = 10;
         collision_detection::CollisionResult collision;
-        scene.checkCollision(request, collision, state);
+        const auto & acm = strict.at(path.point_steps.at(i));
+        if (acm) {
+          scene.checkCollision(request, collision, state, *acm);
+        } else {
+          scene.checkCollision(request, collision, state);
+        }
         if (collision.collision) {
           std::string pairs;
           for (const auto & contact : collision.contacts) {
@@ -452,6 +545,13 @@ void validate_smooth_path(const SmoothPath & path,
         }
       }
     }
+  }
+  for (size_t s = 0; s < steps.size(); ++s) {
+    if (!lines[s]) continue;
+    check_tcp_line(steps[s], *lines[s]);
+    RCLCPP_INFO(rclcpp::get_logger("handover_demo"), "%s TCP line: up to %s mm off, %s mm dip",
+        steps[s].name.c_str(), millimeters(lines[s]->off).c_str(),
+        millimeters(lines[s]->drop).c_str());
   }
 }
 JointRows sample_joint_path(const trajectory_msgs::msg::JointTrajectory & path, double max_step) {

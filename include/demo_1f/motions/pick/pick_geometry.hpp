@@ -8,12 +8,17 @@ struct PickCupConfig {
   double grasp_height{.065}, stand_off{.12}, speed{.12};
   double tcp_forward_offset{-.03};
   double insert_speed{.06}, lift_height{.08};
+  double insert_acceleration{.015}; // Pilz LIN acceleration scale for insert, lower and lift.
   double insert_depth{.02}; // Extra insert past pads-on-axis; moves the cup toward the palm.
   double clear_height{.05}; // Fallback waypoint height above the rim, over the pregrasp.
   // Fixed hand heading (robot +X = 0, left +) and downward tilt; jaws stay horizontal.
   double approach_yaw_deg{0}, approach_pitch_deg{0};
   double close_target{.8}, close_duration{1.0};
   bool stop_at_pregrasp{false}; // Leave the cup untouched for an external pickup policy.
+  // From the initial pose: initial -> pregrasp -> insert as one smoothed joint path, no stop.
+  bool continuous_insert{false};
+  double insert_line_tolerance{.003}; // Continuous insert: TCP off the straight line, meters.
+  double insert_drop_tolerance{.002}; // Continuous insert: TCP below the lower end, meters.
   double place_clearance{.005}; // Place: release this far above the recorded grasp height.
   std::string validate(double cup_height) const;
 };

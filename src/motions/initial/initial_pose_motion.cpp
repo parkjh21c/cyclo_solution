@@ -26,9 +26,14 @@ bool InitialPoseMotion::is_ready_to_start(std::string & reason) const {
 }
 
 bool InitialPoseMotion::at_initial_pose(const std::string & arm, std::string & reason) const {
-  const auto sequence = config_.motion_sequences.find("initial_pose");
-  const auto side = config_.arms.find(arm);
-  if (sequence == config_.motion_sequences.end() || side == config_.arms.end()) {
+  return arm_at_initial_pose(config_, context_, arm, reason);
+}
+
+bool arm_at_initial_pose(const Config & config, const RobotContext & context,
+    const std::string & arm, std::string & reason) {
+  const auto sequence = config.motion_sequences.find("initial_pose");
+  const auto side = config.arms.find(arm);
+  if (sequence == config.motion_sequences.end() || side == config.arms.end()) {
     reason = "Initial pose or arm not configured: " + arm;
     return false;
   }
@@ -36,8 +41,8 @@ bool InitialPoseMotion::at_initial_pose(const std::string & arm, std::string & r
   for (const auto & step : sequence->second.steps) {
     std::vector<std::string> names;
     if (step.type == "joint_group") names = step.joint_names;
-    else if (step.type == "joint" && config_.arms.count(step.arm)) {
-      names = config_.arms.at(step.arm).joints;
+    else if (step.type == "joint" && config.arms.count(step.arm)) {
+      names = config.arms.at(step.arm).joints;
     }
     for (size_t i = 0; i < names.size() && i < step.target.size(); ++i) {
       targets[names[i]] = {step.target[i], step.tolerance};
@@ -45,7 +50,7 @@ bool InitialPoseMotion::at_initial_pose(const std::string & arm, std::string & r
   }
   auto names = side->second.joints;
   if (targets.count("lift_joint")) names.push_back("lift_joint"); // The lift carries both arms.
-  const auto snapshot = context_.snapshot();
+  const auto snapshot = context.snapshot();
   for (const auto & name : names) {
     const auto target = targets.find(name);
     const auto joint = snapshot.joints.find(name);
@@ -61,7 +66,7 @@ bool InitialPoseMotion::at_initial_pose(const std::string & arm, std::string & r
       reason = "Not at the initial pose: " + name;
       return false;
     }
-    if (!context_.joint_stationary(name, joint->second, reason)) return false;
+    if (!context.joint_stationary(name, joint->second, reason)) return false;
   }
   reason.clear();
   return true;

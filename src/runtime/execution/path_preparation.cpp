@@ -43,10 +43,16 @@ bool TrajectoryExecutor::start_sequence(const std::vector<Step> & steps) {
   MotionSequence sequence;
   sequence.steps = steps;
   std::string reason = validate_motion_sequence(sequence, config_);
+  // One arm's PTP/LIN chain; a TCP corridor is built from the measured start, so not here.
+  const bool one_arm = steps.size() > 1 &&
+      std::all_of(steps.begin(), steps.end(), [&](const Step & step) {
+        return (step.type == "pose" || step.type == "linear") &&
+               step.arm == steps.front().arm && step.tcp_path_margin <= 0;
+      });
   for (const auto & step : steps) {
-    if (step.type != "dual_joint" && step.type != "dual_joint_gripper" &&
+    if (!one_arm && step.type != "dual_joint" && step.type != "dual_joint_gripper" &&
         !(steps.size() == 1 && step.type == "joint_gripper")) {
-      reason = "Continuous paths accept coordinated arm moves only";
+      reason = "Continuous paths accept coordinated arm moves or one arm's pose/LIN chain only";
     }
   }
   if (!config_.smooth_motion || !robot_model_ || !reason.empty() || !context_.ready(reason)) {
