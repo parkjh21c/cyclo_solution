@@ -48,14 +48,16 @@ ExecutionResult SideReturn::result() const {
 }
 
 std::string SideReturn::arm() const {
-  std::string reason;
-  const auto steps = this->steps(sequence_, reason);
-  return steps.empty() ? std::string() : steps.front().arm;
+  return sequence_arm(sequence_);
 }
 
 std::string SideReturn::active_arm() const {
+  return sequence_arm(active_);
+}
+
+std::string SideReturn::sequence_arm(const std::string & sequence) const {
   std::string reason;
-  const auto steps = this->steps(active_, reason);
+  const auto steps = this->steps(sequence.empty() ? sequence_ : sequence, reason);
   return steps.empty() ? std::string() : steps.front().arm;
 }
 } // namespace demo_1f

@@ -79,7 +79,7 @@ rclcpp_action::Server<TaskManager::ApproachAction>::SharedPtr TaskManager::make_
           return;
         }
         // start() only prepares the cup module; its first tick sends the first arm movement.
-        if (place_return && !start_side_return(reason)) {
+        if (place_return && !start_side_return(reason, place_return_sequence_)) {
           module.cancel();
           auto result = std::make_shared<ApproachAction::Result>();
           result->error_code = "SIDE_BEFORE_MOTION";

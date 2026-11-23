@@ -323,6 +323,25 @@ handover_demo:
           - 0.0
           - 0.35
           - 0.0
+      # approach.place_return_sequence target: menu 0 right return from cup_retreat, one joint line (reverse of menu 7).
+      cup_right_return:
+        steps:
+        - giver_home
+        giver_home:
+          type: joint
+          arm: giver
+          velocity_scale: 0.35
+          acceleration_scale: 0.35
+          tolerance: 0.01
+          timeout: 45.0
+          target:
+          - 1.05
+          - 0.0
+          - 0.0
+          - -2.27
+          - 0.0
+          - 0.35
+          - 0.0
       # Left arm back to the initial pose after REFINE_CUP (demo.left_return_after_refine).
       left_return:
         steps:

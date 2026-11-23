@@ -2597,6 +2597,29 @@ TEST_F(B2HandoverFixture, MissingIndependentReturnConfigurationRejectsBeforeAnyM
   EXPECT_TRUE(scene.scenes.empty());
 }
 
+TEST_F(B2HandoverFixture, PlaceReturnSequenceMustBeALoadedRightJointSequence) {
+  CupHandoverMotion back(robot, config, *context, executor, scene, "right");
+  std::string reason;
+  config.place_return_sequence = "cup_right_return";
+  EXPECT_FALSE(back.is_ready_to_start("right", "cup", reason)); // Not loaded.
+  EXPECT_NE(reason.find("cup_right_return"), std::string::npos) << reason;
+  MotionSequence direct;
+  direct.steps = {taught("giver_home", "joint", "right", {.2})};
+  robot.motion_sequences["cup_right_return"] = direct;
+  EXPECT_TRUE(independent_return_error(robot, config).empty());
+  reason.clear();
+  EXPECT_TRUE(back.is_ready_to_start("right", "cup", reason)) << reason;
+  robot.motion_sequences["cup_right_return"].steps.front().arm = "left";
+  EXPECT_FALSE(independent_return_error(robot, config).empty());
+  robot.motion_sequences["cup_right_return"].steps = {
+      taught("cup_retreat", "linear", "right", {.38, -.16, 1., 0, 0, 0, 1})};
+  EXPECT_FALSE(independent_return_error(robot, config).empty());
+  EXPECT_FALSE(back.is_ready_to_start("right", "cup", reason));
+  config.place_return_sequence.clear(); // Back to right_return only.
+  EXPECT_TRUE(independent_return_error(robot, config).empty());
+  EXPECT_TRUE(executor.steps.empty());
+}
+
 TEST_F(B2HandoverFixture, PreviewWithoutReturnConfigurationDoesNotMoveOrSwapTheCup) {
   config.other_arm_return_sequence.clear();
   CupHandoverMotion back(robot, config, *context, executor, scene, "right");

@@ -129,3 +129,5 @@ Why STOMP was not added as a fallback:
 - A fallback would add a planner call to side preparation for a case not yet seen on the robot. The demo keeps one behaviour: a blocked via path stops safely before motion (right: `SIDE_BEFORE_MOTION`, resumable; left: warning, arm stays).
 
 The `stomp` pipeline stays loaded in `sg2_moveit.launch.py` so this tool can repeat the comparison.
+
+Menu 0 (`PLACE_CUP`) returns the right arm with `cup_right_return`, one joint line from `cup_retreat` to home (the reverse of the menu 7 approach); set `approach.place_return_sequence: ""` to go back to `right_return`. Menu 4 keeps `right_return` with via_2, because a straight line from there hits `demo_table`.

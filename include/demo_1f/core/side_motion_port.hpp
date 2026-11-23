@@ -18,5 +18,9 @@ public:
     return false;
   }
   virtual std::string active_arm() const { return arm(); } // Arm of the last started sequence.
+  // Arm of a configured sequence ("" = the default one); empty when unknown.
+  virtual std::string sequence_arm(const std::string & sequence) const {
+    return sequence.empty() ? arm() : std::string();
+  }
 };
 } // namespace demo_1f

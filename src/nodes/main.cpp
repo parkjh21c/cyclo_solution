@@ -44,16 +44,11 @@ int main(int argc, char ** argv) {
     }
     const auto approach_config = demo_1f::load_approach_config(*node);
     if (approach_config.independent_return) {
-      const auto found = config.motion_sequences.find("right_return");
-      if (!config.smooth_motion || approach_config.other_arm_return_sequence != "right_return" ||
-          found == config.motion_sequences.end() || !found->second.validation_error.empty() ||
-          !demo_1f::validate_motion_sequence(found->second, config).empty() ||
-          found->second.steps.empty() ||
-          std::any_of(found->second.steps.begin(), found->second.steps.end(),
-              [](const demo_1f::Step & step) { return step.type != "joint" || step.arm != "right"; })) {
-        throw std::invalid_argument(
-            "demo.independent_return requires smooth_motion and "
-            "approach.other_arm_return_sequence=right_return with valid right-arm joint steps");
+      const auto error = demo_1f::independent_return_error(config, approach_config);
+      if (!config.smooth_motion || !error.empty()) {
+        throw std::invalid_argument("demo.independent_return requires smooth_motion and "
+            "right_return (+ approach.place_return_sequence) with valid right-arm joint steps: " +
+            (error.empty() ? std::string("smooth_motion is off") : error));
       }
     }
     demo_1f::RobotContext robot_context(*node, config,

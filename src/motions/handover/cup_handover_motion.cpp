@@ -43,13 +43,9 @@ bool CupHandoverMotion::is_ready_to_start(const std::string & arm,
     return false;
   }
   if (execute && giver_ == "right" && config_.independent_return) {
-    const auto * returning = sequence("right_return", reason);
-    if (config_.other_arm_return_sequence != "right_return" || !returning ||
-        returning->steps.empty() || !validate_motion_sequence(*returning, robot_).empty() ||
-        std::any_of(returning->steps.begin(), returning->steps.end(), [](const Step & step) {
-          return step.type != "joint" || step.arm != "right";
-        })) {
-      reason = "Independent cup return requires the configured right_return joint sequence";
+    const auto error = independent_return_error(robot_, config_);
+    if (!error.empty()) {
+      reason = "Independent cup return: " + error;
       return false;
     }
   }

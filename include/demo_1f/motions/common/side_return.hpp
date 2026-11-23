@@ -14,6 +14,7 @@ public:
   ExecutionResult result() const override;
   std::string arm() const override;
   std::string active_arm() const override;
+  std::string sequence_arm(const std::string & sequence) const override;
 
 private:
   std::vector<Step> steps(const std::string & sequence, std::string & reason) const;

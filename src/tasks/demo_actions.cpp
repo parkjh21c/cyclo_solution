@@ -60,6 +60,9 @@ void TaskManager::setup_demo_server() {
   demo_independent_return_ = node_.has_parameter("demo.independent_return") ?
       node_.get_parameter("demo.independent_return").as_bool() :
       node_.declare_parameter<bool>("demo.independent_return", true);
+  place_return_sequence_ = node_.has_parameter("approach.place_return_sequence") ?
+      node_.get_parameter("approach.place_return_sequence").as_string() :
+      node_.declare_parameter<std::string>("approach.place_return_sequence", "", read_only);
   if (demo_max_retries_ < 0 || demo_retry_delay_ < 0 || demo_pick_timeout_ <= 0 ||
       demo_max_cell_rounds_ < 1 || !(demo_basket_empty_max_age_ > 0)) {
     throw std::invalid_argument("Invalid demo retry/timeout parameters");
@@ -241,7 +244,8 @@ void TaskManager::start_demo_stage() {
     finish_demo(false, "NOT_READY", reason.empty() ? "Cup module missing" : reason, true);
     return;
   }
-  if (demo_stage_ == "PLACE_CUP" && demo_independent_return_ && !start_side_return(reason)) {
+  if (demo_stage_ == "PLACE_CUP" && demo_independent_return_ &&
+      !start_side_return(reason, place_return_sequence_)) {
     active_cup_motion_->cancel();
     fail_demo_stage("SIDE_BEFORE_MOTION", reason, false);
     return;

@@ -56,6 +56,7 @@ private:
   bool side_active() const; // Running or stopping.
   bool b2_return_ready(std::string & reason) const;
   // Empty sequence: the port's configured return; otherwise that sequence in the same slot.
+  // Its arm (not the name) decides the left or right return rules.
   bool start_side_return(std::string & reason, const std::string & sequence = {});
   void start_left_return(); // After REFINE_CUP; a failure before motion only warns.
   void cancel_side_return();
@@ -63,6 +64,7 @@ private:
   bool side_blocks_cup(const std::string & name, const std::string & arm) const;
   SideMotionPort * side_{nullptr};
   bool demo_independent_return_{true};
+  std::string place_return_sequence_; // approach.place_return_sequence; empty: the port's default
   bool side_watching_{false}, side_cancel_requested_{false}, side_waiting_{false};
   bool side_stage_stop_sent_{false};
   bool demo_prepare_deferred_{false}; // REFINE_CUP early pick waits for the side to arrive.

@@ -30,9 +30,13 @@ struct ApproachConfig {
   double refine_pitch_ceiling_deg{75.0};
   bool refine_observe{true}; // false: open at the approach pose without wrist rim observation.
   std::string other_arm_return_sequence{}; // motion_sequences name; empty: approach arm moves alone
+  std::string place_return_sequence{}; // Right return beside PLACE_CUP; empty: other_arm_return_sequence
   bool independent_return{true}; // demo.independent_return: the return runs as a side operation
   std::string validate(const std::string & arm) const;
 };
 
 ApproachConfig load_approach_config(rclcpp::Node & node);
+struct Config;
+// Empty when both independent right returns (APPROACH_CUP, PLACE_CUP) are valid right-arm joint sequences.
+std::string independent_return_error(const Config & robot, const ApproachConfig & config);
 } // namespace demo_1f

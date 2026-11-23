@@ -76,8 +76,9 @@ bool TaskManager::side_active() const {
 }
 
 bool TaskManager::b2_return_ready(std::string & reason) const {
-  if (!side_ || side_->arm() != "right") {
-    reason = "Independent cup return requires a configured right-arm side port";
+  if (!side_ || side_->sequence_arm(place_return_sequence_) != "right") {
+    reason = "Independent cup return requires a configured right-arm side port" +
+        (place_return_sequence_.empty() ? std::string() : " running " + place_return_sequence_);
     return false;
   }
   return true;
@@ -88,7 +89,14 @@ bool TaskManager::start_side_return(std::string & reason, const std::string & se
     reason = "Side return port missing";
     return false;
   }
-  const bool left = !sequence.empty();
+  const bool named = !sequence.empty();
+  const auto arm = side_->sequence_arm(sequence);
+  if (arm.empty()) {
+    reason = "Side sequence " + (named ? sequence : std::string("(default)")) + " has no arm";
+    RCLCPP_WARN(node_.get_logger(), "%s", reason.c_str());
+    return false;
+  }
+  const bool left = arm == "left"; // The sequence's arm, not the name, picks the failure rules.
   if (side_active()) {
     if (side_left_return_ == left) return true; // A stage retry keeps the return already under way.
     reason = "Side slot busy with the " + side_->active_arm() + " arm return";
@@ -98,9 +106,8 @@ bool TaskManager::start_side_return(std::string & reason, const std::string & se
   side_failure_.reset();
   side_cancel_requested_ = side_stage_stop_sent_ = false;
   side_left_return_ = left;
-  if (!(left ? side_->start_sequence(sequence, reason) : side_->start(reason))) {
-    RCLCPP_WARN(node_.get_logger(), "%s arm return not started: %s",
-        left ? "left" : side_->arm().c_str(), reason.c_str());
+  if (!(named ? side_->start_sequence(sequence, reason) : side_->start(reason))) {
+    RCLCPP_WARN(node_.get_logger(), "%s arm return not started: %s", arm.c_str(), reason.c_str());
     return false;
   }
   side_started_at_ = Clock::now();

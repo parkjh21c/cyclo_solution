@@ -1,4 +1,5 @@
 #include "demo_1f/motions/common/cup_scene.hpp"
+#include "demo_1f/runtime/config.hpp"
 #include <algorithm>
 #include <cmath>
 #include <tf2/LinearMath/Quaternion.h>
@@ -150,9 +151,29 @@ ApproachConfig load_approach_config(rclcpp::Node & node) {
   c.cup_source = node.declare_parameter("approach.cup_source", c.cup_source, descriptor);
   c.other_arm_return_sequence = node.declare_parameter(
       "approach.other_arm_return_sequence", c.other_arm_return_sequence, descriptor);
+  c.place_return_sequence = node.declare_parameter(
+      "approach.place_return_sequence", c.place_return_sequence, descriptor);
   c.independent_return =
       node.declare_parameter("demo.independent_return", c.independent_return, descriptor);
   return c;
+}
+
+std::string independent_return_error(const Config & robot, const ApproachConfig & config) {
+  if (config.other_arm_return_sequence != "right_return") {
+    return "approach.other_arm_return_sequence must be right_return";
+  }
+  for (const auto & name : {config.other_arm_return_sequence, config.place_return_sequence}) {
+    if (name.empty()) continue; // Empty place sequence: PLACE_CUP uses right_return.
+    const auto found = robot.motion_sequences.find(name);
+    if (found == robot.motion_sequences.end() || !found->second.validation_error.empty() ||
+        !validate_motion_sequence(found->second, robot).empty() || found->second.steps.empty() ||
+        std::any_of(found->second.steps.begin(), found->second.steps.end(), [](const Step & step) {
+          return step.type != "joint" || step.arm != "right";
+        })) {
+      return "Independent return sequence " + name + " needs valid right-arm joint steps";
+    }
+  }
+  return {};
 }
 
 std::optional<geometry_msgs::msg::Pose> approach_tcp_target(const geometry_msgs::msg::Pose & body,

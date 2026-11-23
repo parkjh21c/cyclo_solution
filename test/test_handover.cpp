@@ -149,6 +149,24 @@ TEST(PlanningConfig, LeftReturnKeepsItsExplicitLeftArm) {
   EXPECT_EQ(sequence.steps.front().type, "joint");
 }
 
+TEST(PlanningConfig, CupRightReturnResolvesTheGiverToTheRightArm) {
+  rclcpp::NodeOptions options;
+  const std::string prefix = "motion_sequences.cup_right_return.";
+  options.parameter_overrides({
+      rclcpp::Parameter(prefix + "steps", std::vector<std::string>{"giver_home"}),
+      rclcpp::Parameter(prefix + "giver_home.type", "joint"),
+      rclcpp::Parameter(prefix + "giver_home.arm", "giver"),
+      rclcpp::Parameter(prefix + "giver_home.target",
+          std::vector<double>{1.05, 0.0, 0.0, -2.27, 0.0, 0.35, 0.0})});
+  auto node = std::make_shared<rclcpp::Node>("cup_right_return_config", options);
+  const auto config = load_config(*node);
+  const auto & sequence = config.motion_sequences.at("cup_right_return");
+  EXPECT_EQ(sequence.giver, "right");
+  ASSERT_EQ(sequence.steps.size(), 1u);
+  EXPECT_EQ(sequence.steps.front().arm, "right");
+  EXPECT_EQ(sequence.steps.front().type, "joint");
+}
+
 TEST(PlanningConfig, TfSpinThreadDefaultsOff) {
   auto defaults = std::make_shared<rclcpp::Node>("tf_spin_thread_default");
   EXPECT_FALSE(load_config(*defaults).tf_spin_thread);

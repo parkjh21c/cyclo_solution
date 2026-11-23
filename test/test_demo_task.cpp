@@ -17,6 +17,8 @@ public:
   static Request current(const TaskManager & manager) { return manager.pick_; }
   static std::uint64_t run(const TaskManager & manager) { return manager.demo_run_id_; }
   static std::string detail(const TaskManager & manager) { return manager.demo_detail_; }
+  static double side_seconds(const TaskManager & manager) { return manager.side_return_seconds_; }
+  static double left_seconds(const TaskManager & manager) { return manager.left_return_seconds_; }
   static void feedback(TaskManager & manager, const Request & request,
       ffw_vision_msgs::action::PickDynamixel::Feedback::ConstSharedPtr feedback) {
     manager.on_pick_feedback(request, feedback);
@@ -95,7 +97,12 @@ public:
   std::string active = "right";
   std::vector<std::string> order; // Sequence of every start, in order.
   ExecutionResult state;
+  std::string sequence_arm(const std::string & sequence) const override {
+    if (sequence.empty() || sequence == "cup_right_return") return "right";
+    return sequence == "left_return" ? "left" : std::string();
+  }
   bool start_sequence(const std::string & sequence, std::string & reason) override {
+    if (sequence_arm(sequence) == "right") return start_right(sequence, reason);
     if (!left_supported) return SideMotionPort::start_sequence(sequence, reason);
     ++left_starts;
     active = "left";
@@ -110,10 +117,11 @@ public:
     return true;
   }
   std::string active_arm() const override { return active; }
-  bool start(std::string & reason) override {
+  bool start(std::string & reason) override { return start_right("right_return", reason); }
+  bool start_right(const std::string & sequence, std::string & reason) {
     ++starts;
     active = "right";
-    order.push_back("right_return");
+    order.push_back(sequence);
     if (refuse) {
       reason = "test side refusal";
       state = {ExecutionState::Failed, "PATH_PREPARATION_FAILED", reason};
@@ -205,6 +213,7 @@ protected:
   Side side;
   bool independent = true; // demo.independent_return
   bool left_return = true;  // demo.left_return_after_refine
+  std::string place_sequence; // approach.place_return_sequence
   std::unique_ptr<HandoverMotion> handover;
   std::unique_ptr<InitialPoseMotion> initial;
   std::unique_ptr<Cup> approach, refine, withdraw, pick_cup, handover_cup, pour, handover_back, place;
@@ -242,7 +251,8 @@ protected:
         rclcpp::Parameter("demo.withdraw_cup", withdraw_enabled),
         rclcpp::Parameter("demo.prepare_pick_during_refine", prepare),
         rclcpp::Parameter("demo.independent_return", independent),
-        rclcpp::Parameter("demo.left_return_after_refine", left_return)};
+        rclcpp::Parameter("demo.left_return_after_refine", left_return),
+        rclcpp::Parameter("approach.place_return_sequence", place_sequence)};
     if (max_rounds > 0) overrides.emplace_back("demo.max_cell_rounds", max_rounds);
     node = std::make_shared<rclcpp::Node>("demo_task_test",
         rclcpp::NodeOptions().parameter_overrides(overrides));
@@ -1823,6 +1833,130 @@ TEST_F(B2PairedPlaceTest, DisabledIndependentReturnNeedsNoPortForStandalonePlace
   auto result = cup_client->async_get_result(goal); wait(result);
   EXPECT_TRUE(result.get().result->success);
   EXPECT_EQ(side.starts, 0);
+}
+
+// Empty approach.place_return_sequence (the demo order is pinned in RefineSuccessStartsTheLeftReturnAfterTheRound).
+TEST_F(B2PlaceTest, EmptyPlaceSequenceKeepsRightReturnForStandalonePlace) {
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.order, (std::vector<std::string>{"right_return"}));
+}
+
+// approach.place_return_sequence set: menu 0 runs its own right sequence, menu 4 keeps right_return.
+class B2NamedPlaceTest : public B2PlaceTest {
+protected:
+  void SetUp() override {
+    place_sequence = "cup_right_return";
+    B2PlaceTest::SetUp();
+  }
+};
+
+TEST_F(B2NamedPlaceTest, DemoRunsTheNamedSequenceAtPlaceAndRightReturnAtApproach) {
+  side.left_supported = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.order,
+      (std::vector<std::string>{"right_return", "left_return", "cup_right_return"}));
+}
+
+TEST_F(B2NamedPlaceTest, StandaloneApproachKeepsRightReturnAndPlaceRunsTheNamedSequence) {
+  auto approach_client = rclcpp_action::create_client<CupAction>(node, "/approach_cup");
+  ASSERT_TRUE(approach_client->wait_for_action_server(2s));
+  CupAction::Goal request;
+  request.arm = "left"; request.cup_id = "cup"; request.execute = true;
+  auto accepted = approach_client->async_send_goal(request); wait(accepted);
+  ASSERT_TRUE(accepted.get());
+  auto approached = approach_client->async_get_result(accepted.get()); wait(approached);
+  EXPECT_TRUE(approached.get().result->success);
+  for (int i = 0; i < 50 && !manager->can_shutdown(); ++i) pump();
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.order, (std::vector<std::string>{"right_return", "cup_right_return"}));
+}
+
+TEST_F(B2NamedPlaceTest, NamedRightReturnSuccessCountsAsTheRightReturnTime) {
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  for (int i = 0; i < 50 && !manager->can_shutdown(); ++i) pump();
+  EXPECT_EQ(side.left_starts, 0);
+  EXPECT_GE(TaskManagerTestAccess::side_seconds(*manager), 0);
+  EXPECT_LT(TaskManagerTestAccess::left_seconds(*manager), 0);
+}
+
+TEST_F(B2NamedPlaceTest, NamedRightFailureBeforeMotionStopsPlaceUnlikeTheLeftRule) {
+  side.stall = place->stall = true;
+  auto goal = send_place(); ASSERT_TRUE(goal);
+  side.fail(true);
+  auto result = cup_client->async_get_result(goal); wait(result);
+  EXPECT_FALSE(result.get().result->success);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_BEFORE_MOTION");
+  EXPECT_FALSE(place->running());
+}
+
+TEST_F(B2NamedPlaceTest, DemoNamedRightFailureBeforeMotionStopsThePlaceStage) {
+  hold_return_at_place();
+  place->stall = true;
+  auto goal = send(); ASSERT_TRUE(goal);
+  for (int i = 0; i < 1500 && place->runs == 0; ++i) pump();
+  ASSERT_EQ(place->runs, 1);
+  side.fail(true);
+  auto result = client->async_get_result(goal); wait(result);
+  EXPECT_EQ(result.get().result->error_code, "SIDE_BEFORE_MOTION");
+  EXPECT_FALSE(place->running());
+  EXPECT_EQ(std::count(executor.executed.begin(), executor.executed.end(), "initial_test"), 1);
+}
+
+TEST_F(B2NamedPlaceTest, PlaceRetryKeepsTheRunningNamedReturn) {
+  side.stall = true;
+  place->failures = 1;
+  auto first = send_place(); ASSERT_TRUE(first);
+  auto failed = cup_client->async_get_result(first); wait(failed);
+  EXPECT_FALSE(failed.get().result->success);
+  auto retry = send_place(); ASSERT_TRUE(retry);
+  auto result = cup_client->async_get_result(retry); wait(result);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(side.order, (std::vector<std::string>{"cup_right_return"}));
+  EXPECT_EQ(side.cancels, 0);
+  side.stall = false;
+}
+
+class B2UnknownPlaceTest : public B2PlaceTest {
+protected:
+  void SetUp() override {
+    place_sequence = "missing_return";
+    B2PlaceTest::SetUp();
+  }
+};
+
+TEST_F(B2UnknownPlaceTest, PlaceSequenceWithoutARightArmRejectsPlaceAndHandoverBack) {
+  EXPECT_FALSE(send_place());
+  auto back = rclcpp_action::create_client<CupAction>(node, "/handover_cup_back");
+  ASSERT_TRUE(back->wait_for_action_server(2s));
+  CupAction::Goal request;
+  request.arm = "right"; request.cup_id = "cup"; request.execute = true;
+  auto accepted = back->async_send_goal(request); wait(accepted);
+  EXPECT_FALSE(accepted.get());
+  EXPECT_EQ(side.starts, 0);
+  EXPECT_EQ(place->runs, 0);
+}
+
+class B2LeftPlaceTest : public B2PlaceTest {
+protected:
+  void SetUp() override {
+    place_sequence = "left_return";
+    B2PlaceTest::SetUp();
+  }
+};
+
+TEST_F(B2LeftPlaceTest, LeftArmPlaceSequenceIsRejected) {
+  side.left_supported = true;
+  EXPECT_FALSE(send_place());
+  EXPECT_EQ(side.left_starts, 0);
+  EXPECT_EQ(place->runs, 0);
 }
 
 TEST_F(DemoTest, ApproachStartsTheSideReturnAndRefineDoesNotWaitForIt) {
