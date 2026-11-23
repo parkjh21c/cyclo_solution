@@ -26,7 +26,7 @@ handover_demo:
       fixed_pose: true
       tcp_pitch_deg: 40.0 # Fixed-pose downward pitch; within tcp_pitch_min_deg..tcp_pitch_limit_deg.
       forward_offset: 0.025 # TCP target pushed this far along the hand heading (held cell sits behind the tip).
-      travel_scale: 0.3
+      travel_scale: 0.4
       other_arm_return_sequence: right_return # handover.yaml sequence run with the approach; "" = off
       max_position_error: 0.15
       max_age: 900.0 # Keep the last confirmed head BODY location through temporary occlusion.
