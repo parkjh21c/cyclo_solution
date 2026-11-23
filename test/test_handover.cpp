@@ -2893,7 +2893,8 @@ class RoundTripFixture : public RosFixture {
 protected:
   void SetUp() override {
     RosFixture::SetUp();
-    for (const auto * name : {"left_wheel_drive", "right_wheel_drive", "rear_wheel_drive"}) {
+    for (const auto * name : {"left_wheel_drive", "right_wheel_drive", "rear_wheel_drive",
+             "head_joint2"}) {
       positions[name] = 0;
     }
     enable_smoothing();
@@ -3278,6 +3279,19 @@ TEST_F(RoundTripWheelFixture, CancellationDuringWheelStabilizationNeverAdvances)
   EXPECT_EQ(executor.result().state, ExecutionState::Cancelled);
   EXPECT_TRUE(executor.result().last_completed_step.empty());
   EXPECT_EQ(execution_goals.size(), 1u);
+}
+
+TEST_F(RoundTripFixture, HeadMotionNeitherBlocksNorCancelsTheRoundTrip) {
+  velocities["head_joint2"] = -.047938; // look_right still turning (2 DYNAMIXEL units)
+  refresh();
+  TrajectoryExecutor executor(*node, config, *context);
+  warmup(executor);
+  ASSERT_TRUE(executor.start_round_trip(tilt, hold, untilt)) << executor.result().detail;
+  positions["head_joint2"] = -.26; // Keeps turning during the tilt.
+  refresh();
+  ASSERT_TRUE(finish(executor));
+  EXPECT_EQ(executor.result().state, ExecutionState::Succeeded) << executor.result().detail;
+  EXPECT_EQ(execution_goals.size(), 2u);
 }
 
 TEST_F(RoundTripFixture, PlansOnceAndExecutesExactTimeReversalTwice) {

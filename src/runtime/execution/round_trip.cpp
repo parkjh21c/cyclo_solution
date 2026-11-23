@@ -218,6 +218,8 @@ void TrajectoryExecutor::round_trip_scene(const std::shared_ptr<Operation> & op,
   state.update();
   if (!prepare_execution) {
     trip.initial_positions = trip.scene_positions;
+    // The head turns on its own look_* commands; round trips neither check nor wait for it.
+    for (const auto * name : {"head_joint1", "head_joint2"}) trip.initial_positions.erase(name);
     for (const auto & [side, arm] : config_.arms) {
       (void)side;
       auto controlled = arm.joints;
