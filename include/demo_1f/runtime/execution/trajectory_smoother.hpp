@@ -14,6 +14,7 @@ struct SmoothPath {
   moveit_msgs::msg::RobotTrajectory trajectory;
   std::vector<size_t> point_steps;
   std::vector<double> segment_end_times;
+  size_t knots{0}; // Waypoints left after simplification (diagnostic only).
 };
 
 MotionLimits effective_limits(const Config & config,

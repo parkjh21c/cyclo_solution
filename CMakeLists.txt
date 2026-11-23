@@ -183,6 +183,10 @@ add_executable(handover_demo_node src/nodes/main.cpp)
 target_link_libraries(handover_demo_node demo_tasks)
 add_executable(check_feedback src/nodes/check_feedback.cpp)
 target_link_libraries(check_feedback demo_runtime)
+add_executable(compare_return_paths tools/compare_return_paths.cpp)
+target_link_libraries(compare_return_paths demo_runtime)
+install(TARGETS compare_return_paths RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS tools/plot_return_compare.py DESTINATION lib/${PROJECT_NAME})
 install(
   TARGETS demo_runtime demo_motions demo_tasks cup_detector
   EXPORT export_demo_modules

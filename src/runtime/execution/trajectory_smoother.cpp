@@ -294,6 +294,7 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
     }
     boundaries.push_back(positions.size() - 1);
   }
+  output.knots = positions.size();
   std::vector<std::vector<MotionLimits>> limits(positions.size());
   std::vector<double> estimates(positions.size(), 0.02);
   for (size_t i = 1; i < positions.size(); ++i) {
