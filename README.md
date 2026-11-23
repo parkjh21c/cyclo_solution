@@ -19,6 +19,30 @@ MoveIt에서 손에 붙은 컵 모델(`demo_place_cup`)을 떼고 삭제합니�
 `ai_worker`의 인식·파지·해석 IK 코드는 `modules/dynamixel_pick/`에 포함되어 있습니다.
 빌드, 인식 의존성, 실행 및 복구 방법은 [통합 데모 설명](docs/dynamixel_demo.md)을 참고하세요.
 
+### 1. bringup (터미널 1, ai_worker)
+
+```bash
+ros2 launch ffw_bringup ffw_sg2_follower_ai.launch.py launch_cameras:=false
+
+or
+
+ffw_sg2_follower_ai launch_cameras:=false
+```
+
+- `init_position_file` 은 쓰지 않는다. custom 자세는 head 0.76 이 URDF 상한 0.6951 을 넘어 핸드오버 smoother 가 실패한다.
+
+### 2. 카메라 켜기 (터미널 2, ai_worker) ← 이번 질문
+
+한 번에 (권장): ZED 를 먼저 켜고 10 s 뒤 손목 D405 를 켠다.
+
+```bash
+source /workspace/vision_ws/install/setup.bash
+ros2 launch ffw_vision demo_cameras.launch.py
+# 손목 시작 지연 바꾸기: wrist_delay:=5.0
+```
+
+### 3. launch full_demo & action_runner (터미널 3, 4, orin 컨테이너)
+
 ```bash
 # 기존 ROS 컨테이너 안에서, 새 이미지 없이 빌드
 cd /root/ros2_ws/src/demo_1f
@@ -27,6 +51,18 @@ source /root/ros2_ws/install/setup.bash
 ros2 launch demo_1f full_demo.launch.py use_sim_time:=false
 # 다른 터미널: 1(시작 자세), 2(현재 자세에서 픽), d(전체), r(재개), c(취소)
 ros2 run demo_1f action_runner.py
+```
+
+- rviz로 보고 싶을 때
+```bash
+# PC 컨테이너: zenoh 라우터는 Jetson(192.168.6.2:7447) 것을 쓴다. 터미널마다 필요
+export ROS_DOMAIN_ID=30
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/192.168.6.2:7447"]'
+ros2 daemon stop
+ros2 topic list --no-daemon | grep -E "joint_states|move_group"   # 보여야 함
+
+ros2 run rviz2 rviz2 -d $(ros2 pkg prefix ffw_moveit_config)/share/ffw_moveit_config/config/moveit.rviz
 ```
 
 `1`은 양손을 연 뒤 양팔·리프트·헤드를 하나의 MoveIt 경로로 시작 자세에 이동합니다.

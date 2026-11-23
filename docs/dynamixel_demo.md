@@ -22,6 +22,71 @@ The original checkout under `ai_worker/` is not changed or used to build the imp
 `modules/dynamixel_pick/UPSTREAM.md` records their source commit. `ai_worker/COLCON_IGNORE`
 prevents a duplicate bringup build. Camera drivers and robot bringup remain external.
 
+## 중앙 상태 제어와 복구 구조의 발전 방향
+
+2026-11-13 멘토 논의에서 나온 중앙 관리·모듈화·트리·리커버리 BT를 다음 방향으로 정리한다.
+BT(Behavior Tree)는 도입 후보이며, 아래 내용은 현재 구현과 구분한 설계 방향이다.
+
+### 현재 기반
+
+지금도 `TaskManager`가 전체 데모의 순서, 실행 소유권, 제한된 재시도·취소·재개를 관리한다.
+개별 메뉴는 모션을 따로 검증하는 수단이며, 전체 데모는 `src/tasks/demo_actions.cpp`의
+상태 전이로 진행한다. 모션은 `start()` → `tick()` → `result()`와 취소 인터페이스를 제공한다.
+따라서 중앙 관리를 처음부터 새로 만드는 것이 아니라, 기존 중앙 실행기에 상태 판단과
+복구 정책을 보강하는 방향이다. 현재 중앙 실행기는 BT로 구현되어 있지 않다.
+
+### 역할과 상태 보고
+
+| 계층 | 책임 |
+|---|---|
+| 중앙 작업 제어 | 시작 조건 확인, 모듈 선택, 완료 판단, 재시도·대체·복구·중단 결정 |
+| 동작 모듈 | 셀 집기·핸드오버·컵 접근·붓기 수행, 진행·결과·실패 후 상태 보고 |
+| 궤적 실행기와 컨트롤러 | 경로 계획·충돌 검사·실행·취소·정지 확인 |
+| 상태 공유 | 관절·TF·인식 등 관측값과 시각 제공; 명령 실행과 분리 |
+
+양팔 짝 이동처럼 한 작업 안에서 동기화해야 하는 궤적은 모션과 실행기가 담당한다.
+중앙은 관절 궤적을 직접 계산하기보다 작업의 시작·완료 조건과 다음 행동을 관리한다.
+개별 모듈을 각각 별도 프로세스로 나누는 것은 이 구조의 필수 조건이 아니다.
+
+각 모듈의 계약에는 다음을 명시하고, 중앙에서 필요한 항목을 공통 결과·상태로 제공한다.
+
+- 시작 조건: 팔 자세, 관측값의 유효성, 물체·장면 상태, 다른 실행의 종료 여부.
+- 완료 조건: 요청 수락이나 컨트롤러 종료와 구분한 작업 목표의 달성 기준.
+- 진행과 실패: 마지막 완료 단계, 실패 단계, 실행 전 실패인지 움직인 뒤 실패인지.
+- 실패 후 상태: 정지 확인 여부, 물체를 든 손과 컵 기울기 등 복구에 필요한 상태.
+- 복구 범위: 재시도·대체가 가능한 조건과 사용자 개입이 필요한 조건.
+
+물리적 상태는 센서로 확인한 사실, 명령 결과로 추정한 상태, 알 수 없는 상태를 구분한다.
+그리퍼 닫힘이나 MoveIt 컵 모델 부착만으로 실제 파지 성공을 확정하지 않는다.
+현재 `RunDemo.action`의 `holding_state`는 항상 `UNVERIFIED`인 호환 필드이며 실행 판단에
+사용하지 않는다. 향후 물체 소유 상태를 도입할 때 확인 근거와 관측 시각도 함께 정의한다.
+
+### BT와 리커버리의 의미
+
+BT는 작업 순서와 조건·대체 분기를 트리로 표현하는 방법이다. 기존 모션을 감싸 실행하고
+진행 중·성공·실패를 중앙에 반환하는 노드로 연결할 수 있다. 노드 중단 시에는 모션 취소와
+정지 확인까지 연결하고, 실행 소유권을 중복해서 만들지 않아야 한다.
+리커버리는 같은 동작의 무조건 반복이 아니라 실패 종류와 현재 상태에 따른 행동 선택이다.
+
+- 컵 접근의 짝 이동이 실행 전에 계획·검증에서 실패했다면, 조건을 확인하고 순차 이동으로 대체한다.
+- 실행 중 실패하거나 정지가 확인되지 않았다면 다음 이동을 시작하지 않는다.
+- 붓기 후 `pour_untilt`가 실패했다면 컵이 이미 기울어져 있을 수 있다. 붓기 전체 재시도와
+  현재 자세에서의 복구를 구분한다. 왕복 경로 사전 검증은 동작 모듈의 개선 과제다.
+- 관측 실패는 유효한 입력을 다시 기다릴 수 있지만, 완료한 파지·인계를 자동 반복하지 않는다.
+
+현재 제한된 재시도 정책은 `include/demo_1f/tasks/demo_recovery.hpp`와 픽 백엔드 결과를
+따른다. 위 방향을 기록했다고 새 복구 동작이나 자동 재시도가 활성화되는 것은 아니다.
+
+### 진행 순서
+
+1. 지금처럼 개별 동작을 실물에서 검증하면서 시작·완료 조건과 실패 후 상태를 정리한다.
+2. 중앙이 사용하는 결과·상태 계약과 모듈 간 조건을 명확히 한다.
+3. 실행 전 실패, 실행 중 실패, 취소, 정지 미확인에 대한 전이·복구 정책을 검증한다.
+4. 분기가 늘어 BT가 유리해지면 기존 모션을 재사용해 중앙 상태 전이를 점진적으로 옮긴다.
+
+BT 도입 자체보다 상태와 복구 조건의 명확화가 먼저다. 모션 검증과 모듈화를 계속 진행하는
+현재 방향은 이 구조의 기반이 되며, 중앙 제어 방식이 바뀌어도 재사용한다.
+
 ## Build in an existing container
 
 Copy/mount this folder at `/root/ros2_ws/src/demo_1f`, then:
@@ -144,6 +209,17 @@ ros2 action send_goal /run_demo demo_1f/action/RunDemo \
    (opposite hand-forward), preserving orientation. Each withdrawal uses collision-checked LIN;
    failure/cancellation stops the sequence. A downward retreat is rejected.
 7. RETURN_INITIAL: reuse the initial-pose module after successful withdrawal; do not repeat pick.
+
+Cell rounds (`start`): after REFINE_CUP the demo picks again, so steps 2–5 repeat without
+re-initialization (APPROACH_CUP returns the right arm to the observation pose). When a pick
+ends with `BASKET_EMPTY` before any motion and `/demo/basket_pose` is in the planning frame and
+at most `demo.basket_empty_max_age` (5 s) old, the cup section runs once:
+(WITHDRAW_CUP if enabled and at least one round finished) → PICK_CUP → HANDOVER_CUP → POUR_CUP
+→ HANDOVER_CUP_BACK → PLACE_CUP → RETURN_INITIAL. Without that basket view the pick fails as
+`BASKET_UNKNOWN`, retries, then stops resumable; the cup section does not start.
+`demo.max_cell_rounds` (10) finished rounds stop with `CELL_ROUND_LIMIT` (resumable; resume
+counts again from zero). Feedback detail starts with `Round N: ` during a round.
+`pick` alone ends with `BASKET_EMPTY` on an empty basket.
 
 Menu `5` / `/refine_cup` stops after release. Menu `6` / `/withdraw_cup` only withdraws
 both hands sequentially, with no perception or gripper commands.
