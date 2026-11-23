@@ -20,16 +20,17 @@ def setup(context):
         .joint_limits(file_path=str(demo / "config/sg2_joint_limits.yaml"))
         .trajectory_execution(file_path=str(demo / "config/sg2_moveit_controllers.yaml"))
         .planning_pipelines(
-            pipelines=["ompl", "pilz_industrial_motion_planner"], default_planning_pipeline="ompl"
+            pipelines=["ompl", "pilz_industrial_motion_planner", "stomp"],
+            default_planning_pipeline="ompl",
         )
         .to_moveit_configs()
     )
-    for pipeline in ["ompl", "pilz_industrial_motion_planner"]:
+    for pipeline in ["ompl", "pilz_industrial_motion_planner", "stomp"]:
         adapters = config.planning_pipelines[pipeline]["request_adapters"]
-        adapters.insert(
-            adapters.index("default_planning_request_adapters/CheckStartStateBounds"),
-            "demo_1f/SnapStartStateBounds",
-        )
+        bounds = "default_planning_request_adapters/CheckStartStateBounds"
+        # STOMP uses moveit_configs_utils defaults; snap first if bounds check is absent.
+        adapters.insert(adapters.index(bounds) if bounds in adapters else 0,
+                        "demo_1f/SnapStartStateBounds")
     # Pilz in the deployed Jazzy version requires a chain IK solver even for
     # joint goals. A branched two-arm group uses OMPL's joint-space planner.
     # Jazzy's bundled defaults define "RRTConnect", not our requested config ID.
