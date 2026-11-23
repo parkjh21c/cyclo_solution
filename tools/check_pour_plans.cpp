@@ -177,12 +177,7 @@ bool plan(const rclcpp::Node::SharedPtr & node,
 
 int run(const rclcpp::Node::SharedPtr & node, std::set<int, std::greater<int>> & remaining) {
   const auto remote = node->declare_parameter<std::string>("config_node", "/handover_demo");
-  const auto frame = node->declare_parameter<std::string>("basket_frame", "");
-  const double z = node->declare_parameter<double>("basket_z", std::numeric_limits<double>::quiet_NaN());
   const auto cup_id = node->declare_parameter<std::string>("attached_cup_id", "demo_place_cup");
-  if (frame.empty() || !std::isfinite(z)) {
-    throw std::runtime_error("Explicit basket_z and basket_frame required; historical values are unknown");
-  }
   auto parameters = std::make_shared<rclcpp::SyncParametersClient>(node, remote);
   if (!parameters->wait_for_service(10s)) throw std::runtime_error("Configuration node unavailable");
   const auto names = parameters->list_parameters({}, 0, 10s).names;
@@ -200,7 +195,7 @@ int run(const rclcpp::Node::SharedPtr & node, std::set<int, std::greater<int>> &
   for (const auto & name : settings->list_parameters({}, 0).names) {
     if (!snapshot.count(name)) throw std::runtime_error("Live configuration lacks " + name);
   }
-  if (frame != config.planning_frame) throw std::runtime_error("basket_frame must equal live planning_frame");
+  const auto & frame = config.planning_frame;
   if (pour.angle_deg != 130 || pour.fallback_angles_deg != std::vector<double>{115, 100}) {
     throw std::runtime_error("Live pour angles differ from 130/115/100; refusing to override production settings");
   }
@@ -219,12 +214,11 @@ int run(const rclcpp::Node::SharedPtr & node, std::set<int, std::greater<int>> &
   const double basket_quaternion_norm = bq.x * bq.x + bq.y * bq.y + bq.z * bq.z + bq.w * bq.w;
   const double observed_yaw = std::atan2(2 * (bq.w * bq.z + bq.x * bq.y),
       1 - 2 * (bq.y * bq.y + bq.z * bq.z));
-  const double basket_offset = std::hypot(std::hypot(bp.x - .412, bp.y + .227), bp.z - z);
-  if (observed_basket->header.frame_id != frame || !std::isfinite(basket_offset) ||
-      !std::isfinite(observed_yaw) || !std::isfinite(basket_quaternion_norm) ||
-      std::abs(basket_quaternion_norm - 1) > .01 || basket_offset > .001 ||
-      std::abs(std::remainder(observed_yaw - 92.3 * M_PI / 180, 2 * M_PI)) > .1 * M_PI / 180) {
-    throw std::runtime_error("Current basket observation differs from the reproduction reference");
+  // Plan from the live basket observation, as /pour_cup does.
+  if (observed_basket->header.frame_id != frame || !std::isfinite(bp.x) || !std::isfinite(bp.y) ||
+      !std::isfinite(bp.z) || !std::isfinite(observed_yaw) ||
+      std::abs(basket_quaternion_norm - 1) > .01) {
+    throw std::runtime_error("Basket observation is not a valid pose in the planning frame");
   }
   const auto urdf = urdf::parseURDF(snapshot.at("robot_description").as_string());
   auto semantic = std::make_shared<srdf::Model>();
@@ -335,17 +329,14 @@ int run(const rclcpp::Node::SharedPtr & node, std::set<int, std::greater<int>> &
           tcp.position.z - hold->target[2]) > pour.hold_tolerance) {
     throw std::runtime_error("Scene is not at the transfer hold pose; cannot reproduce the pour approach");
   }
-  geometry_msgs::msg::Pose basket;
-  basket.position.x = .412;
-  basket.position.y = -.227;
-  basket.position.z = z;
-  basket.orientation.z = std::sin(92.3 * M_PI / 360);
-  basket.orientation.w = std::cos(92.3 * M_PI / 360);
+  const auto & basket = observed_basket->pose;
   std::string reason;
   const auto geometry = demo_1f::plan_pour(tcp, basket, approach.cup_height, pour, reason);
   if (!geometry) throw std::runtime_error(reason);
-  std::cout << std::setprecision(17) << "basket frame=" << frame << " x=0.412 y=-0.227 z=" << z
-            << " yaw_deg=92.3 config_node=" << remote << " cup=" << cup_id << '\n';
+  std::cout << std::setprecision(17) << "basket frame=" << frame << " x=" << bp.x << " y=" << bp.y
+            << " z=" << bp.z << " yaw_deg=" << observed_yaw * 180 / M_PI << " shift=" << pour.shift
+            << " lip=" << geometry->lip.x << ',' << geometry->lip.y << ',' << geometry->lip.z
+            << " clamped=" << geometry->clamped << " config_node=" << remote << " cup=" << cup_id << '\n';
   std::cout << "scene=" << std::quoted(message.name) << " world_objects=" << message.world.collision_objects.size()
             << " attachments=" << message.robot_state.attached_collision_objects.size()
             << " joint_stamp=" << joints.header.stamp.sec << '.' << joints.header.stamp.nanosec << '\n';

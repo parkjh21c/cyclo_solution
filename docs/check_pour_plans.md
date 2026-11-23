@@ -12,9 +12,7 @@
 
 ## Basket evidence
 
-The reference is x=0.412 m, y=-0.227 m, yaw=92.3°. No matching historical observation/log with z and frame was found in the accessible workspace, notes, or `/tmp`. The observer's default `base_link` and the test fixture's z=0.725 are not evidence for this observation. Both `basket_z` and `basket_frame` are mandatory; there is no fallback.
-
-The tool also requires a retained `/demo/basket_pose` observation matching the supplied reference within 1 mm and 0.1° (allowing rounded log values), and existing `basket_*` collision objects in the scene. It does not relocate collision objects to match the input. Confirm the observer's scene update succeeded before checking. A matching pose topic alone cannot prove that the scene's basket boxes have caught up with that observation.
+The tool plans from the retained `/demo/basket_pose` observation, as `/pour_cup` does; it must be a valid pose in the live planning frame. It prints the basket, `pour.shift`, the lip target, and whether the lip target was clamped inside the rim. The scene must already hold the `basket_*` collision objects for that observation; the tool does not move them. Confirm the observer's scene update succeeded before checking.
 
 Read-only inspection in the container:
 
@@ -22,8 +20,6 @@ Read-only inspection in the container:
 ros2 topic echo /demo/basket_pose --once --qos-durability transient_local
 ros2 param get /handover_demo planning_frame
 ```
-
-A new observation can establish a current reproduction input, but cannot prove the missing historical z or historical obstacle arrangement.
 
 ## Build and run
 
@@ -47,12 +43,8 @@ source install/setup.bash
 colcon build --base-paths src/demo_1f src/demo_1f/modules/dynamixel_pick/ffw_* \
   --packages-select demo_1f --cmake-args -DBUILD_TESTING=ON
 source install/setup.bash
-read -r -p 'Verified basket z (m): ' POUR_BASKET_Z
-read -r -p 'Verified basket frame: ' POUR_BASKET_FRAME
 set -o pipefail
-ros2 run demo_1f check_pour_plans --ros-args \
-  -p basket_z:="$POUR_BASKET_Z" -p basket_frame:="$POUR_BASKET_FRAME" \
-  2>&1 | tee /tmp/check_pour_plans.log
+ros2 run demo_1f check_pour_plans 2>&1 | tee /tmp/check_pour_plans.log
 ```
 
 Use the same ROS domain, middleware, and service remappings as the existing demo. The tool reads its ROS clock mode from the live configuration. Do not start another demo or MoveIt node for this check.
