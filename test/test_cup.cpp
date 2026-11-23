@@ -1521,7 +1521,7 @@ TEST_F(ApproachFixture, RepeatedReadsAndReplayCannotRefreshStoredHeadCup) {
   EXPECT_NE(reason.find("expired"), std::string::npos);
 }
 
-TEST_F(ApproachFixture, InitialSamplesAreDistinctAndAveragedWithConservativeGeometry) {
+TEST_F(ApproachFixture, InitialSamplesAreDistinctAndAveragedWithCappedSceneError) {
   ASSERT_TRUE(start());
   observe("head", -.006);
   motion->tick();

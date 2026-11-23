@@ -250,7 +250,7 @@ ros2 launch demo_1f perception.launch.py config:=/demo_config/perception.yaml
 | 항목 | 값 |
 |---|---|
 | BODY XY / Z | 입구 중심 / 입구 Z − 컵 높이/2 (기존 접근 계산과 동일한 중간 높이) |
-| `position_error` | 0.06m (충돌 원기둥 반지름 0.11m) |
+| `position_error` | 0.06m (헤드 호환 게이트용; 충돌 원기둥 반지름은 0.044 + 0.01 = 0.054m) |
 | 시야 | 탁자 기준 대략 x 0.35~0.75m, y 0~0.45m (그리퍼 가림 제외) |
 
 `config/approach.yaml`의 `cup_source: wrist_left_init`이면 FIND_CUP이 이 저장값을 사용하고,
@@ -357,7 +357,7 @@ ros2 action send_goal /approach_cup demo_1f/action/ApproachCup \
 | 목표 XYZ | BODY X/Y + `offset_xy`, BODY Z + `cup_height` + `offset_z` (현재 0.165 − 0.05 = +0.115m) |
 | 컵 높이 | 0.165m; 목표 Z에 다른 여유·불확실성 높이를 추가하지 않음 |
 | 컵 충돌 모델 | BODY Z를 중간 높이로 가정, 모델 입구는 Z+8.25cm |
-| 수평 충돌 범위 | 컵 반지름 + 벽 두께 + 관측 불확실성 |
+| 수평 충돌 범위 | 측정한 입구 바깥 반지름 `scene_radius`(0.044m) + 관측 불확실성(최대 `scene_margin` 0.01m). BODY 오차는 게이트상 0.05m 이상이라 손목 초기·헤드 모두 상한 0.01이 적용됨 (헤드는 사용하지 않음) |
 | TCP 롤·피치 | 몸체 기준 roll ±10°, pitch 아래쪽 20~60°, yaw 정면~안쪽 90° |
 | 속도 | 접근 0.3 |
 
