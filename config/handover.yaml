@@ -280,7 +280,7 @@ handover_demo:
           - -1.9681034
           - 1.43097349
           - 0.27834375
-      # approach.other_arm_return_sequence target: the right arm folds, then opens to the initial pose.
+      # approach.other_arm_return_sequence target: the right arm returns to the initial pose through one via.
       right_return:
         steps:
         - giver_home_via
@@ -295,15 +295,16 @@ handover_demo:
           acceleration_scale: 0.35
           tolerance: 0.05
           timeout: 45.0
-          # Folded bringup pose (step0): fold first, then open to the initial pose.
+          # retreat + (.95,.5,.5,.95,.5,.5,.5) of the way home: no joint reverses, ~60 mm from demo_table
+          # (compare_return_paths via_2, robot run 2026-11-23: 5.3 s path, return done in 6.1 s).
           target:
-          - 1.57
-          - 0.0
-          - 0.0
-          - -2.8
-          - 0.0
-          - 0.0
-          - 0.0
+          - 0.9897
+          - -0.3286
+          - 0.1128
+          - -2.2315
+          - -0.9841
+          - 0.8905
+          - 0.1392
         giver_home:
           type: joint
           arm: giver
