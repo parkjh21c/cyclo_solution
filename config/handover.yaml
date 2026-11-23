@@ -363,39 +363,13 @@ handover_demo:
           - 0.0
       # Cup handover (left holds, right receives); see scripts/generate_cup_handover_targets.py.
       cup_left_to_right:
+        # One joint line for both arms, no right via (2026-11-23, basket lowered since the via was added).
+        # Previous: cup_ready_via (right via [1.57, 0, 0, -2.8, 0, 0, 0], blended) + cup_ready (hold_arm: left).
         steps:
-        - cup_ready_via
         - cup_ready
-        cup_ready_via:
-          type: dual_joint
-          joint_line: true
-          velocity_scale: 0.3
-          acceleration_scale: 0.3
-          tolerance: 0.05
-          planning_tolerance: 0.0005
-          timeout: 60.0
-          left_target:
-          - -0.15714083
-          - 0.37945894
-          - -0.44538296
-          - -1.61585321
-          - 0.16935813
-          - 0.132273
-          - -1.16007363
-          right_target:
-          - 1.57
-          - 0.0
-          - 0.0
-          - -2.8
-          - 0.0
-          - 0.0
-          - 0.0
-          blend_with_next: true
         cup_ready:
           type: dual_joint
           joint_line: true
-          hold_arm: left
-          hold_tolerance: 0.001
           velocity_scale: 0.3
           acceleration_scale: 0.3
           tolerance: 0.017453292519943295

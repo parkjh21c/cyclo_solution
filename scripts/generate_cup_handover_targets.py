@@ -3,7 +3,7 @@
 
 Never sends motion goals. Run with the robot at the initial pose and the cup measured
 (VALID_INIT). Merge the output under handover_demo.ros__parameters.motion_sequences.
-Preparation output uses two blended dual_joint joint-line stages (no planner), including the right via.
+Preparation output uses one dual_joint joint-line stage for both arms (no planner, no via).
 Generation-time IK diagnostics are not an attached-cup simultaneous-path validation.
 Usage: python3 generate_cup_handover_targets.py CUP_X CUP_Y RIM_Z --output /tmp/cup_handover.yaml
 """
@@ -102,15 +102,13 @@ class RosDumper(yaml.SafeDumper):
         return True
 
 
-def preparation_steps(left, right_via, right, speed=0.3):
-    """Two blended joint-line goals (no planner); grippers retain their measured positions."""
-    common = {"type": "dual_joint", "joint_line": True, "velocity_scale": speed, "acceleration_scale": speed,
-              "planning_tolerance": 0.0005, "timeout": 60.0}
+def preparation_steps(left, right, speed=0.3):
+    """One joint-line goal for both arms (no planner, no via); grippers retain their measured positions."""
     return {
-        "steps": ["cup_ready_via", "cup_ready"],
-        "cup_ready_via": {**common, "tolerance": 0.05, "blend_with_next": True,
-                          "left_target": list(left), "right_target": list(right_via)},
-        "cup_ready": {**common, "hold_arm": "left", "hold_tolerance": 0.001, "tolerance": 0.017453292519943295,
+        "steps": ["cup_ready"],
+        "cup_ready": {"type": "dual_joint", "joint_line": True, "velocity_scale": speed,
+                      "acceleration_scale": speed, "tolerance": 0.017453292519943295,
+                      "planning_tolerance": 0.0005, "timeout": 60.0,
                       "left_target": list(left), "right_target": list(right)},
     }
 
@@ -133,7 +131,7 @@ def main():
     parser.add_argument("--standoff", type=float,
                         help="override the right pregrasp distance (default: --travel)")
     parser.add_argument("--simultaneous", action="store_true",
-                        help="compatibility flag; two blended dual_joint joint-line stages are now the default")
+                        help="compatibility flag; one dual_joint joint-line stage is now the default")
     parser.add_argument("--elbow-tries", type=int, default=0, help="random IK seeds for a low elbow")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
@@ -229,10 +227,9 @@ def main():
                "acceleration_scale": 0.015, "timeout": 30.0}
         insert = {**lin, "arm": "receiver", "target": pose_of(right_hold)}
         # Receiver contact is allowed only between the transfer and the grasp sequences.
-        # Right folds first (right_return via), then one joint line to ready keeps the hand low.
-        right_via = [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0]
+        # Both arms in one joint line; the lowered basket no longer needs a right via.
         sequences = {
-            "cup_left_to_right": preparation_steps(left_joints, right_via, right_joints, args.speed),
+            "cup_left_to_right": preparation_steps(left_joints, right_joints, args.speed),
             "cup_left_to_right_grasp": {
                 "steps": ["cup_insert", "receiver_close"],
                 "cup_insert": {**insert, "velocity_scale": 0.08, "acceleration_scale": 0.02},
@@ -247,7 +244,7 @@ def main():
         document = {"handover_demo": {"ros__parameters": {"motion_sequences": sequences}}}
         with open(args.output, "w") as handle:
             yaml.dump(document, handle, Dumper=RosDumper, sort_keys=False)
-        print("Preparation output: two blended dual_joint joint-line stages; grippers held.")
+        print("Preparation output: one dual_joint joint-line stage for both arms; grippers held.")
         print("LIMIT: geometric IK checks above use sequential seeds and filter cup contacts.")
         print("They do not validate the simultaneous, smoothed path with an attached cup.")
         print("left hold joints ", left_joints)

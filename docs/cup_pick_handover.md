@@ -23,7 +23,7 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
 
 | 시퀀스 | 단계 | 플래너 |
 |---|---|---|
-| `cup_left_to_right` | `cup_carry`(왼손, 컵을 든 채 넘김 자세) → `cup_ready_via`(오른손, 초기 자세에서 j1만 먼저) → `cup_ready`(오른손, 잡는 위치 20 cm 뒤) | Pilz PTP(관절), 한 팔씩 |
+| `cup_left_to_right` | `cup_ready`(왼손은 컵을 든 채 넘김 자세로, 오른손은 잡는 위치 20 cm 뒤로 동시에) | `dual_joint` 관절 직선 한 번(플래너·경유 없음) |
 | (`CUP_CONTACT_SCENE`) | 오른손 손가락·손바닥과 컵의 접촉 허용 | 장면 변경 |
 | `cup_left_to_right_grasp` | `cup_insert`(오른손 직선 접근) → `receiver_close` | Pilz LIN, 그리퍼 |
 | (`CUP_DETACH`, `CUP_ATTACH`) | MoveIt 컵을 왼손에서 떼어 오른손에 붙임 | 장면 변경 |
@@ -32,9 +32,10 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
 접촉 허용을 삽입 직전에만 적용하는 이유: 허용을 시퀀스 시작 전에 걸었을 때 오른팔이 이동 중에 컵에
 부딪혀도 계획이 통과했습니다.
 
-`cup_ready_via`가 필요한 이유: 바구니가 장면에 있으면 초기 자세 → `cup_ready`의 관절 직선 경로에서 오른손
-손가락이 `basket_wall_y+`에 닿습니다(t 0.23). `ptp_path_check.py --via-search`로 j1을 먼저 옮기는 경유
-자세를 찾았습니다(j5, j6, j7만 먼저 옮겨도 통과했지만 팔이 벽 근처를 낮게 지나갑니다).
+오른손 경유 자세 없음(2026-11-23): 80 mm 바구니 때는 초기 자세 → `cup_ready` 관절 직선에서 오른손 손가락이
+`basket_wall_y+`에 닿아(t 0.23) 경유 자세 `cup_ready_via`를 거쳤습니다. 낮은 v2 바구니(35 mm)에서는 양팔을
+한 번에 보내는 직선이 사전 충돌 검사와 로봇 실행을 통과했고, 경유보다 자연스러워 경유를 뺐습니다.
+움직이기 전 런타임이 스무딩한 경로 전체를 장면과 대조하므로, 바구니가 다시 높아져 닿으면 움직이지 않고 실패합니다.
 
 ## 오른손 → 왼손 컵 넘김 (`/handover_cup_back`)
 
@@ -47,7 +48,7 @@ Pilz PTP의 관절 직선 경로는 `basket_table`을 지나므로 메뉴 `1`과
 | (`CUP_CONTACT_SCENE`) | 왼손 손가락·손바닥과 컵의 접촉 허용 | 같음 |
 | `cup_right_to_left_grasp` | `cup_insert`(왼손 LIN, 0.38 −0.054 0.947) → `receiver_close`(0.8) | `cup_retreat`의 반대 |
 | (`CUP_DETACH`, `CUP_ATTACH`) | 컵 모델을 오른손에서 왼손으로 | 같음 |
-| `cup_right_to_left_release` | `giver_release` → `cup_retreat`(오른손 LIN 20 cm 뒤) → `giver_via` → `giver_home` | `cup_insert`, `cup_ready_via`의 반대 |
+| `cup_right_to_left_release` | `giver_release` → `cup_retreat`(오른손 LIN 20 cm 뒤) → `giver_via` → `giver_home` | `cup_insert`의 반대, 이어서 초기 자세로 |
 
 로봇에서 `6` → `7` → `8` → `9`가 첫 시도에 통과했습니다(빈 컵).
 

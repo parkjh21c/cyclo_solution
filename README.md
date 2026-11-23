@@ -620,7 +620,7 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
 `/handover_cup`(`arm: left` = 컵을 든 손)은 기존 DYNAMIXEL 핸드오버처럼 YAML 시퀀스를 실행합니다.
 `handover.yaml`의 `motion_sequences`에 세 시퀀스가 필요합니다.
 
-- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_carry`(왼손 `joint` Pilz PTP) → `cup_ready_via`(오른손, 초기 자세에서 j1만 먼저; 바로 가면 바구니 벽에 닿음) → `cup_ready`(오른손 `joint` PTP, 잡는 위치 20cm 뒤)로 한 팔씩 움직입니다. 대기 거리는
+- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_ready` 한 단계로, 왼손(컵을 든 채 넘김 자세)과 오른손(잡는 위치 20cm 뒤)이 `dual_joint` 관절 직선 하나로 동시에 움직입니다(경유 없음, 2026-11-23). 대기 거리는
   `scripts/right_ready_check.py`로 고릅니다(0.12는 경로가 컵·왼손과 충돌, 0.30 이상은 IK 없음, 0.20·0.25 통과).
   양팔 동시 Pilz PTP(`dual_joint` + `pipeline`/`planner`)는 2026-11-11 시험에서 `MoveIt error 99999`로 계획에
   실패해서 쓰지 않습니다. 기본 OMPL `dual_joint`는
