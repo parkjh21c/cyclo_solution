@@ -184,7 +184,7 @@ target_link_libraries(handover_demo_node demo_tasks)
 add_executable(check_feedback src/nodes/check_feedback.cpp)
 target_link_libraries(check_feedback demo_runtime)
 add_executable(compare_return_paths tools/compare_return_paths.cpp)
-target_link_libraries(compare_return_paths demo_runtime)
+target_link_libraries(compare_return_paths demo_motions)
 install(TARGETS compare_return_paths RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS tools/plot_return_compare.py DESTINATION lib/${PROJECT_NAME})
 install(

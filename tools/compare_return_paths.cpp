@@ -1,3 +1,4 @@
+#include "demo_1f/motions/common/cup_scene.hpp"
 #include "demo_1f/runtime/config.hpp"
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include <geometric_shapes/shapes.h>
@@ -5,6 +6,7 @@
 #include <moveit/robot_state/conversions.hpp>
 #include <moveit_msgs/action/move_group.hpp>
 #include <moveit_msgs/srv/get_planning_scene.hpp>
+#include <moveit_msgs/srv/get_position_ik.hpp>
 #include <rclcpp/parameter_client.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -48,7 +50,14 @@ struct Options {
   bool skip_planners{false};
   std::vector<std::vector<double>> vias, via_alphas; // Extra straight-via candidates.
   std::vector<std::string> planners{"ompl", "stomp", "stomp_seed"};
+  bool planners_given{false};
   double padding_mm{0}; // World objects grown by this much in planning requests only.
+  std::string sequence{"right_return"};
+  // left_return: cup shifts (m) around the scene cup, lifted-TCP vias (mm), optional cup BODY.
+  std::vector<double> cup_dx{-0.05, -0.025, 0.0}, cup_dy{-0.025, 0.0, 0.025}, lift_mm{50, 100};
+  std::vector<double> cup;
+  std::vector<std::vector<bool>> via_alpha_absolute; // "=v" tokens in --via-alpha: absolute joint value.
+  std::vector<std::vector<double>> tcp_vias;         // --tcp-via dx,dy,dz (mm) from the start TCP.
 };
 
 std::vector<double> numbers(const std::string & text, const std::string & name) {
@@ -77,9 +86,31 @@ Options parse(const std::vector<std::string> & args) {
     else if (name == "--from-current") options.from_current = true;
     else if (name == "--skip-planners") options.skip_planners = true;
     else if (name == "--via") options.vias.push_back(numbers(value(), name));
-    else if (name == "--via-alpha") options.via_alphas.push_back(numbers(value(), name));
+    else if (name == "--via-alpha") {
+      std::vector<double> alpha;
+      std::vector<bool> absolute;
+      std::stringstream in(value());
+      std::string item;
+      while (std::getline(in, item, ',')) {
+        const bool fixed = !item.empty() && item[0] == '=';
+        alpha.push_back(std::stod(fixed ? item.substr(1) : item));
+        absolute.push_back(fixed);
+      }
+      options.via_alphas.push_back(alpha);
+      options.via_alpha_absolute.push_back(absolute);
+    }
+    else if (name == "--tcp-via") {
+      options.tcp_vias.push_back(numbers(value(), name));
+      if (options.tcp_vias.back().size() != 3) throw std::invalid_argument("--tcp-via needs dx,dy,dz (mm)");
+    }
     else if (name == "--padding-mm") options.padding_mm = std::stod(value());
+    else if (name == "--sequence") options.sequence = value();
+    else if (name == "--cup-dx") options.cup_dx = numbers(value(), name);
+    else if (name == "--cup-dy") options.cup_dy = numbers(value(), name);
+    else if (name == "--lift-mm") options.lift_mm = numbers(value(), name);
+    else if (name == "--cup") options.cup = numbers(value(), name);
     else if (name == "--planners") {
+      options.planners_given = true;
       options.planners.clear();
       std::stringstream in(value());
       std::string item;
@@ -95,7 +126,14 @@ Options parse(const std::vector<std::string> & args) {
   if (options.runs < 1 || !(options.stop_threshold > 0) || !(options.padding_mm >= 0)) {
     throw std::invalid_argument("--runs must be >= 1, --stop-threshold > 0, --padding-mm >= 0");
   }
-  if (options.skip_planners) options.planners.clear();
+  if (options.sequence != "right_return" && options.sequence != "left_return") {
+    throw std::invalid_argument("--sequence takes right_return or left_return");
+  }
+  if (!options.cup.empty() && options.cup.size() != 3) throw std::invalid_argument("--cup needs x,y,z");
+  // Left starts are a cup grid; planners there only on request.
+  if (options.skip_planners || (options.sequence == "left_return" && !options.planners_given)) {
+    options.planners.clear();
+  }
   return options;
 }
 
@@ -163,6 +201,8 @@ struct Run {
   double min_clearance_mm{kNaN}, clearance_pct{kNaN};
   std::string clearance_link, clearance_object, reversing_names;
   std::vector<double> via; // Straight-via methods only.
+  std::string start{"retreat"};
+  double cup_dx{0}, cup_dy{0};
   std::vector<Sample> samples;
 };
 
@@ -539,6 +579,55 @@ moveit_msgs::msg::TrajectoryConstraints seed_path(const moveit::core::RobotModel
   return seed;
 }
 
+// One move_group IK for the arm TCP, seeded with seed; false (and reason) when unsolved.
+bool solve_ik(const rclcpp::Node::SharedPtr & node,
+    const rclcpp::Client<moveit_msgs::srv::GetPositionIK>::SharedPtr & client, const Config & config,
+    const std::string & arm_name, const moveit::core::RobotState & seed, const geometry_msgs::msg::Pose & pose,
+    moveit::core::RobotState & solution, std::string & reason) {
+  const auto & arm = config.arms.at(arm_name);
+  auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
+  auto & ik = request->ik_request;
+  ik.group_name = arm.group;
+  ik.ik_link_name = arm.tcp;
+  ik.avoid_collisions = false; // Collisions are judged by the start check and validation.
+  ik.timeout = rclcpp::Duration::from_seconds(0.2);
+  ik.pose_stamped.header.frame_id = config.planning_frame;
+  ik.pose_stamped.pose = pose;
+  moveit::core::robotStateToRobotStateMsg(seed, ik.robot_state);
+  auto pending = client->async_send_request(request);
+  wait(node, pending, 5);
+  const auto response = pending.get();
+  if (response->error_code.val != Codes::SUCCESS) {
+    reason = "IK " + error_name(response->error_code.val);
+    return false;
+  }
+  solution = seed;
+  const auto & joints = response->solution.joint_state;
+  for (const auto & name : arm.joints) {
+    const auto found = std::find(joints.name.begin(), joints.name.end(), name);
+    if (found == joints.name.end()) {
+      reason = "IK solution lacks " + name;
+      return false;
+    }
+    solution.setJointPositions(name, &joints.position[found - joints.name.begin()]);
+  }
+  solution.update();
+  return true;
+}
+
+geometry_msgs::msg::Pose pose_message(const Eigen::Isometry3d & transform) {
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = transform.translation().x();
+  pose.position.y = transform.translation().y();
+  pose.position.z = transform.translation().z();
+  const Eigen::Quaterniond q(transform.rotation());
+  pose.orientation.x = q.x();
+  pose.orientation.y = q.y();
+  pose.orientation.z = q.z();
+  pose.orientation.w = q.w();
+  return pose;
+}
+
 // STOMP settings of the running move_group, printed for the record; num_timesteps sizes the seed.
 size_t stomp_settings(const rclcpp::Node::SharedPtr & node) {
   auto client = std::make_shared<rclcpp::SyncParametersClient>(node, "/move_group");
@@ -585,22 +674,31 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
   auto model = std::make_shared<moveit::core::RobotModel>(urdf, semantic);
   if (snapshot.count("use_sim_time")) node->set_parameter(snapshot.at("use_sim_time"));
 
-  // Copies: GCC's -Wdangling-reference misreads the returned config reference.
-  const Step retreat = find_step(config, "right_to_left", "retreat_together");
-  const Step release = find_step(config, "right_to_left", "giver_release");
-  const Step close = find_step(config, "right_to_left", "receiver_close");
-  const Step via = find_step(config, "right_return", "giver_home_via");
-  const Step home = find_step(config, "right_return", "giver_home");
-  const auto & return_error = config.motion_sequences.at("right_return").validation_error;
-  if (!return_error.empty()) std::cout << "WARNING right_return validation: " << return_error << '\n';
+  const auto found_sequence = config.motion_sequences.find(options.sequence);
+  if (found_sequence == config.motion_sequences.end()) throw std::runtime_error("Missing " + options.sequence);
+  if (!found_sequence->second.validation_error.empty()) {
+    std::cout << "WARNING " << options.sequence << " validation: " << found_sequence->second.validation_error << '\n';
+  }
+  std::vector<Step> sequence_steps;
+  for (const auto & step : found_sequence->second.steps) {
+    if (step.type == "joint") sequence_steps.push_back(step);
+  }
+  if (sequence_steps.size() != 2) throw std::runtime_error(options.sequence + " must be two joint steps (via, home)");
+  const Step via = sequence_steps[0];
+  const Step home = sequence_steps[1];
   const auto & arm = config.arms.at(home.arm);
-  if (via.arm != home.arm || via.type != "joint" || home.type != "joint" ||
-      via.target.size() != arm.joints.size() || home.target.size() != arm.joints.size()) {
-    throw std::runtime_error("right_return must be two joint steps of one arm");
+  if (via.arm != home.arm || via.target.size() != arm.joints.size() || home.target.size() != arm.joints.size()) {
+    throw std::runtime_error(options.sequence + " must be two joint steps of one arm");
   }
   if (!model->hasJointModelGroup(arm.group) || !model->hasLinkModel(arm.tcp)) {
     throw std::runtime_error("Missing return arm group or TCP in the live model");
   }
+  const bool left_return = options.sequence == "left_return";
+  // Copies: GCC's -Wdangling-reference misreads the returned config reference.
+  const Step retreat = find_step(config, "right_to_left", "retreat_together");
+  const Step release = find_step(config, "right_to_left", "giver_release");
+  const Step close = find_step(config, "right_to_left", "receiver_close");
+  const Step right_home = find_step(config, "right_return", "giver_home");
 
   std::map<std::string, double> measured;
   if (options.from_current) measured = measured_positions(node, config, model);
@@ -616,6 +714,7 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
   const auto read_time = std::time(nullptr);
   const double read_ros = node->now().seconds();
   std::cout << std::setprecision(6) << std::fixed;
+  std::cout << "sequence=" << options.sequence << " arm=" << home.arm << '\n';
   std::cout << "scene_read local=" << std::put_time(std::localtime(&read_time), "%F %T")
             << " ros_time=" << read_ros << " name=" << std::quoted(message.name) << '\n';
   bool table = false, wall = false, slope = false;
@@ -640,144 +739,316 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
     throw std::runtime_error("A complete planning scene is required");
   }
   if (!scene->knowsFrameTransform(config.planning_frame)) throw std::runtime_error("Unknown planning frame");
+  const auto to_planning = scene->getFrameTransform(config.planning_frame).inverse();
 
-  // Common start: right arm at retreat, left at its retreat target, grippers after the release.
-  auto start = scene->getCurrentState();
-  const auto set = [&](const std::string & name, double value) { start.setJointPositions(name, &value); };
-  if (options.from_current) {
-    for (const auto & [name, value] : measured) set(name, value);
-    std::cout << "start=measured joint_states snapshot\n";
+  // Starts: the retreat pose for right_return, the approach pose over each shifted cup for left_return.
+  struct Start {
+    std::string label;
+    double dx{0}, dy{0};
+    planning_scene::PlanningScenePtr scene;
+    moveit_msgs::msg::PlanningScene message;
+    std::shared_ptr<moveit::core::RobotState> state;
+    std::string error;
+  };
+  std::vector<Start> starts;
+  rclcpp::Client<moveit_msgs::srv::GetPositionIK>::SharedPtr ik_client;
+  if (!left_return) {
+    auto start = scene->getCurrentState();
+    const auto set = [&](const std::string & name, double value) { start.setJointPositions(name, &value); };
+    if (options.from_current) {
+      for (const auto & [name, value] : measured) set(name, value);
+      std::cout << "start=measured joint_states snapshot\n";
+    } else {
+      const auto & left = config.arms.at("left");
+      const auto & right = config.arms.at("right");
+      if (retreat.left_target.size() != left.joints.size() || retreat.right_target.size() != right.joints.size()) {
+        throw std::runtime_error("retreat_together lacks left/right targets");
+      }
+      for (size_t i = 0; i < right.joints.size(); ++i) set(right.joints[i], retreat.right_target[i]);
+      for (size_t i = 0; i < left.joints.size(); ++i) set(left.joints[i], retreat.left_target[i]);
+      for (const auto * gripper_step : {&release, &close}) {
+        const auto & joint = config.arms.at(gripper_step->arm).gripper_joint;
+        if (!gripper_step->target.empty()) set(joint, gripper_step->target.front());
+        std::cout << "start_gripper " << gripper_step->name << ' ' << joint << '='
+                  << start.getVariablePosition(joint)
+                  << (gripper_step->target.empty() ? " (scene value)" : " (step target)") << '\n';
+      }
+      std::cout << "start=configured retreat_together targets\n";
+    }
+    starts.push_back({"retreat", 0, 0, scene, message, std::make_shared<moveit::core::RobotState>(start), ""});
   } else {
+    ik_client = node->create_client<moveit_msgs::srv::GetPositionIK>("/compute_ik");
+    if (!ik_client->wait_for_service(10s)) throw std::runtime_error("/compute_ik unavailable");
+    const auto approach = demo_1f::load_approach_config(*settings);
+    if (!approach.fixed_pose) std::cout << "WARNING approach.fixed_pose is false; the tool uses the fixed pose\n";
+    // Cup BODY (cup middle): the scene cup the last approach registered, or --cup.
+    const std::string cup_id = "demo_place_cup";
+    auto base = message;
+    auto & objects = base.world.collision_objects;
+    auto cup = std::find_if(objects.begin(), objects.end(), [&](const auto & o) { return o.id == cup_id; });
+    if (!options.cup.empty()) {
+      if (cup != objects.end()) objects.erase(cup);
+      moveit_msgs::msg::CollisionObject object;
+      object.id = cup_id;
+      object.header.frame_id = config.planning_frame;
+      object.operation = object.ADD;
+      object.pose.orientation.w = 1;
+      shape_msgs::msg::SolidPrimitive cylinder;
+      cylinder.type = cylinder.CYLINDER;
+      cylinder.dimensions = {approach.cup_height, approach.scene_radius}; // As make_approach_scene, zero error.
+      geometry_msgs::msg::Pose body;
+      body.position.x = options.cup[0];
+      body.position.y = options.cup[1];
+      body.position.z = options.cup[2];
+      body.orientation.w = 1;
+      object.primitives.push_back(cylinder);
+      object.primitive_poses.push_back(body);
+      objects.push_back(object);
+      std::cout << "cup=--cup BODY " << joined(options.cup) << '\n';
+    } else if (cup == objects.end()) {
+      throw std::runtime_error("No demo_place_cup in the scene: run menu 4 once, or pass --cup x,y,z (cup middle)");
+    } else {
+      std::cout << "cup=scene demo_place_cup\n";
+    }
+    for (const auto & object : objects) {
+      if (object.id == cup_id && object.header.frame_id != config.planning_frame) {
+        throw std::runtime_error("demo_place_cup is not in " + config.planning_frame);
+      }
+    }
     const auto & left = config.arms.at("left");
     const auto & right = config.arms.at("right");
-    if (retreat.left_target.size() != left.joints.size() || retreat.right_target.size() != right.joints.size()) {
-      throw std::runtime_error("retreat_together lacks left/right targets");
-    }
-    for (size_t i = 0; i < right.joints.size(); ++i) set(right.joints[i], retreat.right_target[i]);
-    for (size_t i = 0; i < left.joints.size(); ++i) set(left.joints[i], retreat.left_target[i]);
-    for (const auto * gripper_step : {&release, &close}) {
-      const auto & joint = config.arms.at(gripper_step->arm).gripper_joint;
-      if (!gripper_step->target.empty()) set(joint, gripper_step->target.front());
-      std::cout << "start_gripper " << gripper_step->name << ' ' << joint << '='
-                << start.getVariablePosition(joint)
-                << (gripper_step->target.empty() ? " (scene value)" : " (step target)") << '\n';
-    }
-    std::cout << "start=configured retreat_together targets\n";
-  }
-  start.zeroVelocities();
-  start.zeroAccelerations();
-  start.update();
-  for (const auto & name : model->getVariableNames()) {
-    std::cout << "start_joint " << name << '=' << start.getVariablePosition(name) << '\n';
-  }
-  if (!start.satisfiesBounds(1e-8)) std::cout << "WARNING start state is outside joint bounds\n";
-  {
-    collision_detection::CollisionRequest request;
-    request.contacts = true;
-    request.max_contacts = 20;
-    collision_detection::CollisionResult result;
-    scene->checkCollision(request, result, start);
-    if (result.collision) {
-      std::cerr << "START_IN_COLLISION; no method evaluated\n";
-      for (const auto & contact : result.contacts) {
-        std::cerr << "  " << contact.first.first << " / " << contact.first.second << '\n';
+    for (const double dx : options.cup_dx) {
+      for (const double dy : options.cup_dy) {
+        Start s;
+        std::ostringstream label;
+        label << std::showpos << std::setprecision(0) << std::fixed << "dx" << dx * 1000 << "_dy" << dy * 1000;
+        s.label = label.str();
+        s.dx = dx;
+        s.dy = dy;
+        s.message = base;
+        for (auto & object : s.message.world.collision_objects) {
+          if (object.id != cup_id) continue;
+          object.pose.position.x += dx;
+          object.pose.position.y += dy;
+        }
+        s.scene = std::make_shared<planning_scene::PlanningScene>(model);
+        if (!s.scene->setPlanningSceneMsg(s.message)) throw std::runtime_error("Cannot load the shifted cup scene");
+        const auto body = pose_message(to_planning * s.scene->getWorld()->getObject(cup_id)->global_shape_poses_[0]);
+        // IK seed as the runtime PTP start: left at retreat; right already home; grippers open.
+        auto seed = s.scene->getCurrentState();
+        for (size_t i = 0; i < left.joints.size(); ++i) seed.setJointPositions(left.joints[i], &retreat.left_target[i]);
+        for (size_t i = 0; i < right.joints.size(); ++i) seed.setJointPositions(right.joints[i], &right_home.target[i]);
+        seed.setJointPositions(left.gripper_joint, &approach.refine_gripper_open);
+        if (!release.target.empty()) seed.setJointPositions(right.gripper_joint, &release.target.front());
+        seed.update();
+        std::string reason;
+        auto target = demo_1f::approach_tcp_target(body, approach, home.arm, 0.0, reason);
+        moveit::core::RobotState solution(seed);
+        if (!target) {
+          s.error = "approach target: " + reason;
+        } else {
+          target->orientation = demo_1f::approach_fixed_orientation(approach, home.arm);
+          if (solve_ik(node, ik_client, config, home.arm, seed, *target, solution, reason)) {
+            s.state = std::make_shared<moveit::core::RobotState>(solution);
+          } else {
+            s.error = reason;
+          }
+          std::cout << "start " << s.label << " cup_body=" << body.position.x << ',' << body.position.y << ','
+                    << body.position.z << " tcp_target=" << target->position.x << ',' << target->position.y << ','
+                    << target->position.z << (s.error.empty() ? "" : " " + s.error) << '\n';
+        }
+        starts.push_back(std::move(s));
       }
-      return 2;
     }
+    std::cout << "start=approach pose per cup shift (move_group /compute_ik from the retreat seed; runtime"
+                 " Pilz PTP may pick another IK branch)\n";
   }
-  scene->setCurrentState(start);
-  moveit_msgs::msg::RobotState start_message;
-  moveit::core::robotStateToRobotStateMsg(start, start_message);
-  std::vector<double> start_arm;
-  for (const auto & name : arm.joints) start_arm.push_back(start.getVariablePosition(name));
-  std::cout << "S=" << joined(start_arm) << "\nvia=" << joined(via.target) << "\nH=" << joined(home.target) << '\n';
+  std::cout << "via=" << joined(via.target) << "\nH=" << joined(home.target) << '\n';
   std::cout << "clearance: FCL distanceRobot, GLOBAL minimum signed distance between the updated links of "
             << arm.group << " (gripper included) and world objects, scene ACM applied, sampled every"
                " <=0.05 s; negative = penetration depth estimate; meshes use FCL mesh distance.\n";
 
   std::vector<Run> runs;
   std::vector<std::string> methods;
-  // A: the runtime side path, two straight joint segments through a via (YAML via, then extras).
-  std::vector<std::pair<std::string, std::vector<double>>> candidates = {{"straight_via", via.target}};
-  for (const auto & target : options.vias) {
-    candidates.push_back({"via_" + std::to_string(candidates.size()), target});
-  }
-  for (const auto & alpha : options.via_alphas) {
-    if (alpha.size() != arm.joints.size()) throw std::invalid_argument("--via-alpha needs one value per arm joint");
-    std::vector<double> target;
-    for (size_t i = 0; i < alpha.size(); ++i) {
-      target.push_back(start_arm[i] + alpha[i] * (home.target[i] - start_arm[i]));
-    }
-    candidates.push_back({"via_" + std::to_string(candidates.size()), target});
-  }
-  for (const auto & [method, target] : candidates) {
-    if (target.size() != arm.joints.size()) throw std::invalid_argument("--via needs one value per arm joint");
-    std::vector<double> alpha;
-    for (size_t i = 0; i < target.size(); ++i) {
-      const double span = home.target[i] - start_arm[i];
-      alpha.push_back(std::abs(span) > 1e-9 ? (target[i] - start_arm[i]) / span : kNaN);
-    }
-    std::cout << method << " via=" << joined(target) << " alpha=" << joined(alpha) << '\n';
-    Step step = via;
-    step.target = target;
-    Run run{method, 0};
-    run.via = target;
-    std::vector<moveit_msgs::msg::RobotTrajectory> segments;
-    auto from = start_arm;
-    const Step * order[] = {&step, &home};
-    for (const auto * next : order) {
-      moveit_msgs::msg::RobotTrajectory segment;
-      segment.joint_trajectory.joint_names = arm.joints;
-      trajectory_msgs::msg::JointTrajectoryPoint first, last;
-      first.positions = from;
-      last.positions = next->target;
-      segment.joint_trajectory.points = {first, last};
-      segments.push_back(segment);
-      from = next->target;
-    }
-    run.raw_points = 4;
-    finish(run, segments, {step, home}, config, model, scene, start, options.stop_threshold);
-    methods.push_back(method);
-    runs.push_back(std::move(run));
-  }
-  // B and C: plan-only to giver_home, then the runtime smoothing/validation. Only stomp_seed sees the via.
+  const auto add_method = [&](const std::string & method) {
+    if (std::find(methods.begin(), methods.end(), method) == methods.end()) methods.push_back(method);
+  };
+  // Planner setup once; padding applies per start scene.
   rclcpp_action::Client<Move>::SharedPtr client;
-  moveit_msgs::msg::PlanningScene request_scene = message;
   size_t timesteps = 60;
   if (!options.planners.empty()) {
     client = rclcpp_action::create_client<Move>(node, config.move_group_action);
     if (!client->wait_for_action_server(10s)) throw std::runtime_error("MoveGroup unavailable");
-    request_scene = inflated(message, options.padding_mm / 1000);
     timesteps = stomp_settings(node);
   }
-  for (const auto & method : options.planners) {
-    methods.push_back(method);
-    const bool ompl = method == "ompl";
-    auto goal = joint_goal(config, home, ompl ? "ompl" : "stomp",
-        ompl ? options.ompl_planner : options.stomp_planner, request_scene, start_message);
-    if (method == "stomp_seed") {
-      goal.request.trajectory_constraints =
-          seed_path(*model, config, home.arm, start_arm, via.target, home.target, timesteps);
-      std::cout << method << " seed: start -> via -> home, " << timesteps << " points\n";
+  size_t evaluated = 0;
+  int index = 0;
+  for (auto & s : starts) {
+    ++index;
+    if (!s.state) {
+      std::cout << "start " << s.label << " skipped: " << s.error << '\n';
+      continue;
     }
-    std::cout << method << " request=" << goal.request.pipeline_id << '/' << std::quoted(goal.request.planner_id)
-              << " padding_mm=" << options.padding_mm << " group=" << arm.group
-              << " attempts=" << goal.request.num_planning_attempts
-              << " planning_time=" << goal.request.allowed_planning_time
-              << " speed=" << goal.request.max_velocity_scaling_factor
-              << " acceleration=" << goal.request.max_acceleration_scaling_factor
-              << " tolerance=" << goal.request.goal_constraints[0].joint_constraints[0].tolerance_above << '\n';
-    for (int i = 1; i <= options.runs; ++i) {
-      Run run{method, i};
-      moveit_msgs::msg::RobotTrajectory trajectory;
-      if (plan_once(node, client, goal, config, start, run, trajectory)) {
-        finish(run, {trajectory}, {home}, config, model, scene, start, options.stop_threshold);
+    auto & start = *s.state;
+    start.zeroVelocities();
+    start.zeroAccelerations();
+    start.update();
+    if (!start.satisfiesBounds(1e-8)) std::cout << "WARNING start " << s.label << " is outside joint bounds\n";
+    {
+      collision_detection::CollisionRequest request;
+      request.contacts = true;
+      request.max_contacts = 20;
+      collision_detection::CollisionResult result;
+      s.scene->checkCollision(request, result, start);
+      if (result.collision) {
+        std::cout << "START_IN_COLLISION " << s.label << "; not evaluated:";
+        for (const auto & contact : result.contacts) {
+          std::cout << ' ' << contact.first.first << '/' << contact.first.second;
+        }
+        std::cout << '\n';
+        continue;
       }
-      std::cout << method << " run " << i << '/' << options.runs << ' ' << run.status
-                << (run.status == "ok" ? "" : " [" + run.fail_key + "]") << " plan=" << run.plan_time
-                << "s duration=" << run.duration << "s min_mid_speed=" << run.min_mid_speed << std::endl;
+    }
+    ++evaluated;
+    s.scene->setCurrentState(start);
+    moveit_msgs::msg::RobotState start_message;
+    moveit::core::robotStateToRobotStateMsg(start, start_message);
+    std::vector<double> start_arm;
+    for (const auto & name : arm.joints) start_arm.push_back(start.getVariablePosition(name));
+    const Eigen::Isometry3d tcp = to_planning * start.getGlobalLinkTransform(arm.tcp);
+    std::cout << "start " << s.label << " S=" << joined(start_arm) << " tcp=" << tcp.translation().x() << ','
+              << tcp.translation().y() << ',' << tcp.translation().z() << '\n';
+    if (!left_return) {
+      for (const auto & name : model->getVariableNames()) {
+        std::cout << "start_joint " << name << '=' << start.getVariablePosition(name) << '\n';
+      }
+    }
+    // Straight joint candidates: direct, the YAML via, --via, --via-alpha (per start) and lifted TCP vias.
+    std::vector<std::pair<std::string, std::vector<double>>> candidates = {
+        {"direct", {}}, {"straight_via", via.target}};
+    for (const auto & target : options.vias) {
+      candidates.push_back({"via_" + std::to_string(candidates.size() - 1), target});
+    }
+    for (size_t k = 0; k < options.via_alphas.size(); ++k) {
+      const auto & alpha = options.via_alphas[k];
+      if (alpha.size() != arm.joints.size()) throw std::invalid_argument("--via-alpha needs one value per arm joint");
+      std::vector<double> target;
+      for (size_t i = 0; i < alpha.size(); ++i) {
+        target.push_back(options.via_alpha_absolute[k][i] ? alpha[i] :
+            start_arm[i] + alpha[i] * (home.target[i] - start_arm[i]));
+      }
+      candidates.push_back({"via_" + std::to_string(candidates.size() - 1), target});
+    }
+    std::map<std::string, std::string> unsolved;
+    if (left_return) {
+      // TCP-offset vias (planning frame, same orientation): lift_N is (0, 0, N).
+      std::vector<std::pair<std::string, std::vector<double>>> offsets;
+      for (const double lift : options.lift_mm) {
+        offsets.push_back({"lift_" + std::to_string(static_cast<int>(std::lround(lift))), {0, 0, lift}});
+      }
+      for (const auto & offset : options.tcp_vias) {
+        std::string name = "tcp";
+        for (const double v : offset) name += "_" + std::to_string(static_cast<int>(std::lround(v)));
+        offsets.push_back({name, offset});
+      }
+      for (const auto & [method, offset] : offsets) {
+        auto pose = pose_message(tcp);
+        pose.position.x += offset[0] / 1000;
+        pose.position.y += offset[1] / 1000;
+        pose.position.z += offset[2] / 1000;
+        moveit::core::RobotState lifted(start);
+        std::string reason;
+        if (solve_ik(node, ik_client, config, home.arm, start, pose, lifted, reason)) {
+          std::vector<double> target;
+          for (const auto & name : arm.joints) target.push_back(lifted.getVariablePosition(name));
+          candidates.push_back({method, target});
+        } else {
+          unsolved[method] = reason;
+        }
+      }
+    }
+    for (const auto & [method, reason] : unsolved) {
+      Run run{method, index};
+      run.start = s.label;
+      run.cup_dx = s.dx;
+      run.cup_dy = s.dy;
+      fail(run, "ik", reason, reason);
+      add_method(method);
       runs.push_back(std::move(run));
     }
+    for (const auto & [method, target] : candidates) {
+      if (!target.empty() && target.size() != arm.joints.size()) {
+        throw std::invalid_argument("--via needs one value per arm joint");
+      }
+      Run run{method, index};
+      run.start = s.label;
+      run.cup_dx = s.dx;
+      run.cup_dy = s.dy;
+      run.via = target;
+      std::vector<Step> steps;
+      if (!target.empty()) {
+        Step step = via;
+        step.target = target;
+        steps.push_back(step);
+      }
+      steps.push_back(home);
+      std::vector<moveit_msgs::msg::RobotTrajectory> segments;
+      auto from = start_arm;
+      for (const auto & next : steps) {
+        moveit_msgs::msg::RobotTrajectory segment;
+        segment.joint_trajectory.joint_names = arm.joints;
+        trajectory_msgs::msg::JointTrajectoryPoint first, last;
+        first.positions = from;
+        last.positions = next.target;
+        segment.joint_trajectory.points = {first, last};
+        segments.push_back(segment);
+        from = next.target;
+      }
+      run.raw_points = 2 * steps.size();
+      finish(run, segments, steps, config, model, s.scene, start, options.stop_threshold);
+      add_method(method);
+      runs.push_back(std::move(run));
+    }
+    // Planners: plan-only to home, then the runtime smoothing/validation. Only stomp_seed sees the via.
+    if (options.planners.empty()) continue;
+    const auto request_scene = inflated(s.message, options.padding_mm / 1000);
+    for (const auto & method : options.planners) {
+      add_method(method);
+      const bool ompl = method == "ompl";
+      auto goal = joint_goal(config, home, ompl ? "ompl" : "stomp",
+          ompl ? options.ompl_planner : options.stomp_planner, request_scene, start_message);
+      if (method == "stomp_seed") {
+        goal.request.trajectory_constraints =
+            seed_path(*model, config, home.arm, start_arm, via.target, home.target, timesteps);
+        std::cout << method << " seed: start -> via -> home, " << timesteps << " points\n";
+      }
+      std::cout << method << " [" << s.label << "] request=" << goal.request.pipeline_id << '/'
+                << std::quoted(goal.request.planner_id) << " padding_mm=" << options.padding_mm
+                << " group=" << arm.group << " attempts=" << goal.request.num_planning_attempts
+                << " planning_time=" << goal.request.allowed_planning_time
+                << " speed=" << goal.request.max_velocity_scaling_factor
+                << " acceleration=" << goal.request.max_acceleration_scaling_factor
+                << " tolerance=" << goal.request.goal_constraints[0].joint_constraints[0].tolerance_above << '\n';
+      for (int i = 1; i <= options.runs; ++i) {
+        Run run{method, (index - 1) * options.runs + i};
+        run.start = s.label;
+        run.cup_dx = s.dx;
+        run.cup_dy = s.dy;
+        moveit_msgs::msg::RobotTrajectory trajectory;
+        if (plan_once(node, client, goal, config, start, run, trajectory)) {
+          finish(run, {trajectory}, {home}, config, model, s.scene, start, options.stop_threshold);
+        }
+        std::cout << method << " run " << i << '/' << options.runs << ' ' << run.status
+                  << (run.status == "ok" ? "" : " [" + run.fail_key + "]") << " plan=" << run.plan_time
+                  << "s duration=" << run.duration << "s min_mid_speed=" << run.min_mid_speed << std::endl;
+        runs.push_back(std::move(run));
+      }
+    }
+  }
+  if (evaluated == 0) {
+    std::cerr << "No start could be evaluated\n";
+    print_limits();
+    return 2;
   }
 
   // CSV output.
@@ -792,7 +1063,7 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
     out << std::setprecision(9)
         << "method,run,status,fail_stage,fail_detail,plan_time,duration,raw_points,simplified_points,"
            "min_mid_speed,stop_count,reversing_joints,joint_path_len,tcp_path_len,min_clearance_mm,"
-           "clearance_link,clearance_object,clearance_at_pct,reversing_names,via\n";
+           "clearance_link,clearance_object,clearance_at_pct,reversing_names,via,start,cup_dx,cup_dy\n";
     for (const auto & r : runs) {
       const bool ok = r.status == "ok";
       const auto number = [&](double v) { return ok && std::isfinite(v) ? std::to_string(v) : std::string(); };
@@ -802,7 +1073,8 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
           << ',' << (ok ? std::to_string(r.stop_count) : "") << ',' << (ok ? std::to_string(r.reversing) : "")
           << ',' << number(r.joint_len) << ',' << number(r.tcp_len) << ',' << number(r.min_clearance_mm)
           << ',' << r.clearance_link << ',' << r.clearance_object << ',' << number(r.clearance_pct)
-          << ',' << (ok ? r.reversing_names : std::string()) << ',' << csv(joined(r.via)) << '\n';
+          << ',' << (ok ? r.reversing_names : std::string()) << ',' << csv(joined(r.via)) << ',' << r.start
+          << ',' << r.cup_dx << ',' << r.cup_dy << '\n';
     }
   }
   {
@@ -890,14 +1162,20 @@ int run(const rclcpp::Node::SharedPtr & node, const Options & options) {
     stat("joint_path_len_rad", [](const Run & r) { return r.joint_len; });
     stat("tcp_path_len_m", [](const Run & r) { return r.tcp_len; });
     stat("min_clearance_mm", [](const Run & r) { return r.min_clearance_mm; });
+    // One line per start for the straight (non-planner) methods.
+    if (method == "ompl" || method == "stomp" || method == "stomp_seed") continue;
     for (const auto * r : all) {
-      if (r->via.empty()) continue;
-      std::cout << "  via " << joined(r->via) << '\n';
+      std::cout << "  [" << r->start << "] ";
       if (r->status == "ok") {
-        std::cout << "  clearance at " << r->clearance_pct << "% " << r->clearance_link << " / "
-                  << r->clearance_object << "; reversing: "
-                  << (r->reversing_names.empty() ? "none" : r->reversing_names) << '\n';
+        std::cout << "ok " << std::setprecision(2) << r->duration << " s, " << std::setprecision(0)
+                  << r->min_clearance_mm << " mm " << r->clearance_link << " / " << r->clearance_object
+                  << " at " << r->clearance_pct << "%, reversing: "
+                  << (r->reversing_names.empty() ? "none" : r->reversing_names);
+      } else {
+        std::cout << "FAIL " << r->fail_key;
       }
+      if (!r->via.empty()) std::cout << "\n      via " << joined(r->via);
+      std::cout << '\n';
     }
   }
   print_limits();

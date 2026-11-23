@@ -10,7 +10,20 @@
 | `stomp_seed` | As `stomp`, seeded with the straight S → `giver_home_via` → `giver_home` path (`trajectory_constraints`, `stomp.num_timesteps` points, group joint order) | `--runs` (20) |
 | `via_N` | As `straight_via` with a via from `--via q1,...,q7` or `--via-alpha a1,...,a7` (via = S + a (H - S) per joint) | 1 each |
 
-- `--planners ompl,stomp,stomp_seed` picks planner methods (default all); `--skip-planners` runs none.
+- `direct` (S → home, no via) is evaluated for every start as well.
+- `--planners ompl,stomp,stomp_seed` picks planner methods (default all for right_return, none for left_return); `--skip-planners` runs none.
+
+### `--sequence left_return`
+
+The left return starts where REFINE_CUP leaves the arm: the fixed approach pose over the cup (`refine_observe: false` opens the gripper there). That pose has a fixed height and orientation; only the cup x/y changes it. The tool therefore builds one start per cup shift instead of reading a configured pose:
+
+- Cup BODY (cup middle): the scene's `demo_place_cup` (registered by the last approach), or `--cup x,y,z`.
+- Grid: `--cup-dx` (default -0.05,-0.025,0) × `--cup-dy` (default -0.025,0,0.025) metres, applied to a private scene copy that moves the cup.
+- Per shift: `approach_tcp_target` + `approach_fixed_orientation`, then move_group `/compute_ik` seeded with the runtime PTP start (left at `retreat_together`, right at `giver_home`, grippers open). Runtime Pilz PTP may still choose another IK branch.
+- Extra method `lift_N` (`--lift-mm`, default 50,100): via = the start TCP raised N mm with the same orientation (IK seeded with the start), then home. It differs per start, so the runtime would need to compute it.
+- `--tcp-via dx,dy,dz` (mm, repeatable): via = the start TCP moved by that offset in the planning frame, same orientation (`lift_N` is `0,0,N`).
+- `--via-alpha` is relative to each start (a token `=v` sets that joint to the absolute value v); `--via` is absolute.
+- Summary rows carry `start`, `cup_dx`, `cup_dy`; `run` is the start index.
 - `--padding-mm X` grows world primitives by X on every side in the planning requests only (box sizes +2X, cylinder radius +X and height +2X, sphere radius +X; meshes unchanged). Validation and clearance use the real scene.
 - The tool prints the `/move_group` STOMP settings it planned with. It never changes them; set `stomp.num_iterations_after_valid` with `ros2 param set` between runs. Whether STOMP picks up a changed value without a restart is unverified; compare the printed value with the results.
 
