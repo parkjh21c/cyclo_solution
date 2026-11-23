@@ -1,4 +1,4 @@
-# Right-arm return path comparison (plan-only)
+# Arm return path comparison (plan-only)
 
 `compare_return_paths` builds the right_return motion (right arm back to `giver_home` after a right-to-left handover) three ways. Every result goes through the runtime `smooth_segments` and `validate_smooth_path`, and the tool compares the final trajectories.
 
@@ -104,3 +104,28 @@ In each plot, the median-duration run of each method is drawn bold.
 - The runtime side return never calls a planner. Using ompl or stomp at runtime needs separate work in the side preparation stage. This tool only previews that result.
 - Clearance covers world objects only: no self-distance or attached-object distance.
 - Outlines in `3_tcp_path.png` are box hulls. Cylinders are drawn as their bounding box, and meshes are not drawn.
+
+## Results and decision (2026-11-23)
+
+Both side returns use a fixed via only. STOMP was evaluated as a fallback for a blocked via path and not adopted.
+
+| Arm | Method | Validated | Plan | Motion | Stops | Clearance |
+|---|---|---|---|---|---|---|
+| right | via ([handover.yaml](../config/handover.yaml) `giver_home_via`) | 1/1 | 0 | 5.3 s | 0 | 60 mm |
+| right | stomp | 17/20 | | | 0 | 4.5 mm (`demo_table`) |
+| right | stomp, 30 mm padding | 12-14/20 | 4-5 s | 10.3 s | 0 | ~40 mm |
+| right | stomp_seed (via path) | 20/20 | | 7.3 s | at via | |
+| left | via (`left_home_via`), 9 cup positions | 9/9 | 0 | 4.2-4.6 s | 0 | 40 mm |
+| left | stomp | 39/45 | 1.2 s | 7.1 s | 0 | 4.6 mm, min 0.6 mm (`demo_place_cup`) |
+| left | stomp, 30 mm padding | 31/45 | 2.9 s | 8.5 s | 0 | 42 mm |
+| left | stomp_seed (via path) | 45/45 | 0.3 s | 6.6 s | 2 | 40 mm |
+
+Values are medians; left runs are 5 per cup position.
+
+Why STOMP was not added as a fallback:
+- STOMP's collision cost is binary, so plain STOMP ends millimetres from obstacles. 30 mm padding fixes the clearance, but 30-40 % of plans fail even when the via path is free, and plan plus motion takes about twice as long as the via.
+- STOMP output seeded with the via path has small joint reversals; the runtime smoother stops at each one. Using it needs a separate smoother for dense paths.
+- STOMP does not know the other arm's motion, so it cannot resolve `SIDE_PAIR_COLLISION`. The main arm also waits while the side path plans.
+- A fallback would add a planner call to side preparation for a case not yet seen on the robot. The demo keeps one behaviour: a blocked via path stops safely before motion (right: `SIDE_BEFORE_MOTION`, resumable; left: warning, arm stays).
+
+The `stomp` pipeline stays loaded in `sg2_moveit.launch.py` so this tool can repeat the comparison.
