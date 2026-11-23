@@ -6,6 +6,7 @@ DYNAMIXEL pick, so an empty basket is measured too. Updates only while the right
 at the menu-1 pose (initial_pose_check). Never commands motion.
 """
 import math
+import os
 from dataclasses import fields, replace
 
 import numpy as np
@@ -89,6 +90,11 @@ class WristBasketInit(Node):
         min_turn = math.radians(self.declare_parameter("min_scene_turn_deg", 1.0).value)
         jump_move = self.declare_parameter("jump_move", 0.010).value  # m
         jump_turn = math.radians(self.declare_parameter("jump_turn_deg", 3.0).value)
+        # Debug dumps: frames whose yaw differs from the applied value by more than this.
+        self.debug_dir = self.declare_parameter("debug_dir", "/tmp/basket_debug").value
+        self.debug_turn = math.radians(self.declare_parameter("debug_turn_deg", 10.0).value)
+        self.debug_max = self.declare_parameter("debug_max_files", 50).value
+        self.debug_count = 0
         # Log, jump confirmation and scene resend decisions.
         self.state = BasketObserverState(min_move, min_turn, jump_move, jump_turn)
         files = [config_file("ffw_vision", "blue_basket.yaml"),
@@ -171,10 +177,16 @@ class WristBasketInit(Node):
             self.report(f"IMAGE_INVALID: {error}")
             return
         plane = merge_planes([list(o.support_plane) for o, _, _ in frames])
-        basket, reason = fit_basket(color, depth, info.k, info.d, self.rays[1], plane, self.params)
+        debug = {}
+        basket, reason = fit_basket(color, depth, info.k, info.d, self.rays[1], plane, self.params,
+                                    debug)
         if basket is None:
             self.report(f"BASKET_NOT_FOUND: {reason}")
             return
+        rim = (f" top {debug['top'] * 1000:.1f}mm rim {debug['rim_points']}/"
+               f"{debug['blue_points']} pts (-{debug.get('rim_dropped', 0)} stray)"
+               f" ext {basket.length_m * 1000:.0f}x"
+               f"{basket.width_m * 1000:.0f}mm rect {debug['rect_deg']:.1f}")
         header = frames[-1][0].header
         try:
             tf = self.buffer.lookup_transform(self.frame, header.frame_id, Time.from_msg(header.stamp))
@@ -194,6 +206,8 @@ class WristBasketInit(Node):
         yaw = math.degrees(math.atan2(frame[1, 0], frame[0, 0]))
         cut = f" cut {basket.cut}" if basket.cut else ""
         applied = self.state.accepted
+        self.dump(applied, position, frame, yaw, basket, debug, color, depth, plane, info,
+                  header)
         apply, dropped = self.state.screen(position, frame)
         if dropped:
             self.get_logger().info("basket candidate dropped: back near the applied value")
@@ -205,7 +219,7 @@ class WristBasketInit(Node):
             self.get_logger().info(
                 f"basket candidate {position[0]:.3f} {position[1]:.3f} {position[2]:.3f}"
                 f" yaw {yaw:.1f} deg cut {basket.cut if basket.cut else 'no'}"
-                f" from applied {change}; not applied until a matching measurement")
+                f" from applied {change}{rim}; not applied until a matching measurement")
             return
         message = PoseStamped()
         message.header.frame_id = self.frame
@@ -221,9 +235,32 @@ class WristBasketInit(Node):
                 f"basket {position[0]:.3f} {position[1]:.3f} {position[2]:.3f} yaw {yaw:.1f} deg"
                 f" stamp {header.stamp.sec}.{header.stamp.nanosec:09d}"
                 f" cut {basket.cut if basket.cut else 'no'}"
-                f" moved {'n/a' if moved is None else f'{moved:.1f}'} mm"
+                f" moved {'n/a' if moved is None else f'{moved:.1f}'} mm{rim}"
                 f"{' (first after return)' if first else ''}")
         self.update_scene(position, frame)
+
+    def dump(self, applied, position, frame, yaw, basket, debug, color, depth, plane, info,
+             header):
+        """Save this window to debug_dir when its yaw is far from the applied value."""
+        if applied is None or self.debug_count >= self.debug_max:
+            return
+        _, turned = pose_change(applied, (position, frame))
+        if turned <= self.debug_turn:
+            return
+        os.makedirs(self.debug_dir, exist_ok=True)
+        stamp = f"{header.stamp.sec}.{header.stamp.nanosec:09d}"
+        path = os.path.join(self.debug_dir, f"basket_{stamp}_yaw{yaw:.0f}.npz")
+        applied_yaw = math.degrees(math.atan2(applied[1][1, 0], applied[1][0, 0]))
+        np.savez_compressed(
+            path, color=color, depth=depth.astype(np.float32), normal=plane[0],
+            plane_d=plane[1], k=np.array(info.k), d=np.array(info.d), position=position,
+            frame=frame, yaw=yaw, applied_position=applied[0], applied_yaw=applied_yaw,
+            length_m=basket.length_m, width_m=basket.width_m, cut=basket.cut,
+            **{key: value for key, value in debug.items()})
+        self.debug_count += 1
+        self.get_logger().info(
+            f"debug dump {path} (yaw {yaw:.1f} vs applied {applied_yaw:.1f},"
+            f" {self.debug_count}/{self.debug_max})")
 
     def update_scene(self, position, frame):
         if not self.state.needs_scene(position, frame):

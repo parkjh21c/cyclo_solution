@@ -76,6 +76,10 @@
     basket_extent_percentile: 0.5  # rim extents leave out this percent at each end
     basket_cut_margin: 0.01  # m: an extent this much under the known size may be cut off ...
     basket_cut_window: 0.02  # m: ... when rim points this near its end touch the image border
+    basket_cluster_cell: 0.01  # m: rim only from the largest connected blue group on the plane;
+    # 1-77 stray far rim points turned the rim box 17-45 deg (2026-11-23 debug dumps)
+    basket_cluster_gap: 0.06  # m: groups this close are one (floor hidden behind a rim, holes)
+    basket_box_margin: 0.05  # m: rim box over the known size by this = not the basket
     # MoveIt scene for ffw_pick (not grasp_planner parameters)
     # v2 basket (2026-11-20 drawing): 40 deg slope floor edge -> rim size at 25 mm, then vertical
     basket_wall: 0.010

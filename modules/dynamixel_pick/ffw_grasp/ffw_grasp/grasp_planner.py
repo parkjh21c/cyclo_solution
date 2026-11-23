@@ -75,6 +75,10 @@ class GraspParams:
     basket_extent_percentile: float = 0.5  # rim extents leave out this percent at each end
     basket_cut_margin: float = 0.01  # m: an extent this much under the known size may be cut
     basket_cut_window: float = 0.02  # m: ... when rim points this near its end touch the border
+    basket_cluster_cell: float = 0.01  # m: rim = blue points in the largest connected group on
+    # the plane at this cell size (stray far points used to turn the rim box)
+    basket_cluster_gap: float = 0.06  # m: groups this close are one (floor hidden behind a rim)
+    basket_box_margin: float = 0.05  # m: a rim box this much over the known size = not the basket
     near_radius: float = 0.3  # m: rolled grasps check the scene points this close to the object
     basket_h_min: int = 95  # blue HSV, as ffw_vision SegParams (both get blue_basket.yaml)
     basket_h_max: int = 125
@@ -853,11 +857,25 @@ def backup_rolls(rolls, tilts, away, count, free):
     return out
 
 
-def fit_basket(color_bgr, depth, k, d, rays, plane, params):
+def largest_cluster(xy, cell, gap=0.0):
+    """Mask of the points in the largest group of occupied plane cells; gaps up to gap join."""
+    ij = np.floor((xy - xy.min(axis=0)) / cell).astype(np.int64)
+    grid = np.zeros((ij[:, 1].max() + 1, ij[:, 0].max() + 1), np.uint8)
+    grid[ij[:, 1], ij[:, 0]] = 1
+    reach = int(math.ceil(gap / cell / 2))
+    if reach > 0:
+        grid = cv2.dilate(grid, np.ones((2 * reach + 1,) * 2, np.uint8))
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(grid, connectivity=8)
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return labels[ij[:, 1], ij[:, 0]] == best
+
+
+def fit_basket(color_bgr, depth, k, d, rays, plane, params, debug=None):
     """Basket from its rim: blue points near the top level, projected on the plane, fitted
     with a rectangle of the known size. Returns (Basket or None, reason).
 
     A side cut off by the image border is placed from the opposite, visible side.
+    debug: dict that gets the blue/rim points, top level and rect angle (None = off).
     """
     if not params.basket_length:
         return None, 'basket off'
@@ -873,10 +891,23 @@ def fit_basket(color_bgr, depth, k, d, rays, plane, params):
     points = np.column_stack((rays[valid] * z[:, None], z))
     heights = points @ normal + plane_d
     top = float(np.percentile(heights, params.basket_rim_percentile))
+    a, b = plane_axes(normal)
+    blue_xy = np.column_stack((points @ a, points @ b))
+    if debug is not None:
+        debug.update(blue_xy=blue_xy, blue_heights=heights,
+                     top=top, blue_points=int(valid.sum()),
+                     blue_uv=np.column_stack(np.nonzero(valid)[::-1]))
     if abs(top - params.basket_height) > params.basket_height_tol:
         return None, (f'basket rim at {top * 1000:.0f}mm,'
                       f' expected {params.basket_height * 1000:.0f}mm')
     rim = np.abs(heights - top) < params.basket_rim_band
+    if params.basket_cluster_cell > 0:  # the basket body is one group, strays lie apart
+        main = largest_cluster(blue_xy, params.basket_cluster_cell, params.basket_cluster_gap)
+        if debug is not None:
+            debug.update(rim_dropped=int((rim & ~main).sum()))
+        rim &= main
+    if debug is not None:
+        debug.update(rim=rim, rim_points=int(rim.sum()))
     if rim.sum() < params.basket_min_points:
         return None, f'basket rim {int(rim.sum())} points'
     vv, uu = np.nonzero(valid)
@@ -884,9 +915,15 @@ def fit_basket(color_bgr, depth, k, d, rays, plane, params):
     h, w = depth.shape
     m = params.basket_edge_px
     edge = (uu < m) | (uu >= w - m) | (vv < m) | (vv >= h - m)
-    a, b = plane_axes(normal)
-    xy = np.column_stack((points[rim] @ a, points[rim] @ b))
-    _, _, angle = cv2.minAreaRect((xy * 1000).astype(np.float32))
+    xy = blue_xy[rim]
+    _, box, angle = cv2.minAreaRect((xy * 1000).astype(np.float32))
+    box = sorted(box, reverse=True)
+    if debug is not None:
+        debug.update(rect_deg=float(angle), rim_edge=edge, rect_mm=box)
+    if (box[0] > (params.basket_length + params.basket_box_margin) * 1000
+            or box[1] > (params.basket_width + params.basket_box_margin) * 1000):
+        return None, (f'basket rim box {box[0]:.0f}x{box[1]:.0f}mm, expected'
+                      f' {params.basket_length * 1000:.0f}x{params.basket_width * 1000:.0f}mm')
     t = math.radians(angle)
     axes = [np.array([math.cos(t), math.sin(t)]), np.array([-math.sin(t), math.cos(t)])]
     spans, trim = [], params.basket_extent_percentile

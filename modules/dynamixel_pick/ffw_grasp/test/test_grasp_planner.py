@@ -555,6 +555,25 @@ class TestBasket(unittest.TestCase):
         self.assertLess(np.linalg.norm(basket.center - scene.point(0.0, 0.33)), 0.004)
         self.assertGreater(abs(basket.axis @ scene.direction(90.0)), math.cos(math.radians(1)))
 
+    def test_stray_rim_point_does_not_turn_the_box(self):
+        # one blue pixel at rim height far from the basket (real dumps 2026-11-23: 20 deg turn)
+        scene, color = basket_scene(0.0, 0.02, 20.0)
+        self.assertFalse(color[10, 10].any())
+        scene.depth[10, 10] = scene.hit(0.075)[10, 10]
+        color[10, 10] = BLUE
+        basket, reason = self.fit(scene, color)
+        self.assertEqual(reason, '')
+        self.assertGreater(abs(basket.axis @ scene.direction(20.0)), math.cos(math.radians(1)))
+        self.assertLess(np.linalg.norm(basket.center - scene.point(0.0, 0.02)), 0.004)
+
+    def test_rim_box_over_the_known_size_is_rejected(self):
+        scene, color = basket_scene(0.0, 0.02, 20.0)
+        small = replace(BASKET, basket_length=0.25, basket_width=0.18)
+        basket, reason = fit_basket(color, scene.depth, K, scene.d, scene.rays,
+                                    (scene.n, scene.plane_d), small)
+        self.assertIsNone(basket)
+        self.assertIn('expected 250x180mm', reason)
+
     def test_no_basket(self):
         scene = Scene()
         basket, reason = self.fit(scene, np.zeros((HEIGHT, WIDTH, 3), np.uint8))
