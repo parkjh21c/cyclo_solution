@@ -293,7 +293,7 @@ public:
     }
   }
 
-  void tick() override {}
+  void tick() override { ++ticks; }
 
   void cancel(const std::string & code, const std::string & reason) override {
     current = {ExecutionState::Cancelled, code, reason};
@@ -306,6 +306,7 @@ public:
   bool stationary = true;
   bool sequence_supported = true;
   int paired_calls = 0;
+  int ticks = 0;
   ExecutionResult current;
   std::vector<Step> steps;
   std::vector<std::vector<Step>> continuous;
@@ -2529,6 +2530,192 @@ TEST_F(B3HandoverFixture, PreviewReportsOnlyInsertPoseWithoutPlanningPreparation
   EXPECT_TRUE(executor.continuous.empty());
   EXPECT_TRUE(executor.steps.empty());
   EXPECT_TRUE(scene.scenes.empty());
+}
+
+class ContinuousHandoverFixture : public CupHandoverFixture {
+protected:
+  void SetUp() override {
+    CupHandoverFixture::SetUp();
+    robot.smooth_motion = true;
+    robot.cup_handover_continuous = true;
+    Step ready = taught("cup_ready", "dual_joint", "", {});
+    ready.left_target = {.1};
+    ready.right_target = {.3};
+    ready.joint_line = true;
+    ready.velocity_scale = ready.acceleration_scale = .4;
+    ready.tolerance = M_PI / 180;
+    Step insert = ready;
+    insert.name = "cup_insert_joint";
+    insert.right_target = {.5};
+    insert.hold_arm = "left";
+    insert.velocity_scale = insert.acceleration_scale = .2;
+    robot.motion_sequences.at("cup_left_to_right").steps = {ready};
+    MotionSequence continuous;
+    continuous.steps = {insert};
+    robot.motion_sequences["cup_left_to_right_continuous"] = continuous;
+  }
+
+  // Like run(), but the first continuous path ends with `outcome`; moved: the arm left its start.
+  void run_rejecting(CupHandoverMotion & motion, ExecutionResult outcome, bool moved = false) {
+    size_t seen = 0;
+    bool rejected = false;
+    for (int i = 0; i < 80 && motion.running(); ++i) {
+      if (!rejected && executor.continuous.size() == 1 &&
+          executor.current.state == ExecutionState::Running) {
+        rejected = true;
+        if (moved) arm_joint = .1;
+        feedback();
+        executor.current = outcome;
+      } else {
+        feedback();
+        complete();
+      }
+      motion.tick();
+      while (seen < scene.scenes.size()) {
+        steps_at_scene.push_back(executor.steps.size());
+        ++seen;
+      }
+    }
+  }
+
+  std::vector<std::string> step_names() const {
+    std::vector<std::string> names;
+    for (const auto & step : executor.steps) names.push_back(step.name);
+    return names;
+  }
+
+  static bool contact_allowed(const moveit_msgs::msg::PlanningScene & s) {
+    const auto & acm = s.allowed_collision_matrix;
+    if (acm.entry_names.empty() || acm.entry_names[0] != "demo_place_cup") return false;
+    for (size_t i = 1; i < acm.entry_names.size(); ++i) {
+      if (acm.entry_names[i].rfind("gripper_r_rh_p12_rn_", 0) != 0 ||
+          !acm.entry_values[0].enabled[i]) {
+        return false;
+      }
+    }
+    return acm.entry_names.size() > 1;
+  }
+
+  static bool contact_revoked(const moveit_msgs::msg::PlanningScene & s) {
+    const auto & acm = s.allowed_collision_matrix;
+    if (acm.entry_names.size() < 2 || acm.entry_names[0] != "demo_place_cup") return false;
+    for (const auto & row : acm.entry_values) {
+      for (const bool allowed : row.enabled) {
+        if (allowed) return false;
+      }
+    }
+    return true;
+  }
+};
+
+TEST_F(ContinuousHandoverFixture, ReadyAndInsertRunAsOnePathThenOnlyTheCloseFollows) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run(motion);
+  ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  const auto & path = executor.continuous.front();
+  ASSERT_EQ(path.size(), 2u);
+  EXPECT_EQ(path[0].name, "cup_ready");
+  EXPECT_EQ(path[0].strict_objects, (std::vector<std::string>{"demo_place_cup"}));
+  EXPECT_EQ(path[0].tcp_line_tolerance, 0);
+  EXPECT_EQ(path[1].name, "cup_insert_joint");
+  EXPECT_EQ(path[1].arm, "right");
+  EXPECT_TRUE(path[1].endpoints_only);
+  EXPECT_TRUE(path[1].strict_objects.empty()); // Receiver contact allowed during the insert.
+  EXPECT_DOUBLE_EQ(path[1].tcp_line_tolerance, robot.cup_handover_insert_line_tolerance);
+  EXPECT_EQ(path[1].left_target, path[0].left_target);
+  EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert_joint",
+                              "receiver_close", "giver_release", "cup_retreat"}));
+  // Contact is allowed before anything moves; detach and attach follow the close.
+  ASSERT_EQ(scene.scenes.size(), 3u);
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{0, 3, 3}));
+  EXPECT_TRUE(contact_allowed(scene.scenes[0]));
+  EXPECT_EQ(scene.scenes[2].robot_state.attached_collision_objects.at(0).link_name,
+      robot.arms.at("right").tcp);
+}
+
+TEST_F(ContinuousHandoverFixture, RejectionBeforeMotionRevokesContactAndRunsSeparateSteps) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run_rejecting(motion, {ExecutionState::Failed, "PATH_PREPARATION_FAILED", "in collision"});
+  ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+  EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert_joint", "cup_ready",
+                              "cup_insert", "receiver_close", "giver_release", "cup_retreat"}));
+  // Allow, revoke before the separate cup_ready, allow again before cup_insert, detach, attach.
+  ASSERT_EQ(scene.scenes.size(), 5u);
+  EXPECT_EQ(steps_at_scene, (std::vector<size_t>{0, 2, 3, 5, 5}));
+  EXPECT_TRUE(contact_allowed(scene.scenes[0]));
+  EXPECT_TRUE(contact_revoked(scene.scenes[1]));
+  EXPECT_TRUE(contact_allowed(scene.scenes[2]));
+}
+
+TEST_F(ContinuousHandoverFixture, PathNotStartedFallsBackToSeparateSteps) {
+  executor.sequence_supported = false;
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run(motion);
+  ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+  EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert", "receiver_close",
+                              "giver_release", "cup_retreat"}));
+  ASSERT_EQ(scene.scenes.size(), 5u);
+  EXPECT_TRUE(contact_revoked(scene.scenes[1]));
+}
+
+TEST_F(ContinuousHandoverFixture, FailureAfterMotionNeverClosesOrSwapsTheCup) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  run_rejecting(motion, {ExecutionState::Failed, "EXECUTION_FAILED", "controller aborted"}, true);
+  EXPECT_EQ(motion.result().state, "FAILED");
+  EXPECT_EQ(motion.result().code, "EXECUTION_FAILED");
+  EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert_joint"}));
+  ASSERT_EQ(scene.scenes.size(), 1u); // Only the contact allowance; the cup stays on the giver.
+  EXPECT_TRUE(scene.scenes[0].robot_state.attached_collision_objects.empty());
+}
+
+TEST_F(ContinuousHandoverFixture, CancelDuringThePathNeverClosesOrSwapsTheCup) {
+  CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+  std::string reason;
+  ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+  for (int i = 0; i < 10 && executor.continuous.empty(); ++i) {
+    feedback();
+    motion.tick();
+  }
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  // The motion must tick the executor while the path runs (preparation, execution, timeout).
+  const int before = executor.ticks;
+  feedback();
+  motion.tick();
+  EXPECT_GT(executor.ticks, before);
+  motion.cancel();
+  run(motion);
+  EXPECT_EQ(motion.result().state, "CANCELLED");
+  EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert_joint"}));
+  EXPECT_EQ(scene.scenes.size(), 1u);
+}
+
+TEST_F(ContinuousHandoverFixture, DisabledOrMismatchedGiverTargetKeepsSeparateSteps) {
+  for (const bool disable : {true, false}) {
+    executor.steps.clear();
+    executor.continuous.clear();
+    scene.scenes.clear();
+    robot.cup_handover_continuous = disable ? false : true;
+    robot.motion_sequences.at("cup_left_to_right_continuous").steps[0].left_target =
+        disable ? std::vector<double>{.1} : std::vector<double>{.2};
+    CupHandoverMotion motion(robot, config, *context, executor, scene, "left");
+    std::string reason;
+    ASSERT_TRUE(motion.start("left", "cup", reason)) << reason;
+    run(motion);
+    ASSERT_TRUE(motion.result().sequence_completed) << motion.result().detail;
+    EXPECT_TRUE(executor.continuous.empty());
+    EXPECT_EQ(step_names(), (std::vector<std::string>{"cup_ready", "cup_insert", "receiver_close",
+                                "giver_release", "cup_retreat"}));
+    EXPECT_EQ(scene.scenes.size(), 3u); // Unchanged flow: contact, detach, attach.
+  }
 }
 
 class B2HandoverFixture : public CupHandoverFixture {

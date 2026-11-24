@@ -35,6 +35,8 @@ handover_demo:
     path_simplification_tolerance: 0.002
     trajectory_sample_period: 0.01
     continuous_start_tolerance: 0.01
+    cup_handover_continuous: true  # Menu 7: no stop at cup_ready; false = separate steps
+    cup_handover_insert_line_tolerance: 0.006  # m, receiver TCP off the straight insert
     collision_check_step: 0.005  # rad between collision-checked samples (0 = every 2 ms sample)
     held_gripper_start_tolerance: 0.05  # a gripper squeezing an object creeps; arms keep 0.01
     motion_sequences:
@@ -384,13 +386,15 @@ handover_demo:
       cup_left_to_right:
         # One joint line for both arms, no right via (2026-11-23, basket lowered since the via was added).
         # Previous: cup_ready_via (right via [1.57, 0, 0, -2.8, 0, 0, 0], blended) + cup_ready (hold_arm: left).
+        # 2026-11-24: right ready 80 mm behind the insert pose (was 200 mm), speed 0.3 -> 0.4.
+        # Previous right_target: [-0.15991552, -0.6942645, 0.33626403, -1.26587322, -0.74302606, -0.28713782, 1.51884724]
         steps:
         - cup_ready
         cup_ready:
           type: dual_joint
           joint_line: true
-          velocity_scale: 0.3
-          acceleration_scale: 0.3
+          velocity_scale: 0.4
+          acceleration_scale: 0.4
           tolerance: 0.017453292519943295
           planning_tolerance: 0.0005
           timeout: 60.0
@@ -403,13 +407,43 @@ handover_demo:
           - 0.132273
           - -1.16007363
           right_target:
-          - -0.15991552
-          - -0.6942645
-          - 0.33626403
-          - -1.26587322
-          - -0.74302606
-          - -0.28713782
-          - 1.51884724
+          - -0.16152563
+          - -0.58901731
+          - 0.45633236
+          - -1.45799409
+          - -0.6106615
+          - -0.19015171
+          - 1.25868023
+      # cup_handover_continuous: cup_ready + this insert as one smoothed path (no stop at ready).
+      # Right target: IK of cup_insert's pose; left_target must equal cup_ready's (left holds still).
+      cup_left_to_right_continuous:
+        steps:
+        - cup_insert_joint
+        cup_insert_joint:
+          type: dual_joint
+          joint_line: true
+          hold_arm: left
+          velocity_scale: 0.2
+          acceleration_scale: 0.2
+          tolerance: 0.017453292519943295
+          planning_tolerance: 0.0005
+          timeout: 30.0
+          left_target:
+          - -0.15714083
+          - 0.37945894
+          - -0.44538296
+          - -1.61585321
+          - 0.16935813
+          - 0.132273
+          - -1.16007363
+          right_target:
+          - -0.19872184
+          - -0.47642001
+          - 0.54535301
+          - -1.50014605
+          - -0.51284845
+          - -0.12609283
+          - 1.12535801
       cup_left_to_right_grasp:
         steps:
         - cup_insert

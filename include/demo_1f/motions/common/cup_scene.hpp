@@ -26,8 +26,9 @@ moveit_msgs::msg::PlanningScene make_cup_release_scene(const Config & robot);
 // Cup handover scene swap: detach from the giver (MoveIt returns it to the world), then attach
 // to the receiver. The giver's fingers may still touch the cup until it lets go.
 // Before the receiver closes on a cup still held by the giver: allow receiver hand contact.
+// allowed=false checks those pairs again (continuous handover falling back before motion).
 moveit_msgs::msg::PlanningScene make_cup_contact_scene(
-    const Config & robot, const std::string & receiver);
+    const Config & robot, const std::string & receiver, bool allowed = true);
 moveit_msgs::msg::PlanningScene make_cup_detach_scene(
     const Config & robot, const std::string & giver);
 moveit_msgs::msg::PlanningScene make_cup_attach_scene(

@@ -1,6 +1,7 @@
 #include "demo_1f/motions/handover/cup_handover_motion.hpp"
 #include "demo_1f/runtime/config.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace demo_1f {
 CupHandoverMotion::CupHandoverMotion(const Config & robot,
@@ -16,7 +17,108 @@ CupHandoverMotion::CupHandoverMotion(const Config & robot,
 
 void CupHandoverMotion::reset() {
   running_sequence_.clear();
-  cancel_requested_ = false;
+  cancel_requested_ = continuous_tried_ = inserted_ = false;
+  start_joints_.clear();
+}
+
+std::vector<Step> CupHandoverMotion::continuous_steps(std::string & reason) const {
+  const std::string base = "cup_" + giver_ + "_to_" + receiver_;
+  if (!robot_.cup_handover_continuous || giver_ != "left") {
+    reason = "disabled";
+    return {};
+  }
+  const auto * transfer = sequence(base, reason);
+  const auto * insert = transfer ? sequence(base + "_continuous", reason) : nullptr;
+  if (!insert) return {};
+  if (transfer->steps.size() != 1 || insert->steps.size() != 1 ||
+      transfer->steps[0].type != "dual_joint" || insert->steps[0].type != "dual_joint") {
+    reason = "needs one dual_joint step each in " + base + " and " + base + "_continuous";
+    return {};
+  }
+  auto ready = transfer->steps[0];
+  auto line = insert->steps[0];
+  if (line.left_target != ready.left_target) {
+    reason = "insert left_target must equal cup_ready (the giver holds still)";
+    return {};
+  }
+  ready.strict_objects = {"demo_place_cup"}; // Cup checks stay on until the insert.
+  line.arm = receiver_;
+  line.endpoints_only = true; // Straight joint segment, entered along its own direction.
+  line.tcp_line_tolerance = robot_.cup_handover_insert_line_tolerance;
+  return {ready, line};
+}
+
+void CupHandoverMotion::start_continuous() {
+  phase("CUP_HANDOVER_CONTINUOUS");
+  std::string reason;
+  const auto steps = continuous_steps(reason);
+  if (steps.empty()) {
+    fall_back(reason);
+    return;
+  }
+  if (!context_.ready(reason) || !executor_.ready(MotionSequence{"", "", "", steps, ""}, reason)) {
+    fall_back("not ready: " + reason);
+    return;
+  }
+  if (!executor_.start_sequence(steps)) {
+    fall_back("not started: " + executor_.result().detail);
+    return;
+  }
+  moving_ = true;
+}
+
+void CupHandoverMotion::finish_continuous() {
+  executor_.tick(); // Advances preparation, execution and timeouts; nothing else ticks it here.
+  const auto r = executor_.result();
+  if (r.state == ExecutionState::Running || r.state == ExecutionState::Cancelling) {
+    result_.detail = r.detail;
+    return;
+  }
+  moving_ = false;
+  if (r.state == ExecutionState::StopUnconfirmed) {
+    fail("STOP_UNCONFIRMED", r.detail);
+    return;
+  }
+  if (r.state == ExecutionState::Cancelled ||
+      (cancel_requested_ && r.state != ExecutionState::Succeeded)) {
+    finish_cancelled();
+    return;
+  }
+  if (r.state != ExecutionState::Succeeded) {
+    if (r.state == ExecutionState::Failed && arms_unmoved()) {
+      fall_back("failed before motion: " + r.detail);
+      return;
+    }
+    fail(r.code.empty() ? "EXECUTION_FAILED" : r.code, phase_ + ": " + r.detail);
+    return;
+  }
+  result_.last_completed_step = r.last_completed_step;
+  if (cancel_requested_) {
+    finish_cancelled();
+    return;
+  }
+  inserted_ = true; // The grasp sequence skips its LIN insert.
+  phase("CUP_HANDOVER_GRASP");
+  start_sequence("cup_" + giver_ + "_to_" + receiver_ + "_grasp");
+}
+
+void CupHandoverMotion::fall_back(const std::string & why) {
+  RCLCPP_WARN(rclcpp::get_logger("handover_demo.cup"),
+      "Cup handover falls back to separate steps: %s", why.c_str());
+  phase("CUP_CONTACT_REVOKE_SCENE"); // Cup checks back on before the separate cup_ready.
+  apply_swap_scene();
+}
+
+bool CupHandoverMotion::arms_unmoved() const {
+  const auto snapshot = context_.snapshot();
+  for (const auto & [name, position] : start_joints_) {
+    const auto joint = snapshot.joints.find(name);
+    if (joint == snapshot.joints.end() ||
+        std::abs(joint->second.position - position) > robot_.continuous_start_tolerance) {
+      return false;
+    }
+  }
+  return !start_joints_.empty();
 }
 
 const MotionSequence * CupHandoverMotion::sequence(
@@ -68,6 +170,11 @@ bool CupHandoverMotion::start_sequence(const std::string & name) {
   MotionSequence execution;
   if (selected) {
     execution = *selected;
+    if (inserted_ && name == "cup_" + giver_ + "_to_" + receiver_ + "_grasp") {
+      execution.steps.erase(std::remove_if(execution.steps.begin(), execution.steps.end(),
+          [this](const Step & step) { return step.type == "linear" && step.arm == receiver_; }),
+          execution.steps.end());
+    }
     if (giver_ == "right" && config_.independent_return &&
         name == "cup_right_to_left_release") {
       execution.steps.erase(std::remove_if(execution.steps.begin(), execution.steps.end(),
@@ -86,7 +193,9 @@ bool CupHandoverMotion::start_sequence(const std::string & name) {
 
 bool CupHandoverMotion::apply_swap_scene() {
   // In order: receiver finger contact, detach from the giver, attach to the receiver.
-  const auto scene = phase_ == "CUP_CONTACT_SCENE" ? make_cup_contact_scene(robot_, receiver_) :
+  const bool contact = phase_ == "CUP_CONTACT_SCENE" || phase_ == "CUP_CONTINUOUS_SCENE";
+  const auto scene = contact ? make_cup_contact_scene(robot_, receiver_) :
+      phase_ == "CUP_CONTACT_REVOKE_SCENE" ? make_cup_contact_scene(robot_, receiver_, false) :
       phase_ == "CUP_DETACH" ? make_cup_detach_scene(robot_, giver_) :
                                make_cup_attach_scene(robot_, receiver_, giver_);
   scene_pending_ = scene_.apply(scene);
@@ -110,6 +219,8 @@ void CupHandoverMotion::cancel() {
   result_.state = "CANCELLING";
   if (sequence_.running()) {
     sequence_.cancel();
+  } else if (moving_) {
+    executor_.cancel();
   } else if (!scene_pending_ && phase_ != "CUP_DETACH" && phase_ != "CUP_ATTACH") {
     finish_cancelled();
   }
@@ -156,6 +267,17 @@ void CupHandoverMotion::tick() {
       return;
     }
     result_.last_completed_step = phase_;
+    if (phase_ == "CUP_CONTINUOUS_SCENE" || phase_ == "CUP_CONTACT_REVOKE_SCENE") {
+      if (cancel_requested_) {
+        finish_cancelled();
+      } else if (phase_ == "CUP_CONTINUOUS_SCENE") {
+        start_continuous();
+      } else {
+        phase("CUP_HANDOVER_TRANSFER");
+        start_sequence(base);
+      }
+      return;
+    }
     if (phase_ == "CUP_CONTACT_SCENE") {
       if (cancel_requested_) {
         finish_cancelled();
@@ -178,7 +300,28 @@ void CupHandoverMotion::tick() {
     start_sequence(base + "_release");
     return;
   }
+  if (moving_) {
+    finish_continuous();
+    return;
+  }
   if (running_sequence_.empty()) {
+    std::string why;
+    if (!continuous_tried_ && !continuous_steps(why).empty()) {
+      continuous_tried_ = true;
+      // Both arms' start joints: a rejection with neither arm moved may fall back.
+      const auto snapshot = context_.snapshot();
+      for (const auto & [side, arm] : robot_.arms) {
+        (void)side;
+        for (const auto & name : arm.joints) {
+          const auto joint = snapshot.joints.find(name);
+          if (joint != snapshot.joints.end()) start_joints_[name] = joint->second.position;
+        }
+      }
+      phase("CUP_CONTINUOUS_SCENE"); // Contact allowed first; cup_ready keeps strict cup checks.
+      apply_swap_scene();
+      return;
+    }
+    continuous_tried_ = true;
     start_sequence(base);
     return;
   }

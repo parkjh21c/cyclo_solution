@@ -153,6 +153,8 @@ struct Config {
   double trajectory_sample_period{0.01};
   double continuous_start_tolerance{0.01};
   double held_gripper_start_tolerance{0}; // Zero inherits continuous_start_tolerance.
+  bool cup_handover_continuous{false}; // Left->right cup handover: ready + insert as one path.
+  double cup_handover_insert_line_tolerance{0.006}; // Receiver TCP off the insert line (m).
   double side_pair_step{0.05}; // rad: largest joint change between pair-checked path samples.
   double collision_check_step{0}; // rad between collision-checked path samples; 0 = every sample.
   std::map<std::string, MotionLimits> motion_limits;

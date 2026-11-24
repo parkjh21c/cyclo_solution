@@ -12,13 +12,21 @@ from ptp_path_check import step_start
 
 LEFT = [-0.15714083, 0.37945894, -0.44538296, -1.61585321, 0.16935813, 0.132273, -1.16007363]
 RIGHT = [-0.15991552, -0.6942645, 0.33626403, -1.26587322, -0.74302606, -0.28713782, 1.51884724]
+# 2026-11-24 operational right ready: 80 mm behind the insert pose, speed 0.4.
+OPERATIONAL_RIGHT = [-0.16152563, -0.58901731, 0.45633236, -1.45799409, -0.6106615, -0.19015171,
+                     1.25868023]
 
 
 class CupPreparationTest(unittest.TestCase):
-    def test_operational_yaml_matches_regenerated_preparation_with_original_targets(self):
+    def test_operational_yaml_matches_regenerated_preparation_shape(self):
         with (SOURCE / 'config/handover.yaml').open() as handle:
             sequences = yaml.safe_load(handle)['handover_demo']['ros__parameters']['motion_sequences']
-        self.assertEqual(sequences['cup_left_to_right'], preparation_steps(LEFT, RIGHT))
+        self.assertEqual(sequences['cup_left_to_right'],
+                         preparation_steps(LEFT, OPERATIONAL_RIGHT, 0.4))
+        # The continuous insert keeps the giver at cup_ready's left target.
+        insert = sequences['cup_left_to_right_continuous']['cup_insert_joint']
+        self.assertEqual(insert['left_target'], LEFT)
+        self.assertEqual(insert['hold_arm'], 'left')
 
     def test_preparation_is_one_joint_line_step_for_both_arms(self):
         sequence = preparation_steps(LEFT, RIGHT)

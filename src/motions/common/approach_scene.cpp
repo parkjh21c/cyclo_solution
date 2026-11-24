@@ -77,7 +77,7 @@ std::vector<std::string> hand_links(const std::string & arm, bool with_base) {
 } // namespace
 
 moveit_msgs::msg::PlanningScene make_cup_contact_scene(
-    const Config & robot, const std::string & receiver) {
+    const Config & robot, const std::string & receiver, bool allowed) {
   (void)robot;
   moveit_msgs::msg::PlanningScene scene;
   scene.is_diff = true;
@@ -93,7 +93,7 @@ moveit_msgs::msg::PlanningScene make_cup_contact_scene(
     auto & row = acm.entry_values[i].enabled;
     row.resize(acm.entry_names.size());
     for (size_t j = 0; j < row.size(); ++j) {
-      row[j] = (i == 0) != (j == 0); // Cup-hand pairs only.
+      row[j] = allowed && ((i == 0) != (j == 0)); // Cup-hand pairs only.
     }
   }
   return scene;

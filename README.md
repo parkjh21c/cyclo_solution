@@ -622,8 +622,9 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
 `/handover_cup`(`arm: left` = 컵을 든 손)은 기존 DYNAMIXEL 핸드오버처럼 YAML 시퀀스를 실행합니다.
 `handover.yaml`의 `motion_sequences`에 세 시퀀스가 필요합니다.
 
-- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_ready` 한 단계로, 왼손(컵을 든 채 넘김 자세)과 오른손(잡는 위치 20cm 뒤)이 `dual_joint` 관절 직선 하나로 동시에 움직입니다(경유 없음, 2026-11-23). 대기 거리는
-  `scripts/right_ready_check.py`로 고릅니다(0.12는 경로가 컵·왼손과 충돌, 0.30 이상은 IK 없음, 0.20·0.25 통과).
+- `cup_left_to_right`: 컵을 든 왼손과 오른손 대기 자세. 현재 설정은 `cup_ready` 한 단계로, 왼손(컵을 든 채 넘김 자세)과 오른손(잡는 위치 8cm 뒤)이 `dual_joint` 관절 직선 하나로 동시에 움직입니다(경유 없음, 속도 0.4, 2026-11-24. 이전 20cm·0.3).
+  `scripts/right_ready_check.py`는 왼손이 넘김 자세에 멈춰 있는 옛 순차 흐름 기준입니다(그때 0.12는 경로가 컵·왼손과 충돌, 0.20·0.25 통과).
+  지금의 동시 이동 경로는 런타임 smoothed path 충돌 검사가 판정합니다.
   양팔 동시 Pilz PTP(`dual_joint` + `pipeline`/`planner`)는 2026-11-11 시험에서 `MoveIt error 99999`로 계획에
   실패해서 쓰지 않습니다. 기본 OMPL `dual_joint`는
   경로가 무작위라 컵이 크게 기울 수 있어(2026-11-11) 쓰지 않습니다.
@@ -631,6 +632,18 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
   오른손과 컵의 접촉 허용(`CUP_CONTACT_SCENE`)은 이 시퀀스 직전에만 적용합니다. 그 전에는 오른손 이동 중에도
   컵 충돌을 검사합니다.
 - `cup_left_to_right_release`: `giver_release`(왼손 열기) → `cup_retreat`(왼손 `linear` 후퇴).
+- `cup_left_to_right_continuous`: `cup_insert_joint` 한 단계. 오른손 삽입 자세의 IK 관절값(`dual_joint`, `hold_arm: left`,
+  속도 0.2). `left_target`은 `cup_ready`와 같아야 합니다.
+
+연속 경로(`cup_handover_continuous: true`, 기본 설정): 오른손이 대기 자세에서 멈추지 않습니다.
+`CUP_CONTINUOUS_SCENE`(오른손-컵 접촉 허용)을 먼저 적용하고, `cup_ready` → `cup_insert_joint`를 smoothed path 하나로
+실행합니다(`CUP_HANDOVER_CONTINUOUS`). `cup_ready` 구간은 `strict_objects`로 컵 충돌을 그대로 검사하고,
+삽입 구간은 오른손 TCP가 직선에서 `cup_handover_insert_line_tolerance`(6mm) 넘게 벗어나면 거절합니다.
+성공하면 `_grasp`에서 `cup_insert`를 빼고 `receiver_close`만 실행합니다.
+양팔이 움직이기 전에 거절되면 `CUP_CONTACT_REVOKE_SCENE`(접촉 다시 금지) 후 위의 단계별 흐름으로 돌아갑니다
+(로그 `Cup handover falls back to separate steps`). 움직인 뒤 실패하면 그대로 실패합니다.
+`generate_cup_handover_targets.py`는 `cup_insert_joint`를 만들지 않고 `cup_ready`를 속도 0.3으로 출력하므로,
+다시 생성하면 연속 경로 값을 직접 맞춰야 합니다.
 
 두 시퀀스 사이에 MoveIt 컵 모델을 옮깁니다(`CUP_DETACH`: 왼손에서 분리, `CUP_ATTACH`: 오른손에 부착,
 왼손 손가락·손바닥과의 접촉은 허용). 장면 변경 중 취소하면 부착까지 끝낸 뒤 정지합니다.

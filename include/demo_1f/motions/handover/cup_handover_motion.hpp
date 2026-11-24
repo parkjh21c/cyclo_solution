@@ -6,6 +6,8 @@ namespace demo_1f {
 // Held cup moves between hands with taught YAML sequences cup_<giver>_to_<receiver> (transfer),
 // *_grasp (insert and close) and *_release. Receiver contact is allowed only before the grasp;
 // MoveIt's attached cup moves to the receiver before the release. Preview never moves.
+// cup_handover_continuous (left giver): cup_ready + *_continuous insert as one smoothed path;
+// rejected before motion -> contact revoked, then the separate steps above.
 class CupHandoverMotion final : public CupMotion {
 public:
   CupHandoverMotion(const Config & robot,
@@ -40,9 +42,16 @@ private:
   void finish_sequence(const std::string & next);
   bool apply_swap_scene();
   void finish_cancelled();
+  std::vector<Step> continuous_steps(std::string & reason) const;
+  void start_continuous();
+  void finish_continuous();
+  void fall_back(const std::string & why);
+  bool arms_unmoved() const;
   const std::string giver_, receiver_;
   SequenceMotion sequence_;
   std::string running_sequence_;
   bool cancel_requested_{false};
+  bool continuous_tried_{false}, inserted_{false};
+  std::map<std::string, double> start_joints_;
 };
 } // namespace demo_1f

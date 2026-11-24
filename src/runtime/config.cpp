@@ -293,6 +293,10 @@ Config load_config(rclcpp::Node & node) {
       number("path_simplification_tolerance", c.path_simplification_tolerance);
   c.trajectory_sample_period = number("trajectory_sample_period", c.trajectory_sample_period);
   c.continuous_start_tolerance = number("continuous_start_tolerance", c.continuous_start_tolerance);
+  c.cup_handover_continuous = node.declare_parameter<bool>(
+      "cup_handover_continuous", c.cup_handover_continuous, descriptor);
+  c.cup_handover_insert_line_tolerance =
+      number("cup_handover_insert_line_tolerance", c.cup_handover_insert_line_tolerance);
   c.side_pair_step = number("side_pair_step", c.side_pair_step);
   c.collision_check_step = node.declare_parameter<double>(
       "collision_check_step", c.collision_check_step, descriptor);
@@ -347,6 +351,7 @@ Config load_config(rclcpp::Node & node) {
   for (const std::string direction : {"look_right", "look_left", "look_middle",
            "left_to_right", "right_to_left", "initial_pose",
            "cup_left_to_right", "cup_left_to_right_grasp", "cup_left_to_right_release",
+           "cup_left_to_right_continuous",
            "cup_right_to_left", "cup_right_to_left_grasp",
            "cup_right_to_left_release", "right_return", "cup_right_return", "left_return"}) {
     MotionSequence sequence;
