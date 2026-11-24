@@ -489,8 +489,8 @@ handover_demo:
         cup_retreat:
           type: linear
           frame: base_link
-          velocity_scale: 0.06
-          acceleration_scale: 0.015
+          velocity_scale: 0.15  # 2026-11-24: was 0.06/0.015 (4.2 s)
+          acceleration_scale: 0.1
           timeout: 30.0
           arm: giver
           target:
@@ -524,8 +524,8 @@ handover_demo:
           type: linear
           frame: base_link
           arm: receiver
-          velocity_scale: 0.06
-          acceleration_scale: 0.015
+          velocity_scale: 0.1  # 2026-11-24: was 0.06/0.015 (4.3 s); into the held cup, kept gentler
+          acceleration_scale: 0.05
           timeout: 30.0
           target:
           - 0.38
@@ -564,8 +564,8 @@ handover_demo:
           type: linear
           frame: base_link
           arm: giver
-          velocity_scale: 0.08
-          acceleration_scale: 0.02
+          velocity_scale: 0.15  # 2026-11-24: was 0.08/0.02 (4.7 s)
+          acceleration_scale: 0.1
           timeout: 30.0
           target:
           - 0.38

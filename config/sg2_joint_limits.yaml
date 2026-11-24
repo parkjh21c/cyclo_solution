@@ -81,11 +81,11 @@ joint_limits:
     has_velocity_limits: true
     max_velocity: 2.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 4.0  # 2026-11-24: was 2.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -4.0
     has_jerk_limits: true
-    max_jerk: 20.0
+    max_jerk: 40.0  # was 20.0; close 0->0.8 1.5 s -> ~1.1 s
   arm_r_joint1:
     has_velocity_limits: true
     max_velocity: 2.0
@@ -153,8 +153,8 @@ joint_limits:
     has_velocity_limits: true
     max_velocity: 2.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 4.0  # 2026-11-24: was 2.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -4.0
     has_jerk_limits: true
-    max_jerk: 20.0
+    max_jerk: 40.0  # was 20.0; close 0->0.8 1.5 s -> ~1.1 s
