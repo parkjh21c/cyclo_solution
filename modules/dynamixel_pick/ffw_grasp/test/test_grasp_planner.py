@@ -458,6 +458,29 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(kept, list(range(9)))
         self.assertAlmostEqual(merged.u, 100.4)
 
+    def test_angle_from_the_majority_group(self):
+        # long side swapped in 2 of 10 frames (lying, period pi): a plain mean lands diagonal
+        frames = [target(angle=0.1)] * 8 + [target(angle=0.1 + math.pi / 2)] * 2
+        merged, kept = merge_targets(frames, 3.0, 7)
+        self.assertEqual(kept, list(range(8)))
+        self.assertAlmostEqual(merged.angle, 0.1)
+
+    def test_split_angles_fail(self):
+        frames = [target(angle=0.1)] * 5 + [target(angle=0.1 + math.pi / 2)] * 5
+        with self.assertRaisesRegex(ValueError, 'angles disagree'):
+            merge_targets(frames, 3.0, 7)
+        # scene boxes: the largest group even when too few agree
+        merged, kept = merge_targets(frames, 3.0, 7, strict_angle=False)
+        self.assertEqual(len(kept), 5)
+        self.assertAlmostEqual(abs(normalize_angle(merged.angle - 0.1, math.pi / 2)), 0.0)
+
+    def test_angle_group_wraps_the_period(self):
+        # 0.05 and pi - 0.05 are 0.1 rad apart on a rectangle (period pi)
+        frames = [target(angle=0.05)] * 4 + [target(angle=math.pi - 0.05)] * 4
+        merged, kept = merge_targets(frames, 3.0, 7)
+        self.assertEqual(len(kept), 8)
+        self.assertLess(abs(normalize_angle(merged.angle, math.pi)), 1e-9)
+
     def test_minority_pose_dropped(self):
         frames = [target() for _ in range(8)] + [target(pose='standing', period=math.pi / 2)] * 2
         merged, kept = merge_targets(frames, 3.0, 7)

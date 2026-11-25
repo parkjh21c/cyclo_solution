@@ -266,7 +266,16 @@ def circular_mean(angles, period):
     return math.atan2(np.sin(t).mean(), np.cos(t).mean()) * period / (2 * math.pi)
 
 
-def merge_targets(targets, max_jitter, min_count, standing_min_height=0.0):
+def angle_majority(angles, period, agree):
+    """Indices of the largest group of angles within agree (rad, mod period) of one of them."""
+    def gap(x, y):
+        return abs((x - y + period / 2) % period - period / 2)
+    groups = [[j for j, b in enumerate(angles) if gap(a, b) <= agree] for a in angles]
+    return max(groups, key=len)
+
+
+def merge_targets(targets, max_jitter, min_count, standing_min_height=0.0,
+                  angle_agree_deg=20.0, strict_angle=True):
     """Median target over frames. Returns (target, kept indices).
 
     Frames whose center is more than max_jitter px from the median are dropped. The pose is
@@ -274,6 +283,8 @@ def merge_targets(targets, max_jitter, min_count, standing_min_height=0.0):
     median top height decides it once and every frame stays (a tilted object near the
     threshold flips between labels). Frames that disagree on near square (a measured ratio near
     the threshold) are kept: the shorter period says which side is long is unsure.
+    The angle is the mean of the largest group within angle_agree_deg (a mean over sides
+    swapped 90 deg lands diagonal); a group under min_count fails unless strict_angle is off.
     """
     if not targets:
         raise ValueError('no target in any frame')
@@ -295,6 +306,12 @@ def merge_targets(targets, max_jitter, min_count, standing_min_height=0.0):
     period = min(targets[i].angle_period for i in kept)
     if period <= 0:
         raise ValueError('target has no orientation')
+    agree = angle_majority([targets[i].angle for i in kept], period,
+                           math.radians(angle_agree_deg))
+    if strict_angle and len(agree) < min_count:
+        raise ValueError(f'angles disagree: {len(agree)} of {len(kept)} frames within'
+                         f' {angle_agree_deg:g} deg, {min_count} needed')
+    kept = [kept[j] for j in agree]
     group = [targets[i] for i in kept]
 
     def median(name):

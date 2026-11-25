@@ -183,6 +183,7 @@ class GraspPlannerNode(Node):
         self.declare_parameter('min_frames', 7)
         self.declare_parameter('timeout_sec', 5.0)
         self.declare_parameter('max_center_jitter_px', 3.0)
+        self.declare_parameter('angle_agree_deg', 20.0)  # frame angles this close are one group
         self.declare_parameter('object_radius_px', 10.0)  # same object in the next frame
         self.declare_parameter('standing_min_height', 0.0)  # m; pose from median height, 0 = vote
         self.declare_parameter('max_camera_motion', 0.002)  # m between first and last frame
@@ -196,8 +197,9 @@ class GraspPlannerNode(Node):
         if not self.config.depth_topic or not self.config.camera_info_topic:
             raise ValueError('grasp_planner needs depth_topic and camera_info_topic')
         names = ('base_frame', 'end_effector_frame', 'depth_scale', 'frames', 'min_frames',
-                 'timeout_sec', 'max_center_jitter_px', 'object_radius_px', 'standing_min_height',
-                 'max_camera_motion', 'max_camera_turn_deg', 'skip_radius', 'buffered_max_age')
+                 'timeout_sec', 'max_center_jitter_px', 'angle_agree_deg', 'object_radius_px',
+                 'standing_min_height', 'max_camera_motion', 'max_camera_turn_deg', 'skip_radius',
+                 'buffered_max_age')
         for name in names:
             setattr(self, name, self.get_parameter(name).value)
 
@@ -432,7 +434,7 @@ class GraspPlannerNode(Node):
         start = time.perf_counter()
         planes = [frame[0].support_plane for frame in used]
         target, kept = merge_targets(targets, self.max_center_jitter_px, self.min_frames,
-                                     self.standing_min_height)
+                                     self.standing_min_height, self.angle_agree_deg)
         plane = merge_planes([planes[i] for i in kept])
         kept_frames = [used[i] for i in kept]
         first, last = kept_frames[0][0].header, kept_frames[-1][0].header
@@ -557,8 +559,10 @@ class GraspPlannerNode(Node):
                 unboxed['few frames'] += 1
                 continue
             try:
+                # scene box: the largest angle group even when too few agree
                 target, kept = merge_targets(targets, self.max_center_jitter_px,
-                                             self.min_frames, self.standing_min_height)
+                                             self.min_frames, self.standing_min_height,
+                                             self.angle_agree_deg, strict_angle=False)
             except ValueError:
                 unboxed['frames disagree'] += 1
                 continue
