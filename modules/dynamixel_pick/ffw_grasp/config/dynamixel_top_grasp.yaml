@@ -17,9 +17,16 @@
     backup_clearances: [0.008, 0.005]  # narrower openings tried after the normal ones: a low
     # object beside a wall fits only so (2026-11-03, fail_scene01: 5 mm clears MoveIt's walls too)
     finger_tip: 0.005  # at the tip
-    finger_thick: 0.025  # 3 cm above the tip
+    finger_thick: 0.020  # 3 cm above the tip; line covers the measured profile below (was 0.025)
     taper_height: 0.030
-    finger_max: 0.030
+    finger_max: 0.025  # thickest part, measured (was 0.030)
+    # Measured printed finger thickness by height above the tip (user 2026-11-25). Same table as
+    # scripts/generate_sg2_gripper_model.py FINGER_PROFILE (test_gripper_model checks).
+    # ffw_pick wall_gap layers it like the demo URDF.
+    finger_profile_heights: [0.0, 0.010, 0.020, 0.030, 0.040, 0.050]
+    finger_profile_thickness: [0.005, 0.008, 0.015, 0.020, 0.023, 0.025]
+    finger_profile_layer: 0.0025  # URDF LAYER_M
+    finger_profile_top: 0.045  # URDF EXTENSION_M: layers end here, the rest at the profile end
     finger_width: 0.015  # across the closing axis at the tip (user 2026-10-29)
     finger_width_root: 0.025  # ... near the gripper body
     finger_length: 0.100  # tip to the gripper body (user); URDF says 128 mm, nearer is safer

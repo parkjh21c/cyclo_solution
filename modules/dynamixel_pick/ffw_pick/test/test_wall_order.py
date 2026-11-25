@@ -14,6 +14,11 @@ TASK = {'basket_length': 0.32, 'basket_width': 0.24, 'basket_height': 0.035,
         'taper_height': 0.030, 'finger_max': 0.030, 'finger_width': 0.015,
         'finger_width_root': 0.025, 'hover_height': 0.10}
 BASKET = (np.zeros(3), np.eye(3))
+# measured finger profile (2026-11-25) as in dynamixel_top_grasp.yaml
+PROFILED = dict(TASK, finger_length=0.100,
+                finger_profile_heights=[0.0, 0.010, 0.020, 0.030, 0.040, 0.050],
+                finger_profile_thickness=[0.005, 0.008, 0.015, 0.020, 0.023, 0.025],
+                finger_profile_layer=0.0025, finger_profile_top=0.045)
 
 
 def yaw(deg):
@@ -75,8 +80,27 @@ class TestFingerLayers(unittest.TestCase):
             self.assertAlmostEqual(abs(center[1]) - half[1], 0.03)  # inner face at opening / 2
         self.assertAlmostEqual(max(c[2] + h[2] for h, c in layers), 0.128)  # URDF length
 
+    def test_measured_profile_layers_like_the_urdf(self):
+        layers = finger_layers(PROFILED, 0.06)
+        self.assertEqual(len(layers), 2 * 19)  # 18 x 2.5 mm up to 45 mm, then the rest
+        heights = PROFILED['finger_profile_heights']
+        thick = PROFILED['finger_profile_thickness']
+        for half, center in layers:
+            self.assertAlmostEqual(abs(center[1]) - half[1], 0.03)  # inner face at opening / 2
+            low, high = center[2] - half[2], center[2] + half[2]
+            for z in np.linspace(low, high, 5):
+                self.assertGreaterEqual(2 * half[1], np.interp(z, heights, thick) - 1e-12)
+        self.assertAlmostEqual(max(c[2] + h[2] for h, c in layers), 0.128)
+        tip = min(layers, key=lambda layer: layer[1][2])
+        self.assertAlmostEqual(2 * tip[0][1], 0.00575)  # 0-2.5 mm: profile at 2.5 mm
+
 
 class TestWallGap(unittest.TestCase):
+
+    def test_measured_profile_is_closer_to_the_wall_than_the_linear_box(self):
+        near = option(0.12, 0.0)
+        self.assertGreater(wall_gap(near, np.eye(3), 0.0, BASKET, PROFILED),
+                           wall_gap(near, np.eye(3), 0.0, BASKET, TASK))
 
     def test_center_clear_near_wall_overlaps(self):
         self.assertGreater(wall_gap(option(0.0, 0.0), np.eye(3), 0.15, BASKET, TASK), 0.03)

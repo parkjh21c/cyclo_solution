@@ -159,16 +159,33 @@ def box_gaps(a_center, a_rot, a_half, b_centers, b_rot, b_half):
     return (np.abs((np.asarray(b_centers) - a_center) @ axes.T) - reach).max(axis=1)
 
 
+def profile_edges(task, length):
+    """[(low, high, thickness)] as the demo URDF extension: finger_profile_layer steps up to
+    finger_profile_top, then one part to length; each takes the profile at its top."""
+    heights, thick = task['finger_profile_heights'], task['finger_profile_thickness']
+    step, top = task['finger_profile_layer'], task['finger_profile_top']
+    edges = [i * step for i in range(round(top / step) + 1)] + [length]
+    return [(low, high, float(np.interp(high, heights, thick)))
+            for low, high in zip(edges, edges[1:])]
+
+
 def finger_layers(task, opening, length=WALL_FINGER_LENGTH):
     """[(half dims, center)] of the two fingers from the tip to length up in the end effector
-    frame (y closes, z up the fingers): the tip taper, then the rest at its widest."""
+    frame (y closes, z up the fingers): the measured profile when the task has one (as the
+    demo URDF), else the linear tip taper, then the rest at its widest."""
     below = task['tip_below_end_effector']
     tip, thick, taper = task['finger_tip'], task['finger_thick'], task['taper_height']
     width, root = task['finger_width'], task.get('finger_width_root') or task['finger_width']
+    if task.get('finger_profile_heights'):
+        parts = profile_edges(task, length)
+        span = task.get('finger_length') or length  # URDF width taper length
+    else:
+        parts = [(low, high, min(tip + (thick - tip) * high / taper, task['finger_max']))
+                 for low, high in ((0.0, taper), (taper, length))]
+        span = length
     out = []
-    for low, high in ((0.0, taper), (taper, length)):
-        t = min(tip + (thick - tip) * high / taper, task['finger_max'])
-        w = width + (root - width) * min(high / length, 1.0)
+    for low, high, t in parts:
+        w = width + (root - width) * min(high / span, 1.0)
         out += [(np.array([w, t, high - low]) / 2,
                  np.array([0.0, side * (opening / 2 + t / 2), -below + (low + high) / 2]))
                 for side in (1, -1)]
