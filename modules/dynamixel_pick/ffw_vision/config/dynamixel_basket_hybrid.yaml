@@ -17,6 +17,8 @@
     hybrid_match_px: 10.0  # seg mask partner = center this close to the box center
     box_max_length: 0.075  # m; a larger OBB box holds two objects (ambiguous): single boxes up to
     box_max_width: 0.048  # 67 x 44 mm (they run large), two side by side 57+ wide, end to end 93+
+    silhouette_margin: 0.10  # swap long side when the turned box fits the mask better by this IoU
+    silhouette_shift: 0.004  # m; box center search along each axis
     top_inner: 0.6  # top height from depth inside the box shrunk to this size
     box_merge_px: 8.0  # OBB boxes with centers this close are one object (best score kept)
     report_face_size: true  # size out = known face for the top height (face_long/mid/short);

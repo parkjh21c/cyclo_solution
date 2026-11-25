@@ -12,7 +12,8 @@ VALID_COLOR = (0, 255, 0)
 AMBIGUOUS_COLOR = (0, 165, 255)
 POSE_TEXT = {'lying': 'L', 'standing': 'S', 'unknown': '?'}
 # hybrid direction: s = seg kept, o = seg peak near the OBB box, b = box angle (no seg partner)
-ANGLE_SOURCE_TEXT = {'hybrid:seg': 's', 'hybrid:obb-peak': 'o', 'hybrid:obb': 'b'}
+ANGLE_SOURCE_TEXT = {'hybrid:seg': 's', 'hybrid:obb-peak': 'o', 'hybrid:obb': 'b',
+                     'hybrid:seg+sil': 's*', 'hybrid:obb-peak+sil': 'o*'}  # * = silhouette swap
 FONT = cv2.FONT_HERSHEY_PLAIN
 
 

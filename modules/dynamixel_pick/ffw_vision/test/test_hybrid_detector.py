@@ -1,14 +1,16 @@
+from dataclasses import replace
 import math
 import unittest
 
 import cv2
 from ffw_vision.blob_detector import normalize_angle
-from ffw_vision.hybrid_detector import detect_hybrid, HybridParams, OBB, OBB_PEAK, SEG
+from ffw_vision.hybrid_detector import box_dims, detect_hybrid, HybridParams, OBB, OBB_PEAK, SEG
 from ffw_vision.seg_detector import project
 import numpy as np
 from test_seg_detector import D405, grow, K, Scene
 
 PARAMS = HybridParams()
+FACES = HybridParams(face_long=0.0465, face_mid=0.034, face_short=0.0285, report_face_size=True)
 
 
 def turned_axis(scene, turn_deg):
@@ -142,6 +144,66 @@ class TestDetectHybrid(unittest.TestCase):
         self.assertEqual((obj.u, obj.v, obj.angle, obj.length_m, obj.width_m, obj.angle_source),
                          (plain.u, plain.v, plain.angle, plain.length_m, plain.width_m,
                           plain.angle_source))
+
+
+
+def lifted_scene(slope_deg):
+    """46.5 x 28.5 top 34 mm high, one end lifted along the long side by slope_deg."""
+    s = Scene(tilt_deg=30, box=(0.01, 0.0, 0.0465, 0.0285, 37, 0.034), d=D405)
+    grade, z = math.tan(math.radians(slope_deg)), s.depth.copy()
+    for _ in range(3):  # depth on the sloped top along each ray
+        h = 0.034 + grade * ((s.rays * z[:, :, None] - s.center) @ s.axis)
+        z[s.box_mask] = ((h - s.plane_d) / (s.rays @ s.n)).astype(np.float32)[s.box_mask]
+    s.depth = z
+    s.color = cv2.GaussianBlur(s.color, (3, 3), 0)
+    return s
+
+
+class TestSilhouetteLongSide(unittest.TestCase):
+
+    def run_scene(self, scene, margin):
+        debug = []
+        (obj,), _ = detect_hybrid(scene.color, scene.depth, K, scene.d,
+                                  [(grow(scene.box_mask, 1), 0.9)], [(box_corners(scene), 0.9)],
+                                  replace(FACES, silhouette_margin=margin), debug=debug)
+        long_error = abs(normalize_angle(obj.angle - image_angle(scene), math.pi))
+        return obj, long_error, debug[0]['silhouette_iou']
+
+    def test_lifted_end_swaps_back_to_the_long_side(self):
+        # 18 deg: top points within top_tolerance are a strip across the lifted end
+        scene = lifted_scene(18)
+        obj, long_error, sil = self.run_scene(scene, 0.0)
+        self.assertGreater(long_error, math.radians(60))  # the strip's long side is the short one
+        self.assertIsNone(sil)  # margin 0 = off
+        obj, long_error, sil = self.run_scene(scene, 0.10)
+        self.assertEqual(obj.angle_source, SEG + '+sil')
+        self.assertLess(long_error, math.radians(3))
+        self.assertGreater(sil[1] - sil[0], 0.10)
+
+    def test_duplicate_fragment_does_not_hide_the_object(self):
+        # a second mask on the lifted end merges to a fragment; the silhouette uses the raw masks
+        scene = lifted_scene(18)
+        full = grow(scene.box_mask, 1)
+        ys, xs = np.nonzero(full)
+        fragment = full.copy()
+        fragment[:, :int(np.percentile(xs, 60))] = False
+        (obj,), _ = detect_hybrid(scene.color, scene.depth, K, scene.d,
+                                  [(full, 0.9), (fragment, 0.8)], [(box_corners(scene), 0.9)],
+                                  replace(FACES, silhouette_margin=0.10))
+        long_error = abs(normalize_angle(obj.angle - image_angle(scene), math.pi))
+        self.assertLess(long_error, math.radians(3))
+
+    def test_flat_box_keeps_its_long_side(self):
+        obj, long_error, sil = self.run_scene(lifted_scene(0), 0.10)
+        self.assertEqual(obj.angle_source, SEG)
+        self.assertLess(long_error, math.radians(3))
+        self.assertLess(sil[1], sil[0])
+
+    def test_box_dims_lying_only(self):
+        self.assertEqual(box_dims(0.034, FACES), (0.0465, 0.0285, 0.034))
+        self.assertEqual(box_dims(0.029, FACES), (0.0465, 0.034, 0.0285))
+        self.assertIsNone(box_dims(0.046, FACES))  # standing: near-square top
+        self.assertIsNone(box_dims(0.034, PARAMS))  # no known face
 
 
 if __name__ == '__main__':

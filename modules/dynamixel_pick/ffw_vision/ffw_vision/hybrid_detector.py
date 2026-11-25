@@ -2,8 +2,10 @@ from dataclasses import dataclass
 import math
 import time
 
+import cv2
 from ffw_vision.obb_detector import detect_obb, face_object, ObbParams, windowed_peak
-from ffw_vision.seg_detector import add_time, detect_seg, plane_axes, support_scene
+from ffw_vision.seg_detector import (
+    add_time, detect_seg, known_face, plane_axes, project, support_scene)
 import numpy as np
 
 # angle sources: seg direction kept / seg vote peak near the box / box angle (no seg partner)
@@ -18,6 +20,8 @@ class HybridParams(ObbParams):
     # 44 mm (they run large), two side by side are 57+ mm wide, end to end 93+ mm long
     box_max_length: float = 0.075
     box_max_width: float = 0.048
+    silhouette_margin: float = 0.0  # IoU gap for the known box silhouette to swap long; 0 = off
+    silhouette_shift: float = 0.004  # m; box center searched this far along each axis
 
 
 def plane_deg(axis, a, b):
@@ -27,6 +31,45 @@ def plane_deg(axis, a, b):
 
 def diff90(x, y):
     return abs((x - y + 45) % 90 - 45)
+
+
+def box_dims(top_level, params):
+    """(long, short, height) of the lying known box for the top height; None if standing."""
+    face = known_face(top_level, params)
+    if face is None or top_level >= params.standing_min_height:
+        return None
+    sides = [params.face_long, params.face_mid, params.face_short]
+    for side in face:
+        sides.remove(side)
+    return face[0], face[1], sides[0]
+
+
+def silhouette_iou(center, axis, n, dims, k, d, mask, ignore, shift):
+    """Best IoU of the box's image silhouette with mask over a cross of center shifts.
+
+    center: top face center (camera frame), axis: long side on the plane, dims: box_dims.
+    ignore: pixels left out of the IoU (other objects' masks: they may hide this one).
+    """
+    ys, xs = np.nonzero(mask)
+    pad = 30
+    x0, y0 = max(xs.min() - pad, 0), max(ys.min() - pad, 0)
+    x1, y1 = min(xs.max() + pad + 1, mask.shape[1]), min(ys.max() + pad + 1, mask.shape[0])
+    own, keep = mask[y0:y1, x0:x1], ~ignore[y0:y1, x0:x1]
+    long_m, short_m, height = dims
+    across = np.cross(n, axis)
+    best = 0.0
+    for da, db in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+        c = center + shift * (da * axis + db * across)
+        top = [c + sa * long_m / 2 * axis + sb * short_m / 2 * across
+               for sa, sb in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
+        px = project(top + [p - height * n for p in top], k, d).reshape(-1, 2) - (x0, y0)
+        sil = np.zeros(own.shape, np.uint8)
+        cv2.fillConvexPoly(sil, cv2.convexHull(np.round(px).astype(np.int32)), 1)
+        sil = sil.astype(bool)
+        union = ((sil | own) & keep).sum()
+        if union:
+            best = max(best, float((sil & own & keep).sum()) / union)
+    return float(best)
 
 
 def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, debug=None,
@@ -39,6 +82,8 @@ def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, de
     is kept, else the box's long side. A box without a seg partner keeps its own angle and size.
     Ambiguity (two objects as one) is judged on the box size only (box_max_length/width): the
     boxes count the objects, and a seg mask can swell with a wall shadow next to the object.
+    With silhouette_margin > 0, a lying object with a seg partner gets its long side from the
+    known box's silhouette: swapped when the turned box fits the mask better by the margin.
 
     segments: [(bool mask, score)], boxes: [(4x2 corners, score)] in source pixels.
     Returns (objects, plane or None) like detect_seg; debug gets one dict per object.
@@ -85,6 +130,26 @@ def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, de
         else:  # turn the box's long axis onto the final direction (the long side stays long)
             turn = math.radians((final - box_deg + 45) % 90 - 45)
             axis = math.cos(turn) * info['axis'] + math.sin(turn) * np.cross(n, info['axis'])
+        sil = None
+        dims = box_dims(info['top_level'], params) if partner is not None else None
+        if params.silhouette_margin > 0 and dims is not None:
+            # raw masks: merged duplicates are their intersection, often a fragment
+            core = partner[2]['mask']
+            own, others = np.zeros_like(core), np.zeros_like(core)
+            for mask, score in segments:
+                if score < params.conf:
+                    continue
+                if (mask & core).sum() >= params.dup_overlap * min(mask.sum(), core.sum()):
+                    own |= mask
+                else:
+                    others |= mask
+            others &= ~own
+            across = np.cross(n, axis)
+            sil = tuple(silhouette_iou(info['center'], ax, n, dims, k, d, own, others,
+                                       params.silhouette_shift) for ax in (axis, across))
+            if sil[1] - sil[0] >= params.silhouette_margin:
+                axis, length_m, width_m = across, width_m, length_m
+                source += '+sil'
         # the face is ambiguous exactly when the box is too large (limits set accordingly)
         limits = (0.0, 0.0) if box_large else (math.inf, math.inf)
         objects.append(face_object(info['center'], axis, length_m, width_m, info['top_level'],
@@ -94,7 +159,7 @@ def detect_hybrid(color_bgr, depth, k, d, segments, boxes, params, rays=None, de
             region = info['region'] if partner is None else partner[2]['region']
             debug.append(dict(votes, mask=info['mask'], region=region | info['region'],
                               top_level=info['top_level'], rect_deg=box_deg, box_deg=box_deg,
-                              final_deg=final, source=source))
+                              final_deg=final, source=source, silhouette_iou=sil))
     add_time(timings, 'match', start)
     return objects, (n, plane_d)
 
