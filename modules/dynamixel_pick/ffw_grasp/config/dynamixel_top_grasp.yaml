@@ -55,9 +55,9 @@
     tilt_step_deg: 10.0  # a blocked tilt is retried this much smaller, down to vertical
     lean_x: -1.0  # base direction the gripper top leans to: toward the robot
     lean_y: 0.0
-    grasp_depth: 0.015
+    grasp_depth: 0.010  # +5 mm with floor_clearance (user 2026-11-25, was 0.015)
     floor_height: 0.005  # basket floor above the table the plane is fitted to
-    floor_clearance: 0.008  # lowest finger corner above the floor after closing
+    floor_clearance: 0.013  # lowest finger corner above the floor after closing (was 0.008, +5 mm)
     close_drop: 0.009  # URDF linkage: tips go ~6 mm further closing 60 -> 25 mm, more to 22 mm
     square_ratio: 1.25  # measured long / short below this: which side is long is unsure
     long_side_poses: lying  # an eroded lying top can look square: open for 46.5 mm
