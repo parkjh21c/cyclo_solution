@@ -8,7 +8,7 @@
     target_label: dynamixel
     depth_scale: 0.001
     detector: yolo_seg
-    model_file: dynamixel_seg_n640.pt  # in ffw_vision/models: YOLO11n-seg, 640, cup-dump data (2026-11-03)
+    model_file: dynamixel_seg_n640.pt  # YOLO11n-seg 640, retrained 2026-11-25
     imgsz: 640  # same as training of model_file
     conf: 0.5  # true detections scored 0.58 or more on val
     dup_overlap: 0.5  # masks sharing this share of the smaller one are one object

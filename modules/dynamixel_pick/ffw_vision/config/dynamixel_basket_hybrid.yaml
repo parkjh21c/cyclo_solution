@@ -9,9 +9,9 @@
     target_label: dynamixel
     depth_scale: 0.001
     detector: yolo_hybrid
-    model_file: dynamixel_seg_n640.pt  # in ffw_vision/models: YOLO11n-seg, 640, cup-dump data (2026-11-03)
+    model_file: dynamixel_seg_n640.pt  # YOLO11n-seg 640, retrained 2026-11-25
     imgsz: 640  # same as training of model_file
-    obb_model_file: dynamixel_obb_n640.pt  # ffw_vision/models: YOLO11n-obb 640, top faces (2026-11-05)
+    obb_model_file: dynamixel_obb_n640.pt  # YOLO11n-obb 640 top faces, retrained 2026-11-25
     obb_imgsz: 640  # same as training of obb_model_file
     hybrid_window_deg: 25.0  # seg direction kept within this of the box; else seg peak near it
     hybrid_match_px: 10.0  # seg mask partner = center this close to the box center
