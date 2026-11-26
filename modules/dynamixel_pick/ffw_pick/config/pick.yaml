@@ -2,7 +2,8 @@
 /**:
   ros__parameters:
     ns: /ffw_grasp/right_wrist  # ffw_grasp grasp_planner namespace (plan service, poses)
-    above: 0.10  # m: the joint path ends this far behind the hover along the finger axis
+    above: 0.02  # m: the joint path ends this far behind the hover along the finger axis
+    # (was 0.10; 2026-11-26 robot test: a 12 cm line with hover 0.10 bends the joints less)
     lift: 0.15  # m straight up after closing
     speed: 0.25  # velocity scaling 0-1
     accel: 0.2  # acceleration scaling 0-1
