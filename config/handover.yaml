@@ -193,8 +193,8 @@ handover_demo:
           joint_line: true # Straight joint path; OMPL once if its smoothed path collides.
           joint_line_replan: true
           blend_with_next: true
-          velocity_scale: 0.4
-          acceleration_scale: 0.4
+          velocity_scale: 0.56
+          acceleration_scale: 0.56
           left_target:
           - 0.13507745
           - 0.91394382
@@ -216,8 +216,8 @@ handover_demo:
           type: dual_joint_gripper
           joint_line: true # Straight joint path; OMPL once if its smoothed path collides.
           joint_line_replan: true
-          velocity_scale: 0.4
-          acceleration_scale: 0.4
+          velocity_scale: 0.56
+          acceleration_scale: 0.56
           arm: receiver
           left_target:
           - -0.00923237
@@ -264,8 +264,8 @@ handover_demo:
           joint_line: true # Straight joint path; OMPL once if its smoothed path collides.
           joint_line_replan: true
           timeout: 45.0
-          velocity_scale: 0.4
-          acceleration_scale: 0.4
+          velocity_scale: 0.56
+          acceleration_scale: 0.56
           left_target:
           - 0.04107157
           - 0.79646953
@@ -293,8 +293,8 @@ handover_demo:
           fallback_pipeline: ompl
           fallback_planner: RRTConnectkConfigDefault
           fallback_attempts: 3
-          velocity_scale: 0.35
-          acceleration_scale: 0.35
+          velocity_scale: 0.49
+          acceleration_scale: 0.49
           tolerance: 0.05
           timeout: 45.0
           # retreat + (.95,.5,.5,.95,.5,.5,.5) of the way home: no joint reverses, ~60 mm from demo_table
@@ -313,8 +313,8 @@ handover_demo:
           fallback_pipeline: ompl
           fallback_planner: RRTConnectkConfigDefault
           fallback_attempts: 3
-          velocity_scale: 0.35
-          acceleration_scale: 0.35
+          velocity_scale: 0.49
+          acceleration_scale: 0.49
           tolerance: 0.01
           timeout: 45.0
           target:
@@ -393,8 +393,8 @@ handover_demo:
         cup_ready:
           type: dual_joint
           joint_line: true
-          velocity_scale: 0.4
-          acceleration_scale: 0.4
+          velocity_scale: 0.56
+          acceleration_scale: 0.56
           tolerance: 0.017453292519943295
           planning_tolerance: 0.0005
           timeout: 60.0
@@ -423,8 +423,8 @@ handover_demo:
           type: dual_joint
           joint_line: true
           hold_arm: left
-          velocity_scale: 0.2
-          acceleration_scale: 0.2
+          velocity_scale: 0.28
+          acceleration_scale: 0.28
           tolerance: 0.017453292519943295
           planning_tolerance: 0.0005
           timeout: 30.0
@@ -452,8 +452,8 @@ handover_demo:
           type: linear
           frame: base_link
           arm: receiver
-          velocity_scale: 0.08
-          acceleration_scale: 0.02
+          velocity_scale: 0.11
+          acceleration_scale: 0.03
           timeout: 30.0
           target:
           - 0.38
@@ -489,8 +489,8 @@ handover_demo:
         cup_retreat:
           type: linear
           frame: base_link
-          velocity_scale: 0.15  # 2026-11-24: was 0.06/0.015 (4.2 s)
-          acceleration_scale: 0.1
+          velocity_scale: 0.21  # 2026-11-26: x1.4 (was 0.15/0.1; 2026-11-24 0.06/0.015, 4.2 s)
+          acceleration_scale: 0.14
           timeout: 30.0
           arm: giver
           target:
@@ -524,8 +524,8 @@ handover_demo:
           type: linear
           frame: base_link
           arm: receiver
-          velocity_scale: 0.1  # 2026-11-24: was 0.06/0.015 (4.3 s); into the held cup, kept gentler
-          acceleration_scale: 0.05
+          velocity_scale: 0.14  # 2026-11-26: x1.4 (was 0.1/0.05); into the held cup, kept gentler
+          acceleration_scale: 0.07
           timeout: 30.0
           target:
           - 0.38
@@ -564,8 +564,8 @@ handover_demo:
           type: linear
           frame: base_link
           arm: giver
-          velocity_scale: 0.15  # 2026-11-24: was 0.08/0.02 (4.7 s)
-          acceleration_scale: 0.1
+          velocity_scale: 0.21  # 2026-11-26: x1.4 (was 0.15/0.1; 2026-11-24 0.08/0.02, 4.7 s)
+          acceleration_scale: 0.14
           timeout: 30.0
           target:
           - 0.38
@@ -578,8 +578,8 @@ handover_demo:
         giver_via:
           type: joint
           arm: giver
-          velocity_scale: 0.3
-          acceleration_scale: 0.3
+          velocity_scale: 0.42
+          acceleration_scale: 0.42
           tolerance: 0.05
           timeout: 60.0
           target:
@@ -593,8 +593,8 @@ handover_demo:
         giver_home:
           type: joint
           arm: giver
-          velocity_scale: 0.3
-          acceleration_scale: 0.3
+          velocity_scale: 0.42
+          acceleration_scale: 0.42
           tolerance: 0.01
           timeout: 60.0
           target:
