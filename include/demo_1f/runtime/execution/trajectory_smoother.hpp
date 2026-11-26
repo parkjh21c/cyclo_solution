@@ -38,11 +38,18 @@ struct PathCollisionError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// Where validate_smooth_path spends its time (diagnostic only).
+struct ValidationStats {
+  size_t samples{0}, checks{0};
+  double check_seconds{0};
+};
+
 // Validate the controller's quintic interpolation, not just the supplied knots.
 void validate_smooth_path(const SmoothPath & path,
     const std::vector<Step> & steps,
     const Config & config,
-    planning_scene::PlanningScene & scene);
+    planning_scene::PlanningScene & scene,
+    ValidationStats * stats = nullptr);
 
 using JointRows = std::vector<std::vector<double>>;
 

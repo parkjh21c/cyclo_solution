@@ -2,6 +2,7 @@
 #include "demo_1f/runtime/execution/paired_path.hpp"
 #include "demo_1f/runtime/execution/trajectory_executor.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <moveit/robot_state/conversions.hpp>
@@ -380,6 +381,11 @@ void TrajectoryExecutor::prepare_path(
   op->preparation_started = Clock::now();
   op->preparation = std::async(std::launch::async,
       [model, scene_template, config, segments, steps, scene_message, snapshot, gripper]() {
+        using Steady = std::chrono::steady_clock;
+        const auto since = [](Steady::time_point t) {
+          return std::chrono::duration<double>(Steady::now() - t).count();
+        };
+        const auto started = Steady::now();
         // Reuse immutable collision geometry; each child gets a fresh complete scene.
         auto scene = scene_template->diff();
         if (!scene->setPlanningSceneMsg(scene_message)) {
@@ -399,8 +405,18 @@ void TrajectoryExecutor::prepare_path(
           }
           state.update();
         }
+        const double scene_s = since(started);
+        const auto smoothing = Steady::now();
         auto path = smooth_segments(segments, steps, config, model);
-        validate_smooth_path(path, steps, config, *scene);
+        const double smooth_s = since(smoothing);
+        const auto validating = Steady::now();
+        ValidationStats stats;
+        validate_smooth_path(path, steps, config, *scene, &stats);
+        RCLCPP_INFO(rclcpp::get_logger("handover_demo"),
+            "Prepare timing %s: scene %.3f s, smooth %.3f s, validate %.3f s (%zu samples,"
+            " %zu collision checks %.3f s)",
+            steps.back().name.c_str(), scene_s, smooth_s, since(validating), stats.samples,
+            stats.checks, stats.check_seconds);
         return path;
       });
 }

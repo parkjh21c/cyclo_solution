@@ -1,5 +1,6 @@
 #include "demo_1f/runtime/execution/trajectory_smoother.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -399,7 +400,8 @@ SmoothPath smooth_segments(const std::vector<moveit_msgs::msg::RobotTrajectory> 
 void validate_smooth_path(const SmoothPath & path,
     const std::vector<Step> & steps,
     const Config & config,
-    planning_scene::PlanningScene & scene) {
+    planning_scene::PlanningScene & scene,
+    ValidationStats * stats) {
   const auto & trajectory = path.trajectory.joint_trajectory;
   auto state = scene.getCurrentState();
   // Limits and held joints are checked at every sample; collisions once any joint moved
@@ -462,12 +464,16 @@ void validate_smooth_path(const SmoothPath & path,
       }
     }
     const size_t samples = std::max<size_t>(5, std::ceil(dt / 0.002));
+    std::vector<MotionLimits> bounds; // Same for every sample of this interval.
+    for (const auto & name : trajectory.joint_names) {
+      bounds.push_back(
+          effective_limits(config, name, steps[path.point_steps[i]], scene.getRobotModel()));
+    }
     for (size_t sample = 0; sample <= samples; ++sample) {
       const double u = double(sample) / samples;
       for (size_t joint = 0; joint < trajectory.joint_names.size(); ++joint) {
         const auto & name = trajectory.joint_names[joint];
-        const auto bound =
-            effective_limits(config, name, steps[path.point_steps[i]], scene.getRobotModel());
+        const auto & bound = bounds[joint];
         const auto value = quintic(first, last, joint, u);
         if (!std::isfinite(value.position) || !std::isfinite(value.velocity) ||
             !std::isfinite(value.acceleration) || !std::isfinite(value.jerk) ||
@@ -484,17 +490,19 @@ void validate_smooth_path(const SmoothPath & path,
         state.setVariablePosition(name, value.position);
         sampled[joint] = value.position;
       }
-      state.update();
-      if (!state.satisfiesBounds(1e-8)) {
+      if (stats) ++stats->samples;
+      if (!state.satisfiesBounds(1e-8)) { // Joint values only: no link transforms needed.
         throw std::runtime_error("Smoothed path exceeds joint bounds");
-      }
-      if (auto & line = lines[path.point_steps[i]]) {
-        measure_tcp_line(*line, state.getGlobalLinkTransform(line->link).translation());
       }
       bool check = config.collision_check_step <= 0 || checked.empty() ||
                    (i + 1 == trajectory.points.size() && sample == samples);
       for (size_t joint = 0; !check && joint < sampled.size(); ++joint) {
         check = std::abs(sampled[joint] - checked[joint]) >= config.collision_check_step;
+      }
+      auto & line = lines[path.point_steps[i]];
+      if (check || line) state.update(); // Link transforms only where they are read.
+      if (line) {
+        measure_tcp_line(*line, state.getGlobalLinkTransform(line->link).translation());
       }
       if (check) {
         checked = sampled;
@@ -504,10 +512,16 @@ void validate_smooth_path(const SmoothPath & path,
         request.max_contacts = 10;
         collision_detection::CollisionResult collision;
         const auto & acm = strict.at(path.point_steps.at(i));
+        const auto check_started = std::chrono::steady_clock::now();
         if (acm) {
           scene.checkCollision(request, collision, state, *acm);
         } else {
           scene.checkCollision(request, collision, state);
+        }
+        if (stats) {
+          ++stats->checks;
+          stats->check_seconds += std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - check_started).count();
         }
         if (collision.collision) {
           std::string pairs;
