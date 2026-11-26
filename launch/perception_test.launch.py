@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -106,6 +106,7 @@ def nodes(context):
             output="screen",
             parameters=[{"use_sim_time": parameters["use_sim_time"]}],
         ),
+    ] + ([
         Node(
             package="demo_1f",
             executable="perception_node",
@@ -115,6 +116,7 @@ def nodes(context):
             # Test detections cannot feed the motion subscription unless explicitly selected.
             remappings=[("/perception/cup", prefix + "/cup")],
         ),
+    ] if arg("head_perception").lower() == "true" else []) + [
         Node(
             package="demo_1f",
             executable="perception_viewer.py",
@@ -153,8 +155,10 @@ def generate_launch_description():
         "host": "127.0.0.1",
         "port": "",
         "use_sim_time": "false",
+        "head_perception": "true",  # head YOLO cup node; only used when cup_source: head
     }
     return LaunchDescription(
         [DeclareLaunchArgument(name, default_value=value) for name, value in defaults.items()]
-        + [OpaqueFunction(function=nodes)]
+        # OpenBLAS threads on busy cores: wrist_cup_init 150% -> 42% CPU at idle; same results
+        + [SetEnvironmentVariable("OPENBLAS_NUM_THREADS", "1"), OpaqueFunction(function=nodes)]
     )

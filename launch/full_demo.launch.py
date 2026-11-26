@@ -26,6 +26,8 @@ def generate_launch_description():
         DeclareLaunchArgument('start_cup_perception', default_value='true'),
         DeclareLaunchArgument('start_dynamixel_pick', default_value='true'),
         DeclareLaunchArgument('cup_topic', default_value='/perception_test_head/cup'),
+        # Head cup node is unused while approach.yaml cup_source is wrist_left_init.
+        DeclareLaunchArgument('start_head_perception', default_value='false'),
         DeclareLaunchArgument('viewer_host', default_value='0.0.0.0'),
         include('handover.launch.py', {
             'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -33,7 +35,8 @@ def generate_launch_description():
             'cup_topic': LaunchConfiguration('cup_topic')}),
         include('perception_test.launch.py', {
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'host': LaunchConfiguration('viewer_host')},
+            'host': LaunchConfiguration('viewer_host'),
+            'head_perception': LaunchConfiguration('start_head_perception')},
             IfCondition(LaunchConfiguration('start_cup_perception'))),
         include('dynamixel_pick.launch.py', {'pick_python': LaunchConfiguration('pick_python')}, condition=IfCondition(LaunchConfiguration('start_dynamixel_pick'))),
     ])
