@@ -1728,7 +1728,14 @@ def _main(argv, hooks, resources):
             # Observation-pose motion is complete; retrying perception here is safe.
             hooks.motion_started = False
             spin(0.5)
-        spin(1.0)  # old latched messages arrive first; only the new plan counts
+        # old latched messages arrive first; only the new plan counts. Each topic holds one,
+        # so once all arrived none can follow (1 s cap: first request, never published)
+        latched_keys = (('grasp', poses), ('hover', poses), ('basket', poses),
+                        ('opening', got), ('candidates', got), ('info', got))
+        waited = time.monotonic()
+        spin(1.0, lambda: all(k in d for k, d in latched_keys))
+        print(f'old plan messages: {sum(k in d for k, d in latched_keys)}/{len(latched_keys)}'
+              f' in {time.monotonic() - waited:.2f} s')
 
         def clear_skips():
             if not args.no_plan and clear_client.wait_for_service(timeout_sec=2.0):
