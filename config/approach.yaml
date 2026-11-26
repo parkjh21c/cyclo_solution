@@ -42,7 +42,7 @@ handover_demo:
       refine_correction_speed: 0.20
       refine_correction_acceleration: 0.12
       refine_lower_distance: 0.03
-      refine_gripper_open: 0.0
+      refine_gripper_open: 0.3 # 2026-11-26: half open (69 mm) drops the cell; was 0.0
       gripper_scale: 1.0
       refine_clearance: 0.05
       refine_wait: 3.0

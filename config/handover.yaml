@@ -26,8 +26,8 @@ handover_demo:
     gripper_stop_mode: position_window
     require_passive_gripper_stationary: false
     gripper_stop_window: 0.5
-    gripper_completion_window: 0.25
-    gripper_settle_time: 0.1
+    gripper_completion_window: 0.15  # 2026-11-26: was 0.25
+    gripper_settle_time: 0.05  # 2026-11-26: was 0.1
     gripper_stop_position_tolerance: 0.004
     gripper_stop_max_gap: 0.1
     gripper_goal_tolerance: 0.004
@@ -254,7 +254,7 @@ handover_demo:
           type: gripper
           arm: giver
           target:
-          - 0.0
+          - 0.3  # 2026-11-26: half open (69 mm) releases the cell; was 0.0
           duration: 0.6
           velocity_scale: 1.0
           acceleration_scale: 1.0
