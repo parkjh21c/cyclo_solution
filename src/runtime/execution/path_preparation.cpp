@@ -43,8 +43,8 @@ bool TrajectoryExecutor::start_sequence(const std::vector<Step> & steps) {
   MotionSequence sequence;
   sequence.steps = steps;
   std::string reason = validate_motion_sequence(sequence, config_);
-  // One arm's PTP/LIN chain; a TCP corridor is built from the measured start, so not here.
-  const bool one_arm = steps.size() > 1 &&
+  // One arm's PTP/LIN chain (one step too: the cup lift); no TCP corridor here.
+  const bool one_arm = !steps.empty() &&
       std::all_of(steps.begin(), steps.end(), [&](const Step & step) {
         return (step.type == "pose" || step.type == "linear") &&
                step.arm == steps.front().arm && step.tcp_path_margin <= 0;

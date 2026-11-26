@@ -16,6 +16,7 @@ PickCupMotion::PickCupMotion(const Config & robot,
 void PickCupMotion::reset() {
   start_joints_.clear();
   direct_failure_.clear();
+  lift_line_ = false;
 }
 
 void PickCupMotion::record_pick() {
@@ -321,9 +322,35 @@ void PickCupMotion::lift() {
     return;
   }
   grasp_tcp_ = tcp->pose;
-  auto target = tcp->pose;
-  target.position.z += pick_.lift_height;
-  linear("PICK_LIFT", target);
+  lift_target_ = tcp->pose;
+  lift_target_.position.z += pick_.lift_height;
+  // PTP endpoint (IK at the end only) run as a checked straight joint line; LIN if rejected.
+  auto step = pose_step("PICK_LIFT", lift_target_);
+  step.velocity_scale = pick_.lift_speed;
+  step.acceleration_scale = pick_.lift_acceleration;
+  step.endpoints_only = true;
+  step.tcp_line_tolerance = pick_.insert_line_tolerance;
+  phase("PICK_LIFT");
+  approach_target_.header.frame_id = robot_.planning_frame;
+  approach_target_.pose = lift_target_;
+  std::string reason;
+  if (!capture_arm_joints()) return;
+  if (!context_.ready(reason) || !executor_.ready(MotionSequence{"", "", "", {step}, ""}, reason) ||
+      !executor_.start_sequence({step})) {
+    lift_by_line("; joint-line lift not started: " +
+        (reason.empty() ? executor_.result().detail : reason));
+    return;
+  }
+  lift_line_ = true;
+  moving_ = true;
+}
+
+void PickCupMotion::lift_by_line(const std::string & why) {
+  lift_line_ = false;
+  RCLCPP_WARN(rclcpp::get_logger("handover_demo.cup"), "Lift falls back to Pilz LIN%s",
+      why.c_str());
+  direct_failure_ += why;
+  linear("PICK_LIFT", lift_target_);
 }
 
 void PickCupMotion::finish_approach() {
@@ -449,6 +476,12 @@ void PickCupMotion::tick() {
       if (phase_ == "PICK_PREGRASP" && r.state == ExecutionState::Failed && arm_unmoved()) {
         direct_failure_ += "; direct PTP failed first: " + r.detail;
         clear_above();
+        return;
+      }
+      // Joint-line lift rejected before motion: the old Pilz LIN.
+      if (phase_ == "PICK_LIFT" && lift_line_ && r.state == ExecutionState::Failed &&
+          arm_unmoved()) {
+        lift_by_line("; joint-line lift failed first: " + r.detail);
         return;
       }
       fail(r.code, phase_ + ": " + r.detail + direct_failure_);

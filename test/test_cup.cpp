@@ -1839,7 +1839,13 @@ TEST_F(ApproachFixture, PickInsertsClosesAttachesAndLifts) {
   EXPECT_TRUE(executor.steps[3].gripper_wait_only);
   EXPECT_EQ(executor.steps[3].target, std::vector<double>{pc.close_target});
   EXPECT_EQ(executor.steps[4].name, "PICK_LIFT");
-  EXPECT_EQ(executor.steps[4].type, "linear");
+  EXPECT_EQ(executor.steps[4].type, "pose"); // PTP endpoint: no LIN samples to violate limits.
+  EXPECT_TRUE(executor.steps[4].endpoints_only); // Executed as a checked straight joint line.
+  EXPECT_DOUBLE_EQ(executor.steps[4].tcp_line_tolerance, pc.insert_line_tolerance);
+  EXPECT_DOUBLE_EQ(executor.steps[4].velocity_scale, pc.lift_speed);
+  EXPECT_DOUBLE_EQ(executor.steps[4].acceleration_scale, pc.lift_acceleration);
+  ASSERT_EQ(executor.continuous.size(), 1u);
+  EXPECT_EQ(executor.continuous[0].size(), 1u);
   // Pads end insert_depth past the cup axis along the measured heading, at grasp height.
   const auto & insert = executor.steps[2].target;
   geometry_msgs::msg::Quaternion q;
@@ -2088,7 +2094,8 @@ TEST_F(ApproachFixture, PickContinuousRunsPregraspAndInsertAsOnePath) {
     pick.tick();
   }
   ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
-  ASSERT_EQ(executor.continuous.size(), 1u);
+  ASSERT_EQ(executor.continuous.size(), 2u); // The bundle, then the joint-line lift.
+  EXPECT_EQ(executor.continuous[1].front().name, "PICK_LIFT");
   const auto & bundle = executor.continuous[0];
   ASSERT_EQ(bundle.size(), 2u);
   EXPECT_EQ(bundle[0].name, "PICK_PREGRASP");
@@ -2189,7 +2196,8 @@ TEST_F(ApproachFixture, PickContinuousOnlyFromTheInitialPose) {
     pick.tick();
   }
   ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
-  EXPECT_TRUE(executor.continuous.empty());
+  ASSERT_EQ(executor.continuous.size(), 1u); // Only the lift.
+  EXPECT_EQ(executor.continuous[0].front().name, "PICK_LIFT");
   ASSERT_EQ(executor.steps.size(), 5u);
   EXPECT_EQ(executor.steps[1].name, "PICK_PREGRASP");
   EXPECT_EQ(executor.steps[2].name, "PICK_INSERT");
@@ -2216,6 +2224,67 @@ TEST_F(ApproachFixture, PickContinuousFallsBackWhenTheExecutorRefusesTheBundle) 
   ASSERT_EQ(executor.steps.size(), 5u);
   EXPECT_EQ(executor.steps[1].name, "PICK_PREGRASP");
   EXPECT_EQ(executor.steps[2].name, "PICK_INSERT");
+  EXPECT_EQ(executor.steps[4].name, "PICK_LIFT");
+  EXPECT_EQ(executor.steps[4].type, "linear"); // Refused joint-line lift: Pilz LIN.
+}
+
+TEST_F(ApproachFixture, PickLiftFallsBackToLinWhenRejectedBeforeMotion) {
+  tcp_for_refinement("left");
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  bool rejected = false;
+  for (int i = 0; i < 80 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (!rejected && executor.steps.size() == 5 && executor.continuous.size() == 1 &&
+        executor.current.state == ExecutionState::Running) {
+      executor.current = {ExecutionState::Failed, "PATH_PREPARATION_FAILED",
+          "PICK_LIFT: smoothed TCP leaves the straight line by up to 9.0 mm"};
+      rejected = true;
+    } else {
+      complete();
+    }
+    pick.tick();
+  }
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(pick.result().sequence_completed) << pick.result().detail;
+  ASSERT_EQ(executor.steps.size(), 6u);
+  EXPECT_EQ(executor.steps[4].type, "pose");
+  EXPECT_EQ(executor.steps[5].name, "PICK_LIFT");
+  EXPECT_EQ(executor.steps[5].type, "linear");
+  EXPECT_EQ(executor.steps[5].target, executor.steps[4].target); // Same lift end.
+  EXPECT_DOUBLE_EQ(executor.steps[5].acceleration_scale, pc.insert_acceleration); // Old LIN.
+}
+
+TEST_F(ApproachFixture, PickLiftDoesNotFallBackAfterArmMoved) {
+  tcp_for_refinement("left");
+  PickCupConfig pc;
+  PickCupMotion pick(robot, config, pc, *context, executor, scene);
+  std::string reason;
+  ASSERT_TRUE(pick.start("left", "cup", reason, true));
+  for (int i = 0; i < 80 && pick.running(); ++i) {
+    feedback(0);
+    observe("head");
+    if (executor.steps.size() == 5 && executor.continuous.size() == 1 &&
+        executor.current.state == ExecutionState::Running) {
+      sensor_msgs::msg::JointState moved;
+      moved.header.stamp = node->now();
+      moved.name = {"left_joint", "left_grip", "right_joint", "right_grip"};
+      moved.position = {.1, 0, 0, 0};
+      moved.velocity = {0, 0, 0, 0};
+      context->observe_joints(moved);
+      executor.current = {ExecutionState::Failed, "EXECUTION_FAILED", "controller aborted"};
+      pick.tick();
+      break;
+    }
+    complete();
+    pick.tick();
+  }
+  EXPECT_EQ(pick.result().state, "FAILED");
+  EXPECT_EQ(pick.result().code, "EXECUTION_FAILED");
+  EXPECT_EQ(executor.steps.size(), 5u);
 }
 
 TEST_F(ApproachFixture, PickContinuousFailureAfterMotionNeverClosesGripper) {
@@ -2279,6 +2348,16 @@ TEST(PickGeometry, InsertKeepsMeasuredOrientationAndGraspHeight) {
   c.close_target = .8;
   c.insert_depth = .05;
   EXPECT_FALSE(c.validate(.165).empty());
+  c.insert_depth = .02;
+  ASSERT_TRUE(c.validate(.165).empty());
+  for (double scale : {0., .6, std::numeric_limits<double>::quiet_NaN()}) {
+    c.lift_acceleration = scale;
+    EXPECT_FALSE(c.validate(.165).empty()) << scale;
+    c.lift_acceleration = .4;
+    c.lift_speed = scale;
+    EXPECT_FALSE(c.validate(.165).empty()) << scale;
+    c.lift_speed = .3;
+  }
 }
 
 namespace {

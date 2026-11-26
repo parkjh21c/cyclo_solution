@@ -17,6 +17,8 @@ std::string PickCupConfig::validate(double height) const {
   if (!std::isfinite(insert_speed) || insert_speed <= 0 || insert_speed > .2 ||
       !std::isfinite(insert_acceleration) || insert_acceleration <= 0 || insert_acceleration > .2 ||
       !std::isfinite(lift_height) || lift_height < .02 || lift_height > .15 ||
+      !std::isfinite(lift_speed) || lift_speed <= 0 || lift_speed > .5 ||
+      !std::isfinite(lift_acceleration) || lift_acceleration <= 0 || lift_acceleration > .5 ||
       !std::isfinite(close_target) || close_target <= 0 || close_target > 1.1 ||
       !std::isfinite(close_duration) || close_duration <= 0 || close_duration > 3 ||
       !std::isfinite(insert_depth) || insert_depth < 0 || insert_depth > .04 ||
@@ -50,6 +52,8 @@ PickCupConfig load_pick_config(rclcpp::Node & node) {
   number("insert_speed", c.insert_speed);
   number("insert_acceleration", c.insert_acceleration);
   number("lift_height", c.lift_height);
+  number("lift_speed", c.lift_speed);
+  number("lift_acceleration", c.lift_acceleration);
   number("insert_depth", c.insert_depth);
   number("clear_height", c.clear_height);
   number("approach_yaw_deg", c.approach_yaw_deg);

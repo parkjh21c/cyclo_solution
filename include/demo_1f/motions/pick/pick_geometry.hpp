@@ -9,6 +9,7 @@ struct PickCupConfig {
   double tcp_forward_offset{-.03};
   double insert_speed{.06}, lift_height{.08};
   double insert_acceleration{.015}; // Pilz LIN acceleration scale for insert, lower and lift.
+  double lift_speed{.3}, lift_acceleration{.4}; // Joint-line lift scales (LIN fallback: insert).
   double insert_depth{.02}; // Extra insert past pads-on-axis; moves the cup toward the palm.
   double clear_height{.05}; // Fallback waypoint height above the rim, over the pregrasp.
   // Fixed hand heading (robot +X = 0, left +) and downward tilt; jaws stay horizontal.

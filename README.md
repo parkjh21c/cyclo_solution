@@ -689,7 +689,11 @@ About 2.7 cm the palm (`rh_p12_rn_base`) touches the 5 cm cup model (checked 202
 `PICK_CLOSE` commands `close_target` with `gripper_wait_only` (grasp not verified).
 `PICK_ATTACH` moves `demo_place_cup` from the world to the TCP link (fingers and palm as
 touch links) and allows cup/`demo_pick_table` contact. `PICK_LIFT` raises the TCP by
-`lift_height` (Pilz LIN, same orientation) and the action finishes holding the cup.
+`lift_height` (4 cm, same orientation): a Pilz PTP endpoint run as a straight joint line whose
+TCP must stay within `insert_line_tolerance` of the vertical line (`lift_speed`/`lift_acceleration`
+0.3/0.4). Rejected before motion, it
+falls back to Pilz LIN (2026-11-26: LIN once failed on a joint acceleration limit). The action
+finishes holding the cup.
 While the cup stays attached, a new `/pick_cup` or `/approach_cup` scene fails with
 `OBJECT_ALREADY_HELD`. The initial pose stage detaches and deletes it before opening the grippers.
 Set `pick.stop_at_pregrasp: true` to stop before contact as before.

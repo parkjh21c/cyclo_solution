@@ -50,6 +50,7 @@ private:
   bool attach_cup();
   void prepare_insert();
   void lift();
+  void lift_by_line(const std::string & why); // LIN lift after the joint line was rejected.
   void clear_above();
   bool capture_arm_joints();
   bool arm_unmoved() const;
@@ -58,9 +59,11 @@ private:
   const PickCupConfig & pick_;
   void finish_approach();
   geometry_msgs::msg::Pose pregrasp_, body_, insert_;
-  std::map<std::string, double> start_joints_; // Arm joints before the direct PTP.
+  std::map<std::string, double> start_joints_; // Arm joints before a move with a fallback.
   std::string direct_failure_;                  // Kept for the fallback failure message.
   geometry_msgs::msg::Pose grasp_tcp_;          // Measured TCP when the lift starts.
+  geometry_msgs::msg::Pose lift_target_;        // Lift end; the LIN fallback reuses it.
+  bool lift_line_{false};                       // Lift running as a checked joint line.
   std::optional<PickRecord> last_pick_;
   void record_pick();
 };

@@ -7,7 +7,7 @@ handover_demo:
       stand_off: 0.12
       speed: 0.2 # Pilz PTP to pregrasp and fallback clear waypoint.
       tcp_forward_offset: -0.03 # Initial URDF-based pad center behind TCP; tune on hardware.
-      insert_speed: 0.1 # Pilz LIN insert and lift velocity scale.
+      insert_speed: 0.1 # Insert and lift velocity scale.
       insert_acceleration: 0.05 # Pilz LIN acceleration scale; was insert_speed * 0.25 = 0.025.
       insert_depth: 0.025 # Past pads-on-cup-axis toward the palm; ~0.027 touches the 5 cm cup model.
       clear_height: 0.05 # Fallback when direct PTP is blocked: above rim, then LIN down.
@@ -15,7 +15,9 @@ handover_demo:
       approach_pitch_deg: 15.0 # Fingers tilted down
       close_target: 0.8 # Fingers stop on the cup before this; grasp is not sensor-verified.
       close_duration: 1.0
-      lift_height: 0.08
+      lift_height: 0.04 # Was 0.08; the lift is a checked joint line (LIN only as fallback).
+      lift_speed: 0.3 # Joint-line lift scales; 0.1/0.05 took 4.3 s for 4 cm (2026-11-26).
+      lift_acceleration: 0.4 # The LIN fallback keeps insert_speed/insert_acceleration.
       place_clearance: 0.005 # /place_cup releases this far above the recorded grasp height.
       stop_at_pregrasp: false # true: old behavior, stop before contact.
       # From the initial pose only: initial -> pregrasp -> insert as one joint path, no stop.
