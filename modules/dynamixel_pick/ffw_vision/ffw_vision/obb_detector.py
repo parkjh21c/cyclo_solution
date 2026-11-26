@@ -150,7 +150,7 @@ def yolo_obb_detector(model_path, imgsz):
     """Callable color -> [(4x2 corners, score)] backed by an ultralytics OBB model."""
     from ultralytics import YOLO  # optional dependency, only for detector:=yolo_obb
 
-    model = YOLO(model_path)
+    model = YOLO(model_path, task='obb')  # an .engine name does not tell the task
 
     def detect(color_bgr, conf):
         result = model.predict(color_bgr, conf=conf, imgsz=imgsz, verbose=False)[0]

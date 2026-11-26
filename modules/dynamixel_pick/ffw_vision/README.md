@@ -316,3 +316,9 @@ source /workspace/vision_ws/install/setup.bash
 - 컨테이너 안에서 `cb`(`/root/ros2_ws` 전체 빌드)는 쓰지 않는다. 이 패키지들이 underlay 에 섞인다.
 
 데모 통합 기본값은 `dynamixel_basket_hybrid.yaml`이며 `dynamixel_obb_n640.pt`도 함께 사용합니다.
+
+TensorRT: 데모 컨테이너에서 `tools/build_engines.sh`를 한 번 실행하면 설치된 `.pt` 옆에 FP16 `.engine`과
+`.engine.sha256`이 생기고, `object_detector`는 해시가 그 `.pt`와 맞을 때만 엔진을 씁니다(아니면 `.pt`, 시작 로그에 이유).
+엔진은 Jetson·TensorRT 버전 전용이라 git에 넣지 않습니다. `.pt`를 다시 학습하면 엔진도 다시 만듭니다.
+2026-11-26 평가 사진 20장(`tools/compare_engine.py`): 검출 개수 동일, 중심 최대 0.33 px, OBB 각도 최대 0.40°,
+마스크 IoU 최소 0.963, 모델당 약 31 → 14 ms.

@@ -1,12 +1,15 @@
 from dataclasses import replace
 import math
+import os
+import tempfile
 import time
 import unittest
 
 import cv2
 from ffw_vision.blob_detector import normalize_angle
 from ffw_vision.seg_detector import (
-    add_time, detect_seg, fit_plane, project, resolve_model, SegParams)
+    add_time, detect_seg, file_sha256, fit_plane, prefer_engine, project, resolve_model,
+    SegParams)
 import numpy as np
 
 WIDTH, HEIGHT = 424, 240
@@ -289,6 +292,26 @@ class TestResolveModel(unittest.TestCase):
         self.assertEqual(resolve_model('', '/w/a.pt', '/share/models'), '/w/a.pt')
         with self.assertRaises(ValueError):
             resolve_model('', '', '/share/models')
+
+
+class TestPreferEngine(unittest.TestCase):
+
+    def test_engine_only_when_built_from_this_pt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pt, engine = os.path.join(folder, 'm.pt'), os.path.join(folder, 'm.engine')
+            with open(pt, 'wb') as f:
+                f.write(b'weights')
+            self.assertEqual(prefer_engine(pt), (pt, 'no engine'))
+            with open(engine, 'wb') as f:
+                f.write(b'engine')
+            self.assertEqual(prefer_engine(pt)[0], pt)  # no .sha256
+            with open(engine + '.sha256', 'w') as f:
+                f.write(file_sha256(pt) + '\n')
+            self.assertEqual(prefer_engine(pt), (engine, ''))
+            with open(pt, 'wb') as f:
+                f.write(b'retrained')
+            self.assertEqual(prefer_engine(pt)[0], pt)
+            self.assertEqual(prefer_engine(engine), (engine, ''))  # given directly
 
 
 class TestAddTime(unittest.TestCase):

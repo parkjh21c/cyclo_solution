@@ -6,5 +6,6 @@ __pycache__/
 docker/.env
 ai_worker/
 models/*.engine
+modules/dynamixel_pick/ffw_vision/models/*.engine*
 *.before-*
 .ruff_cache/

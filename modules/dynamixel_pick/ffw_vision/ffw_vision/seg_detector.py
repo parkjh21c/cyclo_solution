@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import hashlib
 import math
 import os
 import time
@@ -383,11 +384,37 @@ def resolve_model(model_path, model_file, models_dir):
     return model_file if os.path.isabs(model_file) else os.path.join(models_dir, model_file)
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def prefer_engine(model):
+    """(weights to load, why the .pt stays or ''): MODEL.engine beside MODEL.pt when its
+    MODEL.engine.sha256 names this .pt (tools/build_engines.sh), else the .pt itself."""
+    if not model.endswith('.pt'):
+        return model, ''
+    engine = model[:-3] + '.engine'
+    if not os.path.isfile(engine):
+        return model, 'no engine'
+    try:
+        with open(engine + '.sha256') as f:
+            built_from = f.read().split()[0]
+    except (OSError, IndexError):
+        return model, 'engine has no .sha256'
+    if built_from != file_sha256(model):
+        return model, 'engine built from another .pt (rebuild it)'
+    return engine, ''
+
+
 def yolo_segmenter(model_path, imgsz):
     """Callable color -> [(bool mask, score)] backed by an ultralytics seg model."""
     from ultralytics import YOLO  # optional dependency, only for detector:=yolo_seg
 
-    model = YOLO(model_path)
+    model = YOLO(model_path, task='segment')  # an .engine name does not tell the task
 
     def segment(color_bgr, conf):
         result = model.predict(color_bgr, conf=conf, imgsz=imgsz, retina_masks=True,

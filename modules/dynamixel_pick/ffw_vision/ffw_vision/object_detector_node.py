@@ -12,7 +12,7 @@ from ffw_vision.obb_detector import yolo_obb_detector
 from ffw_vision.observation import make_object_array
 from ffw_vision.overlay import ANGLE_SOURCE_TEXT, draw_blobs, draw_seg_objects
 from ffw_vision.seg_detector import (
-    add_time, detect_seg, pixel_rays, resolve_model, SegParams, yolo_segmenter)
+    add_time, detect_seg, pixel_rays, prefer_engine, resolve_model, SegParams, yolo_segmenter)
 from ffw_vision_msgs.msg import ObjectObservationArray
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -172,7 +172,9 @@ class ObjectDetectorNode(Node):
         model = resolve_model(path, file, models_dir)
         if not os.path.isfile(model):
             raise ValueError(f'YOLO {kind} weights not found: {model}')
-        self.get_logger().info(f'YOLO {kind} weights {model}, imgsz {imgsz}')
+        model, why = prefer_engine(model)  # TensorRT build of the same .pt when present
+        self.get_logger().info(f'YOLO {kind} weights {model}, imgsz {imgsz}'
+                               + (f' (TensorRT not used: {why})' if why else ''))
         self.model_name = model
         return loader(model, imgsz)
 
