@@ -6,6 +6,7 @@
 namespace demo_1f {
 struct PickCupConfig {
   double grasp_height{.065}, stand_off{.12}, speed{.12};
+  double acceleration{.4}; // Pilz PTP acceleration scale for the pregrasp and clear moves.
   double tcp_forward_offset{-.03};
   double insert_speed{.06}, lift_height{.08};
   double insert_acceleration{.015}; // Pilz LIN acceleration scale for insert, lower and lift.

@@ -2350,7 +2350,13 @@ TEST(PickGeometry, InsertKeepsMeasuredOrientationAndGraspHeight) {
   EXPECT_FALSE(c.validate(.165).empty());
   c.insert_depth = .02;
   ASSERT_TRUE(c.validate(.165).empty());
-  for (double scale : {0., .6, std::numeric_limits<double>::quiet_NaN()}) {
+  c.speed = .45;
+  EXPECT_FALSE(c.validate(.165).empty());
+  c.speed = .2;
+  c.acceleration = .9;
+  EXPECT_FALSE(c.validate(.165).empty());
+  c.acceleration = .4;
+  for (double scale : {0., .7, std::numeric_limits<double>::quiet_NaN()}) {
     c.lift_acceleration = scale;
     EXPECT_FALSE(c.validate(.165).empty()) << scale;
     c.lift_acceleration = .4;

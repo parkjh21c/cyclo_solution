@@ -11,14 +11,15 @@ std::string PickCupConfig::validate(double height) const {
     }
   }
   if (grasp_height < .05 || grasp_height > height - .04 || stand_off < .10 || stand_off > .20 ||
-      speed > .2 || !std::isfinite(tcp_forward_offset) || std::abs(tcp_forward_offset) > .03) {
+      speed > .4 || !std::isfinite(acceleration) || acceleration <= 0 || acceleration > .8 ||
+      !std::isfinite(tcp_forward_offset) || std::abs(tcp_forward_offset) > .03) {
     return "Invalid cup pregrasp geometry or speed";
   }
   if (!std::isfinite(insert_speed) || insert_speed <= 0 || insert_speed > .2 ||
       !std::isfinite(insert_acceleration) || insert_acceleration <= 0 || insert_acceleration > .2 ||
       !std::isfinite(lift_height) || lift_height < .02 || lift_height > .15 ||
       !std::isfinite(lift_speed) || lift_speed <= 0 || lift_speed > .5 ||
-      !std::isfinite(lift_acceleration) || lift_acceleration <= 0 || lift_acceleration > .5 ||
+      !std::isfinite(lift_acceleration) || lift_acceleration <= 0 || lift_acceleration > .6 ||
       !std::isfinite(close_target) || close_target <= 0 || close_target > 1.1 ||
       !std::isfinite(close_duration) || close_duration <= 0 || close_duration > 3 ||
       !std::isfinite(insert_depth) || insert_depth < 0 || insert_depth > .04 ||
@@ -48,6 +49,7 @@ PickCupConfig load_pick_config(rclcpp::Node & node) {
   number("grasp_height", c.grasp_height);
   number("stand_off", c.stand_off);
   number("speed", c.speed);
+  number("acceleration", c.acceleration);
   number("tcp_forward_offset", c.tcp_forward_offset);
   number("insert_speed", c.insert_speed);
   number("insert_acceleration", c.insert_acceleration);

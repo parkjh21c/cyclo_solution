@@ -40,7 +40,7 @@ Step PickCupMotion::pose_step(
   s.arm = arm_;
   s.frame = robot_.planning_frame;
   s.velocity_scale = pick_.speed;
-  s.acceleration_scale = .4;
+  s.acceleration_scale = pick_.acceleration;
   s.timeout = 45;
   const auto & p = pose.position;
   const auto & q = pose.orientation;
