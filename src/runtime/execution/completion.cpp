@@ -165,9 +165,12 @@ bool TrajectoryExecutor::settled(const std::shared_ptr<Operation> & op, bool che
   if (!op->stable_since) {
     op->stable_since = Clock::now();
   }
+  // Stop confirmation (no target check) always keeps the full settle_time.
   const double settle_time =
       check_target && op->step.type == "gripper" && config_.gripper_settle_time > 0
           ? config_.gripper_settle_time
+      : check_target && op->step.type != "gripper" && config_.arm_settle_time > 0
+          ? config_.arm_settle_time
           : config_.settle_time;
   const bool complete = elapsed(*op->stable_since) >= settle_time;
   op->completion_wait_reason = complete ? "" : "Waiting for settle_time";

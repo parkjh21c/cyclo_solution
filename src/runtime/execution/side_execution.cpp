@@ -307,7 +307,9 @@ bool TrajectoryExecutor::settled_side(const std::shared_ptr<SideOperation> & sid
     }
   }
   if (!side->stable_since) side->stable_since = Clock::now();
-  return elapsed(*side->stable_since) >= config_.settle_time;
+  const double settle = check_target && config_.arm_settle_time > 0 ? config_.arm_settle_time
+                                                                    : config_.settle_time;
+  return elapsed(*side->stable_since) >= settle;
 }
 
 void TrajectoryExecutor::cancel_side(const std::string & code, const std::string & reason) {

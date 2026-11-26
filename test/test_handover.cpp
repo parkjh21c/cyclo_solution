@@ -46,6 +46,23 @@ TEST(PlanningConfig, CandidateCountIsBoundedAndReadOnly) {
   }
 }
 
+TEST(PlanningConfig, ArmSettleTimeInheritsAndStaysWithinSettleTime) {
+  auto defaults = std::make_shared<rclcpp::Node>("arm_settle_default");
+  EXPECT_DOUBLE_EQ(load_config(*defaults).arm_settle_time, 0.0);
+  EXPECT_TRUE(defaults->describe_parameter("arm_settle_time").read_only);
+  for (double value : {-.01, .1, .25, .3}) {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(
+        {rclcpp::Parameter("settle_time", .25), rclcpp::Parameter("arm_settle_time", value)});
+    auto node = std::make_shared<rclcpp::Node>("arm_settle_override", options);
+    if (value < 0 || value > .25) {
+      EXPECT_THROW(load_config(*node), std::invalid_argument);
+    } else {
+      EXPECT_DOUBLE_EQ(load_config(*node).arm_settle_time, value);
+    }
+  }
+}
+
 TEST(PlanningConfig, ExplicitHeldArmCorridorIsLoadedAndReadOnly) {
   rclcpp::NodeOptions options;
   const std::string prefix = "motion_sequences.cup_left_to_right.";

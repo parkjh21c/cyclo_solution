@@ -286,6 +286,12 @@ Config load_config(rclcpp::Node & node) {
       c.gripper_settle_time > c.settle_time) {
     throw std::invalid_argument("Invalid gripper normal completion timing");
   }
+  c.arm_settle_time =
+      node.declare_parameter<double>("arm_settle_time", c.arm_settle_time, descriptor);
+  if (!std::isfinite(c.arm_settle_time) || c.arm_settle_time < 0 ||
+      c.arm_settle_time > c.settle_time) {
+    throw std::invalid_argument("arm_settle_time must be in [0, settle_time]");
+  }
   c.require_tcp_tf = node.declare_parameter<bool>("require_tcp_tf", true, descriptor);
   c.tf_spin_thread = node.declare_parameter<bool>("tf_spin_thread", c.tf_spin_thread, descriptor);
   c.smooth_motion = node.declare_parameter<bool>("smooth_motion", c.smooth_motion, descriptor);

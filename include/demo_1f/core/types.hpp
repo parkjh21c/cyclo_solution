@@ -143,6 +143,7 @@ struct Config {
   double gripper_completion_window{
       0};                        // Zero inherits stop window; cancellation always uses stop window.
   double gripper_settle_time{0}; // Zero inherits general settle time.
+  double arm_settle_time{0}; // Normal arm completion only; zero inherits settle_time.
   double gripper_stop_position_tolerance{0.004};
   double gripper_goal_tolerance{0.004};
   double gripper_stop_max_gap{0.1};

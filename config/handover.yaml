@@ -19,7 +19,8 @@ handover_demo:
     tf_max_age: 1.0
     require_tcp_tf: true
     tf_spin_thread: true  # true: /tf on tf2_ros's own thread, not behind the spin_some loop
-    settle_time: 0.25
+    settle_time: 0.25  # stop/cancel confirmation, gripper goal time tolerance, wheels
+    arm_settle_time: 0.1  # normal arm step completion (2026-11-26: was settle_time 0.25)
     stopped_velocity: 0.03
     round_trip_wheel_velocity: 0.05  # pour round trip wheels only; 0 inherits stopped_velocity
     cancel_timeout: 5.0
@@ -254,7 +255,7 @@ handover_demo:
           type: gripper
           arm: giver
           target:
-          - 0.3  # 2026-11-26: half open (69 mm) releases the cell; was 0.0
+          - 0.0  # full open: menu 7 inserts the right hand around the cup without reopening it
           duration: 0.6
           velocity_scale: 1.0
           acceleration_scale: 1.0

@@ -605,7 +605,8 @@ ros2 action send_goal /refine_cup demo_1f/action/ApproachCup \
 `RIM_UNCERTAIN`은 컵 후보는 있지만 입구를 확정할 근거가 부족하다는 뜻입니다.
 표면 중심으로 대신 이동하지 않으며, 제한된 pitch 조정 후에도 확정되지 않으면 정지합니다.
 
-정상 그리퍼 단계는 `gripper_completion_window: 0.25`와 `gripper_settle_time: 0.1`을 사용합니다.
+정상 그리퍼 단계는 `gripper_completion_window: 0.15`와 `gripper_settle_time: 0.05`를 사용합니다.
+정상 팔 단계(다른 팔 동시 동작 포함)는 `arm_settle_time: 0.1` 동안 멈춰 있으면 완료입니다.
 취소·정지 확인은 `gripper_stop_window: 0.5`와 `settle_time: 0.25`를 유지합니다.
 그리퍼 명령 시간은 0.6초이며 관절 제한에 따른 궤적 시간 재계산으로 더 길어질 수 있습니다.
 
