@@ -16,145 +16,145 @@ joint_limits:
     max_acceleration: 0.1
   arm_l_joint1:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint2:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint3:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint4:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint5:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint6:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_l_joint7:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   gripper_l_joint1:
     has_velocity_limits: true
     max_velocity: 2.0
     has_acceleration_limits: true
-    max_acceleration: 4.0  # 2026-11-24: was 2.0
+    max_acceleration: 8.0  # 2026-11-26: was 4.0 (2026-11-24: 2.0)
     has_deceleration_limits: true
-    max_deceleration: -4.0
+    max_deceleration: -8.0
     has_jerk_limits: true
-    max_jerk: 40.0  # was 20.0; close 0->0.8 1.5 s -> ~1.1 s
+    max_jerk: 80.0  # 2026-11-26: was 40.0 (~1.1 s for 0.8 rad, now ~0.86 s); 20.0 took 1.5 s
   arm_r_joint1:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint2:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint3:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint4:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint5:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint6:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   arm_r_joint7:
     has_velocity_limits: true
-    max_velocity: 2.0
+    max_velocity: 3.0
     has_acceleration_limits: true
-    max_acceleration: 2.0
+    max_acceleration: 3.0
     has_deceleration_limits: true
-    max_deceleration: -2.0
+    max_deceleration: -3.0
     has_jerk_limits: true
-    max_jerk: 4.0
+    max_jerk: 6.0
   gripper_r_joint1:
     has_velocity_limits: true
     max_velocity: 2.0
     has_acceleration_limits: true
-    max_acceleration: 4.0  # 2026-11-24: was 2.0
+    max_acceleration: 8.0  # 2026-11-26: was 4.0 (2026-11-24: 2.0)
     has_deceleration_limits: true
-    max_deceleration: -4.0
+    max_deceleration: -8.0
     has_jerk_limits: true
-    max_jerk: 40.0  # was 20.0; close 0->0.8 1.5 s -> ~1.1 s
+    max_jerk: 80.0  # 2026-11-26: was 40.0 (~1.1 s for 0.8 rad, now ~0.86 s); 20.0 took 1.5 s
