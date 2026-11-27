@@ -535,7 +535,7 @@ handover_demo:
           timeout: 30.0
           target:
           - 0.38
-          - -0.053978
+          - -0.058978  # 2026-11-27: was -0.053978; 5 mm deeper (menu 7 right grip pulls the cup toward -y)
           - 0.939235  # 2026-11-27: was 0.947235, left hold 8 mm lower
           - -0.430459
           - -0.430459

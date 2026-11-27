@@ -132,6 +132,27 @@ void check_tcp_line(const Step & step, const TcpLine & line) {
         millimeters(step.tcp_drop_tolerance) + " mm)");
   }
 }
+
+// First variable outside its URDF bounds, as "name=value [min, max]".
+std::string out_of_bounds(const moveit::core::RobotState & state, double margin) {
+  for (const auto * joint : state.getRobotModel()->getActiveJointModels()) {
+    if (state.satisfiesBounds(joint, margin)) continue;
+    const auto & bounds = joint->getVariableBounds();
+    const double * values = state.getJointPositions(joint);
+    for (size_t i = 0; i < bounds.size(); ++i) {
+      const auto & b = bounds[i];
+      if (b.position_bounded_ &&
+          (values[i] < b.min_position_ - margin || values[i] > b.max_position_ + margin)) {
+        char text[96];
+        std::snprintf(text, sizeof(text), "=%.6f [%.6f, %.6f]", values[i], b.min_position_,
+            b.max_position_);
+        return joint->getVariableNames()[i] + text;
+      }
+    }
+    return joint->getName();
+  }
+  return "unknown joint";
+}
 } // namespace
 
 std::map<std::string, double> held_arm_targets(const Step & step, const Config & config) {
@@ -492,7 +513,7 @@ void validate_smooth_path(const SmoothPath & path,
       }
       if (stats) ++stats->samples;
       if (!state.satisfiesBounds(1e-8)) { // Joint values only: no link transforms needed.
-        throw std::runtime_error("Smoothed path exceeds joint bounds");
+        throw std::runtime_error("Smoothed path exceeds joint bounds: " + out_of_bounds(state, 1e-8));
       }
       bool check = config.collision_check_step <= 0 || checked.empty() ||
                    (i + 1 == trajectory.points.size() && sample == samples);

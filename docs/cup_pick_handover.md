@@ -140,6 +140,23 @@ TCP로 목표를 계산합니다(`pour_geometry.cpp`, 설정은 `config/demo.yam
 | 오른손 대기 | 잡는 위치 20 cm 뒤 | 12 cm는 경로가 컵·왼손과 충돌, 25 cm는 관절 7이 한계값, 30 cm 이상은 IK 없음 |
 | 컵 | 높이 0.134, 바깥 반지름 0.045(안 0.040, 곧은 컵, 2026-11-27) | `approach.yaml`, `pick.yaml` |
 
+### 컵을 바꾸면 다시 맞출 값
+
+아래 값은 2026-11-27 컵(134 mm, 바깥 Ø90, 안 Ø80) 기준입니다. 컵 높이·지름이 바뀌면 함께 다시 정합니다.
+
+| 값 | 위치 | 컵과의 관계 |
+|---|---|---|
+| `cup_height`, `inner_radius`, `wall_thickness`, `scene_radius` | `approach.yaml` | 인식 판정(±3 mm)과 MoveIt 컵 모델. 바깥 반지름 = 안 + 벽 |
+| `inner_radius` 기본값, `cup_height` 기본값 | `launch/perception_test.launch.py`, `scripts/wrist_cup_init.py` | 손목 인식 노드. `cup_height`는 런치에서 넘기지 않음 |
+| `offset_z` | `approach.yaml` | 메뉴 4 손 높이 = 입구 + 높이/2 + `offset_z` (지금 입구 위 약 32 mm) |
+| `grasp_height`, `insert_depth` | `pick.yaml` | 메뉴 6 잡는 높이(0.075가 테이블 한계)와 깊이. 깊이를 늘리면 메뉴 7에서 오른손이 더 깊이 들어가 손가락끼리 부딪힘 |
+| 메뉴 7 `left_target`·`right_target`, `cup_insert`·`cup_retreat` z | `handover.yaml` | 두 손이 컵을 잡는 높이(지금 왼손 75 mm, 오른손 약 124 mm). `scripts/shift_cup_receiver_height.py`로 다시 계산 |
+| 메뉴 9 왼손 `cup_insert` y | `handover.yaml` | 메뉴 7 오른손이 컵을 −y로 끄는 만큼 깊게(지금 5 mm) |
+| `lip_radius`, `grasp_height`, `clearance`, `axis_behind_tcp` | `demo.yaml` `pour` | 붓기 입구 위치와 바구니 벽 위 컵 높이(지금 바닥이 벽 위 약 32 mm) |
+| `REAL_RADIUS`, `CUP_HEIGHT` | `scripts/generate_cup_pour_targets.py`, `scripts/cup_layout_check.py` | 점검·생성 도구 |
+
+그리퍼를 끝까지 열어도 손가락 끝 간격은 92 mm(`gripper_table.yaml`)입니다. 잡는 높이의 컵 지름이 이보다 충분히 작아야 메뉴 6·7 삽입 때 스치지 않습니다(Ø90은 한쪽 약 1 mm).
+
 ## 사용한 IK
 
 **목표 관절값을 만드는 데는 MoveIt의 `/compute_ik`(KDL)를 썼습니다.**
