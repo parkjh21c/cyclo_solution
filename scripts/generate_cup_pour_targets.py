@@ -25,7 +25,7 @@ from moveit_msgs.srv import GetPositionIK, GetStateValidity
 
 CUP_ID = "demo_place_cup"
 TCP = "gripper_r_tcp"
-REAL_RADIUS = 0.043  # Measured cup; the collision model is wider.
+REAL_RADIUS = 0.045  # Outer rim radius of the 134 mm straight cup.
 DIRECTIONS = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}
 # SG2 right arm URDF limits (modules/dynamixel_pick/ffw_pick/test/arm_r.urdf).
 RIGHT_LIMITS = [(-3.14, 3.14), (-3.14, 0.0), (-3.14, 3.14), (-2.9361, 1.0786),

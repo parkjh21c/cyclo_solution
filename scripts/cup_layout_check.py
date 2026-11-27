@@ -16,7 +16,7 @@ from moveit_msgs.msg import PlanningSceneComponents
 from moveit_msgs.srv import GetPlanningScene, GetPositionFK, GetPositionIK, GetStateValidity
 from rclpy.node import Node
 
-CUP_HEIGHT = 0.165
+CUP_HEIGHT = 0.134
 PAD_OFFSET = 0.03  # Pad center behind the TCP along hand forward.
 
 

@@ -1,9 +1,10 @@
 handover_demo:
   ros__parameters:
     pick:
-      # Above inferred cup bottom; assumes upright 16.5cm cup. +10 mm table clearance, +4 mm for
-      # the continuous insert dip (insert_drop_tolerance), so it never goes below the old LIN.
-      grasp_height: 0.079
+      # Above inferred cup bottom; assumes upright 13.4 cm cup (design grasp Z 75 mm).
+      # 2026-11-27: 0.079 -> 0.075 (old LIN height) so the menu 7 hands clear; the continuous
+      # insert dip can now reach ~0.069 (0.065 hit the table).
+      grasp_height: 0.075
       stand_off: 0.12
       speed: 0.35 # Pilz PTP to pregrasp and fallback clear waypoint (2026-11-26: 0.2 -> 0.28 -> 0.35).
       acceleration: 0.7 # Same PTP moves (was fixed 0.4 in code, then 0.56).

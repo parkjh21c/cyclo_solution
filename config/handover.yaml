@@ -388,6 +388,11 @@ handover_demo:
         # One joint line for both arms, no right via (2026-11-23, basket lowered since the via was added).
         # Previous: cup_ready_via (right via [1.57, 0, 0, -2.8, 0, 0, 0], blended) + cup_ready (hold_arm: left).
         # 2026-11-24: right ready 80 mm behind the insert pose (was 200 mm), speed 0.3 -> 0.4.
+        # 2026-11-27: right 12 mm lower (TCP z 1.000 -> 0.988, cup Z ~120 mm; scripts/shift_cup_receiver_height.py).
+        # Before: right_target [-0.16152563, -0.58901731, 0.45633236, -1.45799409, -0.6106615, -0.19015171, 1.25868023],
+        # continuous [-0.19872184, -0.47642001, 0.54535301, -1.50014605, -0.51284845, -0.12609283, 1.12535801]
+        # 2026-11-27: left hold 8 mm lower (TCP z 0.9472 -> 0.9392; hands' fingers collided at the insert).
+        # Before: left_target [-0.15714083, 0.37945894, -0.44538296, -1.61585321, 0.16935813, 0.132273, -1.16007363]
         # Previous right_target: [-0.15991552, -0.6942645, 0.33626403, -1.26587322, -0.74302606, -0.28713782, 1.51884724]
         steps:
         - cup_ready
@@ -400,21 +405,21 @@ handover_demo:
           planning_tolerance: 0.0005
           timeout: 60.0
           left_target:
-          - -0.15714083
-          - 0.37945894
-          - -0.44538296
-          - -1.61585321
-          - 0.16935813
-          - 0.132273
-          - -1.16007363
+          - -0.15805616
+          - 0.372606
+          - -0.45007758
+          - -1.58263362
+          - 0.16333874
+          - 0.10250078
+          - -1.1608273
           right_target:
-          - -0.16152563
-          - -0.58901731
-          - 0.45633236
-          - -1.45799409
-          - -0.6106615
-          - -0.19015171
-          - 1.25868023
+          - -0.16689005
+          - -0.56646028
+          - 0.46308456
+          - -1.40465305
+          - -0.59675961
+          - -0.22609564
+          - 1.27616791
       # cup_handover_continuous: cup_ready + this insert as one smoothed path (no stop at ready).
       # Right target: IK of cup_insert's pose; left_target must equal cup_ready's (left holds still).
       cup_left_to_right_continuous:
@@ -430,21 +435,21 @@ handover_demo:
           planning_tolerance: 0.0005
           timeout: 30.0
           left_target:
-          - -0.15714083
-          - 0.37945894
-          - -0.44538296
-          - -1.61585321
-          - 0.16935813
-          - 0.132273
-          - -1.16007363
+          - -0.15805616
+          - 0.372606
+          - -0.45007758
+          - -1.58263362
+          - 0.16333874
+          - 0.10250078
+          - -1.1608273
           right_target:
-          - -0.19872184
-          - -0.47642001
-          - 0.54535301
-          - -1.50014605
-          - -0.51284845
-          - -0.12609283
-          - 1.12535801
+          - -0.2009687
+          - -0.4572138
+          - 0.55094011
+          - -1.44670567
+          - -0.50021233
+          - -0.16550647
+          - 1.14046971
       cup_left_to_right_grasp:
         steps:
         - cup_insert
@@ -459,7 +464,7 @@ handover_demo:
           target:
           - 0.38
           - 0.04
-          - 1.0
+          - 0.988  # 2026-11-27: was 1.0 (right grasp at cup Z ~120 mm)
           - 0.5
           - -0.5
           - 0.5
@@ -497,7 +502,7 @@ handover_demo:
           target:
           - 0.38
           - 0.066022
-          - 0.947235
+          - 0.939235  # 2026-11-27: was 0.947235, left hold 8 mm lower
           - -0.430459
           - -0.430459
           - -0.560986
@@ -531,7 +536,7 @@ handover_demo:
           target:
           - 0.38
           - -0.053978
-          - 0.947235
+          - 0.939235  # 2026-11-27: was 0.947235, left hold 8 mm lower
           - -0.430459
           - -0.430459
           - -0.560986
@@ -571,7 +576,7 @@ handover_demo:
           target:
           - 0.38
           - -0.16
-          - 1.0
+          - 0.988  # 2026-11-27: was 1.0, same height as the menu 7 insert
           - 0.5
           - -0.5
           - 0.5

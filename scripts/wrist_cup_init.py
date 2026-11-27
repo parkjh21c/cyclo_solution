@@ -26,7 +26,7 @@ class WristCupInit(Node):
         self.cup_id = self.declare_parameter("cup_id", "cup").value
         self.inner = self.declare_parameter("inner_radius", 0.045).value
         self.wall = self.declare_parameter("wall_thickness", 0.005).value
-        self.cup_height = self.declare_parameter("cup_height", 0.165).value
+        self.cup_height = self.declare_parameter("cup_height", 0.134).value
         self.table_z = self.declare_parameter("table_z", 0.725).value
         self.workspace = self.declare_parameter("workspace", [0.25, 0.9, -0.1, 0.6]).value
         self.near = self.declare_parameter("depth_min_m", 0.15).value

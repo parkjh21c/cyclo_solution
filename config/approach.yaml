@@ -5,15 +5,15 @@ handover_demo:
       cup_source: wrist_left_init
       # BODY Z is assumed at cup middle for this test; it is not a measured opening.
       # Cup model top = BODY Z + height/2. TCP target = BODY Z + height + offset_z.
-      cup_height: 0.165
-      inner_radius: 0.045
+      cup_height: 0.134
+      inner_radius: 0.040
       wall_thickness: 0.005
-      # MoveIt cup cylinder only: rim outer radius (88 mm rim, 64 mm base, 166 mm high, measured
-      # 2026-11-18) plus min(position error, scene_margin). Perception and targets use the above.
-      scene_radius: 0.044
+      # MoveIt cup cylinder only: rim outer radius (straight cup: 90 mm outer, 80 mm inner, 134 mm high,
+      # 2026-11-27) plus min(position error, scene_margin). Perception and targets use the above.
+      scene_radius: 0.045
       scene_margin: 0.01
       offset_xy: [0.0, 0.0] # forward_offset now shifts the target along the hand heading.
-      offset_z: -0.05 # Lower TCP target by 5 cm; cup collision model stays unchanged.
+      offset_z: -0.035 # TCP ~32 mm above the rim (was -0.05 with the 165 mm cup); cup model unchanged.
       # Goal-only body-frame hand tilt: forward=-TCP Z; up/camera=+TCP X. Yaw can be restricted to forward/inward.
       tcp_roll_limit_deg: 10.0
       tcp_pitch_min_deg: 20.0

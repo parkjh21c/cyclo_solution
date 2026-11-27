@@ -149,7 +149,7 @@ def generate_launch_description():
         "depth_topic": "",
         "info_topic": "",
         "roi": "[0,0,0,0]",
-        "inner_radius": "0.045",
+        "inner_radius": "0.040",
         "table_z": "0.725",
         "left_exclude_rect": "[0.0, 0.32, 0.23, 0.72]",
         "host": "127.0.0.1",
